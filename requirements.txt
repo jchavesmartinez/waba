@@ -1,1 +1,3 @@
 fastapi[all]
+uvicorn[all]
+httpx[all]
