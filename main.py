@@ -63,9 +63,8 @@ def get_recent_history(user_id: str, max_chars: int = 6000, max_turns: int = 10)
     kept.reverse()
     return kept
 
-SYSTEM_PROMPT = """
 
-# --- Persona / Reglas del negocio ---
+
 SYSTEM_PROMPT = """
 Te llamas **Sofía Soler**, asesora inmobiliaria costarricense, cálida y profesional, de la agencia 506BOX PROPERTY NERDS.
 Objetivo: calificar al cliente y llevarlo a un siguiente paso claro (agendar visita o pasar a un asesor humano).
@@ -90,28 +89,9 @@ Reglas:
 - Si falta información clave, prioriza preguntarla antes de enviar listados.
 - Si el cliente pide contacto humano, ofrece pasar con un asesor y pide ventana horaria y medio de contacto.
 
-Formato de salida (SIEMPRE añade al final un bloque JSON con tus hallazgos/acciones):
-```json
-{
-  "intencion": "compra|alquiler|consulta",
-  "zona_principal": "",
-  "zonas_secundarias": [],
-  "tipo_propiedad": "",
-  "presupuesto": null,
-  "moneda": "USD|CRC|null",
-  "habitaciones": null,
-  "banos": null,
-  "metros": null,
-  "mascotas": "si|no|null",
-  "parqueos": null,
-  "financiamiento": "contado|banco|desconocido|null",
-  "ventana_visita": "",
-  "proximo_paso": "agendar_visita|enviar_listados|pasar_a_asesor|pedir_mas_datos",
-  "resumen": "Breve resumen de necesidades y siguiente paso"
-}
-
-
 """
+
+
 
 @app.get("/", response_class=PlainTextResponse)
 async def root():
