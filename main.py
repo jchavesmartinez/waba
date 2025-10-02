@@ -1,4 +1,5 @@
-import os, json, sqlite3, time
+# filename: app.py
+import os, json, sqlite3, time, asyncio
 from contextlib import contextmanager
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import PlainTextResponse
@@ -35,6 +36,15 @@ def init_db():
             ts      INTEGER
         )""")
         con.execute("CREATE INDEX IF NOT EXISTS ix_hist_user_ts ON chat_history(user_id, ts)")
+        # Mensajes pendientes para agrupar por debounce
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS pending_msgs(
+            user_id   TEXT,
+            content   TEXT,
+            ts        INTEGER,
+            processed INTEGER DEFAULT 0
+        )""")
+        con.execute("CREATE INDEX IF NOT EXISTS ix_pending_user ON pending_msgs(user_id)")
 init_db()
 
 def save_msg(user_id: str, role: str, content: str):
@@ -55,6 +65,7 @@ def get_recent_history(user_id: str, max_chars: int = 6000, max_turns: int = 10)
     rows = rows[::-1]
     total = 0
     kept = []
+    # Seleccionamos desde el final hacia atrás, respetando max_chars
     for role, content in reversed(rows):
         total += len(content)
         if total > max_chars:
@@ -63,10 +74,38 @@ def get_recent_history(user_id: str, max_chars: int = 6000, max_turns: int = 10)
     kept.reverse()
     return kept
 
+def enqueue_pending(user_id: str, content: str):
+    now = int(time.time())
+    with db() as con:
+        # Guardamos en historial de inmediato (para contexto del modelo)
+        con.execute(
+            "INSERT INTO chat_history(user_id, role, content, ts) VALUES (?,?,?,?)",
+            (user_id, "user", content, now)
+        )
+        # Acumulamos como pendiente para la ráfaga
+        con.execute(
+            "INSERT INTO pending_msgs(user_id, content, ts, processed) VALUES (?,?,?,0)",
+            (user_id, content, now)
+        )
 
+def fetch_unprocessed(user_id: str):
+    with db() as con:
+        cur = con.execute(
+            "SELECT content, ts FROM pending_msgs WHERE user_id=? AND processed=0 ORDER BY ts ASC",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+    return rows
+
+def mark_processed(user_id: str):
+    with db() as con:
+        con.execute(
+            "UPDATE pending_msgs SET processed=1 WHERE user_id=? AND processed=0",
+            (user_id,)
+        )
 
 SYSTEM_PROMPT = """
-Te llamas **Sofía Soler**, asesora inmobiliaria costarricense, cálida y profesional, de la agencia 506BOX PROPERTY NERDS.
+Te llamas Sofía Soler, asesora inmobiliaria costarricense, cálida y profesional, de la agencia 506BOX PROPERTY NERDS.
 Objetivo: calificar al cliente y llevarlo a un siguiente paso claro (agendar visita o pasar a un asesor humano).
 
 Estilo:
@@ -88,10 +127,9 @@ Reglas:
 - Mantén empatía ante objeciones; ofrece opciones.
 - Si falta información clave, prioriza preguntarla antes de enviar listados.
 - Si el cliente pide contacto humano, ofrece pasar con un asesor y pide ventana horaria y medio de contacto.
-
+- Siempre al iniciar la conversación presentarse diciendo tu nombre ( Sofia ) y también preguntar el nombre del cliente
+- Hablar en "usted" y nunca en "tu"
 """
-
-
 
 @app.get("/", response_class=PlainTextResponse)
 async def root():
@@ -107,6 +145,58 @@ async def verify(
         return hub_challenge or ""
     raise HTTPException(status_code=403, detail="Verification failed")
 
+# === Debounce infra (30s por usuario) ===
+DEBOUNCE_SECONDS = 30
+DEBOUNCE_TASKS: dict[str, asyncio.Task] = {}
+PHONE_ID_CACHE: dict[str, str] = {}  # último phone_number_id por usuario
+
+async def debounce_fire(user_id: str, phone_number_id: str):
+    try:
+        await asyncio.sleep(DEBOUNCE_SECONDS)
+        # Tomamos todos los mensajes aún no procesados
+        pending = fetch_unprocessed(user_id)
+        if not pending:
+            return
+
+        # Construimos el prompt con el historial reciente (ya incluye los mensajes del cliente)
+        history = get_recent_history(user_id)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages.extend(history)
+
+        # También agregamos un bloque explicando al modelo que integre los últimos N mensajes
+        # (opcional, ayuda a forzar integración)
+        joined = "\n".join(f"- {c}" for c, _ in pending)
+        messages.append({
+            "role": "user",
+            "content": f"Integra y responde en UN solo mensaje considerando estos mensajes recientes:\n{joined}"
+        })
+
+        reply = await call_openai(messages)
+        if not reply:
+            reply = "Hubo un problema al generar la respuesta."
+
+        # Guardamos y enviamos
+        save_msg(user_id, "assistant", reply)
+        await send_whatsapp_text(phone_number_id, user_id, reply)
+
+        # Marcamos procesados los pendientes
+        mark_processed(user_id)
+
+    finally:
+        # Limpiamos el task del usuario si sigue siendo el mismo
+        t = DEBOUNCE_TASKS.get(user_id)
+        if t and t.done():
+            DEBOUNCE_TASKS.pop(user_id, None)
+
+async def schedule_debounce(user_id: str, phone_number_id: str):
+    # Cacheamos el phone_number_id (por si no lo mandan igual después)
+    PHONE_ID_CACHE[user_id] = phone_number_id
+    # Si ya había un temporizador, lo cancelamos y recreamos
+    old = DEBOUNCE_TASKS.get(user_id)
+    if old and not old.done():
+        old.cancel()
+    task = asyncio.create_task(debounce_fire(user_id, PHONE_ID_CACHE[user_id]))
+    DEBOUNCE_TASKS[user_id] = task
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -117,30 +207,25 @@ async def webhook(request: Request):
         for change in entry.get("changes", []):
             value = change.get("value", {})
             phone_number_id = value.get("metadata", {}).get("phone_number_id")
-
-
             for msg in (value.get("messages") or []):
                 if msg.get("type") != "text":
                     continue
-
                 user_text = msg.get("text", {}).get("body", "")
-                user_id   = msg.get("from")  
+                user_id   = msg.get("from")
 
-                reply_text = await ask_chatgpt_with_history(user_id, user_text)
-                await send_whatsapp_text(phone_number_id, user_id, reply_text)
+                if not user_text or not user_id:
+                    continue
+
+                # Encolamos el mensaje y reprogramamos el temporizador de 30s
+                enqueue_pending(user_id, user_text)
+                await schedule_debounce(user_id, phone_number_id)
 
     return {"status": "ok"}
 
-async def ask_chatgpt_with_history(user_id: str, new_user_text: str) -> str:
+async def call_openai(messages: list[dict]) -> str:
     if not OPENAI_API_KEY:
         print("OPENAI_API_KEY faltante")
-        return "Lo siento, no estoy configurado para responder en este momento."
-
-    history = get_recent_history(user_id)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": new_user_text})
-
+        return ""
     url = "https://api.openai.com/v1/responses"
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -148,29 +233,24 @@ async def ask_chatgpt_with_history(user_id: str, new_user_text: str) -> str:
     }
     payload = {"model": OPENAI_MODEL, "input": messages}
 
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with httpx.AsyncClient(timeout=40) as client:
         r = await client.post(url, headers=headers, json=payload)
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError:
             print("OpenAI error:", r.status_code, r.text)
-            save_msg(user_id, "user", new_user_text)
-            return "Hubo un problema al generar la respuesta."
-
+            return ""
         data = r.json()
-        reply = "No pude entender la respuesta del modelo."
         try:
             parts = data.get("output", [])
             if parts and "content" in parts[0]:
                 contents = parts[0]["content"]
                 if contents and "text" in contents[0]:
-                    reply = (contents[0]["text"] or "").strip()
+                    return (contents[0]["text"] or "").strip()
         except Exception as e:
             print("Parse error:", e)
-
-    save_msg(user_id, "user", new_user_text)
-    save_msg(user_id, "assistant", reply)
-    return reply
+            return ""
+    return ""
 
 async def send_whatsapp_text(phone_number_id: str, to_msisdn: str, text: str):
     if not (phone_number_id and to_msisdn and WABA_TOKEN):
