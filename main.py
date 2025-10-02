@@ -27,11 +27,10 @@ def db():
 
 def init_db():
     with db() as con:
-        # historial por usuario (wa_id)
         con.execute("""
         CREATE TABLE IF NOT EXISTS chat_history(
             user_id TEXT,
-            role    TEXT,         -- 'user' | 'assistant' | 'system'
+            role    TEXT,
             content TEXT,
             ts      INTEGER
         )""")
@@ -46,10 +45,6 @@ def save_msg(user_id: str, role: str, content: str):
         )
 
 def get_recent_history(user_id: str, max_chars: int = 6000, max_turns: int = 10):
-    """
-    Devuelve mensajes recientes para ese usuario, recortando para no exceder límites.
-    (Aproximación por caracteres; suficiente para la mayoría de casos.)
-    """
     with db() as con:
         cur = con.execute(
             "SELECT role, content FROM chat_history WHERE user_id=? ORDER BY ts DESC LIMIT ?",
@@ -57,8 +52,7 @@ def get_recent_history(user_id: str, max_chars: int = 6000, max_turns: int = 10)
         )
         rows = cur.fetchall()
 
-    rows = rows[::-1]  # cronológico
-    # recorte simple por caracteres
+    rows = rows[::-1]
     total = 0
     kept = []
     for role, content in reversed(rows):
@@ -69,14 +63,60 @@ def get_recent_history(user_id: str, max_chars: int = 6000, max_turns: int = 10)
     kept.reverse()
     return kept
 
+SYSTEM_PROMPT = """
 
-# --- Health ---
+# --- Persona / Reglas del negocio ---
+SYSTEM_PROMPT = """
+Te llamas **Sofía Soler**, asesora inmobiliaria costarricense, cálida y profesional, de la agencia 506BOX PROPERTY NERDS.
+Objetivo: calificar al cliente y llevarlo a un siguiente paso claro (agendar visita o pasar a un asesor humano).
+
+Estilo:
+- Tono cercano, respetuoso, con chispa y profesionalismo latino.
+- Frases cortas, claras; evita tecnicismos innecesarios.
+- Siempre respondes en español de Costa Rica.
+
+Flujo conversacional (estricto, en este orden, UNA pregunta de calificación a la vez):
+1) Saludo breve + UNA pregunta de calificación.
+2) Identificar: intención (compra/alquiler); zona preferida; zonas cercanas aceptables; tipo de propiedad; presupuesto y moneda;
+   habitaciones/baños; metros aproximados; forma de pago/financiamiento (si compra); ventana de visita; mascotas; parqueos.
+3) Si la zona está en GAM (Escazú, Santa Ana, Rohrmoser, Sabana, Heredia, Curridabat, etc.), sugiere sutilmente alternativas cercanas.
+4) Propón el siguiente paso (agendar visita o derivar a un asesor humano), confirmando día/horario preferido.
+
+Reglas:
+- Máximo 1–2 preguntas por mensaje.
+- No des asesoría legal/tributaria/financiera; sugiere consultar a un profesional cuando corresponda.
+- No prometas precios, tasas ni disponibilidad; usa lenguaje condicional (“podemos explorar”, “podría estar disponible”).
+- Mantén empatía ante objeciones; ofrece opciones.
+- Si falta información clave, prioriza preguntarla antes de enviar listados.
+- Si el cliente pide contacto humano, ofrece pasar con un asesor y pide ventana horaria y medio de contacto.
+
+Formato de salida (SIEMPRE añade al final un bloque JSON con tus hallazgos/acciones):
+```json
+{
+  "intencion": "compra|alquiler|consulta",
+  "zona_principal": "",
+  "zonas_secundarias": [],
+  "tipo_propiedad": "",
+  "presupuesto": null,
+  "moneda": "USD|CRC|null",
+  "habitaciones": null,
+  "banos": null,
+  "metros": null,
+  "mascotas": "si|no|null",
+  "parqueos": null,
+  "financiamiento": "contado|banco|desconocido|null",
+  "ventana_visita": "",
+  "proximo_paso": "agendar_visita|enviar_listados|pasar_a_asesor|pedir_mas_datos",
+  "resumen": "Breve resumen de necesidades y siguiente paso"
+}
+
+
+"""
+
 @app.get("/", response_class=PlainTextResponse)
 async def root():
     return "OK"
 
-
-# --- Verificación del webhook (GET con hub.challenge) ---
 @app.get("/webhook", response_class=PlainTextResponse)
 async def verify(
     hub_mode: str | None        = Query(None, alias="hub.mode"),
@@ -88,7 +128,6 @@ async def verify(
     raise HTTPException(status_code=403, detail="Verification failed")
 
 
-# --- Recepción de eventos (POST) ---
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
@@ -99,34 +138,26 @@ async def webhook(request: Request):
             value = change.get("value", {})
             phone_number_id = value.get("metadata", {}).get("phone_number_id")
 
-            # mensajes entrantes
+
             for msg in (value.get("messages") or []):
                 if msg.get("type") != "text":
                     continue
 
                 user_text = msg.get("text", {}).get("body", "")
-                user_id   = msg.get("from")  # wa_id del usuario
+                user_id   = msg.get("from")  
 
-                # 1) Pedir a OpenAI con HISTORIAL de ese usuario
                 reply_text = await ask_chatgpt_with_history(user_id, user_text)
-
-                # 2) Responder por WhatsApp con la salida de OpenAI
                 await send_whatsapp_text(phone_number_id, user_id, reply_text)
 
     return {"status": "ok"}
 
-
-# --- OpenAI (Responses API) con historial ---
 async def ask_chatgpt_with_history(user_id: str, new_user_text: str) -> str:
     if not OPENAI_API_KEY:
         print("OPENAI_API_KEY faltante")
         return "Lo siento, no estoy configurado para responder en este momento."
 
-    # Recuperar historial reciente de ese usuario
     history = get_recent_history(user_id)
-
-    # Construir mensajes: system + historial + mensaje actual
-    messages = [{"role": "system", "content": "Eres un asistente útil. Responde siempre en español, claro y conciso."}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(history)
     messages.append({"role": "user", "content": new_user_text})
 
@@ -143,13 +174,10 @@ async def ask_chatgpt_with_history(user_id: str, new_user_text: str) -> str:
             r.raise_for_status()
         except httpx.HTTPStatusError:
             print("OpenAI error:", r.status_code, r.text)
-            # Guarda el turno del usuario aunque falle, por trazabilidad
             save_msg(user_id, "user", new_user_text)
             return "Hubo un problema al generar la respuesta."
 
         data = r.json()
-
-        # Intentar extraer el texto (formato de Responses API)
         reply = "No pude entender la respuesta del modelo."
         try:
             parts = data.get("output", [])
@@ -160,13 +188,10 @@ async def ask_chatgpt_with_history(user_id: str, new_user_text: str) -> str:
         except Exception as e:
             print("Parse error:", e)
 
-    # Guardar el turno completo (user + assistant)
     save_msg(user_id, "user", new_user_text)
     save_msg(user_id, "assistant", reply)
     return reply
 
-
-# --- WhatsApp Cloud API ---
 async def send_whatsapp_text(phone_number_id: str, to_msisdn: str, text: str):
     if not (phone_number_id and to_msisdn and WABA_TOKEN):
         print("Faltan phone_number_id / to_msisdn / WABA_TOKEN")
@@ -180,7 +205,7 @@ async def send_whatsapp_text(phone_number_id: str, to_msisdn: str, text: str):
         "messaging_product": "whatsapp",
         "to": to_msisdn,
         "type": "text",
-        "text": {"body": text[:4000]},  # límite de WhatsApp
+        "text": {"body": text[:4000]},
     }
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(url, headers=headers, json=payload)
