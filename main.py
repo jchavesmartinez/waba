@@ -146,7 +146,7 @@ async def verify(
     raise HTTPException(status_code=403, detail="Verification failed")
 
 # === Debounce infra (30s por usuario) ===
-DEBOUNCE_SECONDS = 30
+DEBOUNCE_SECONDS = 5
 DEBOUNCE_TASKS: dict[str, asyncio.Task] = {}
 PHONE_ID_CACHE: dict[str, str] = {}  # último phone_number_id por usuario
 
