@@ -114,3 +114,30 @@ del service account (permiso Lector). No necesitás credenciales por cliente.
 
 - Token de WhatsApp temporal dura 24h; para producción generá el permanente.
 - Render Free duerme a los 15 min; para producción, Starter (~$7/mes).
+
+---
+
+## Catálogo de datos (governance) — OBLIGATORIO
+
+Cada Sheet de datos debe tener una pestaña llamada **`_catalogo`** (con guion bajo).
+El bot NO la trata como tabla consultable; la usa para responder preguntas de
+governance. Si falta, el bot avisa que el catálogo no está documentado.
+
+Cualquier pestaña que empiece con `_` se excluye de las tablas consultables.
+
+**Estructura de la pestaña `_catalogo`** (primera fila = encabezados exactos):
+
+| tabla | columna | descripcion | sistema_origen | frecuencia | dueño |
+|---|---|---|---|---|---|
+| ventas | * | Registro de ventas diarias | POS Toshiba | Diaria | Gerencia comercial |
+| ventas | monto | Monto de la venta en colones | POS Toshiba | Diaria | Gerencia comercial |
+| ventas | vendedor | Vendedor que cerró la venta | CRM interno | Diaria | RRHH |
+
+- Una fila con `columna = *` describe la tabla completa.
+- Las demás filas describen cada columna.
+
+**Qué puede responder el bot ahora:**
+- Datos: "¿cuánto se vendió?", "¿quién vendió más?"
+- Governance: "¿de qué sistema vienen estos datos?", "¿qué significa monto?",
+  "¿quién es el dueño de esta data?", "¿cada cuánto se actualiza?"
+- Saludos: responde con una bienvenida y ejemplos de lo que puede hacer.

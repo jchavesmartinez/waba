@@ -1,11 +1,17 @@
 """
-Ingesta de los Sheets de DATOS -> DuckDB, por cliente.
+Ingesta de los Sheets de DATOS -> DuckDB, por cliente, + lectura del CATALOGO.
 
-Cada cliente tiene su propio spreadsheet_id (sale del registro). Este modulo
-mantiene un cache de conexiones DuckDB, una por spreadsheet_id, cada una con su
-TTL. Asi el bot consulta los datos del cliente correcto sin mezclar.
+Cada Sheet de datos de un cliente tiene:
+  - Una o mas pestanias de DATOS (ventas, inventario, etc.) -> tablas consultables.
+  - Una pestania obligatoria '_catalogo' con la metadata/governance.
 
-Cada pestania del Sheet de datos se vuelve una tabla de DuckDB (multiples tablas).
+Las pestanias que empiezan con '_' NO se cargan como tablas consultables
+(son metadata, no datos). El catalogo se lee aparte y se usa para responder
+preguntas de governance.
+
+Estructura esperada de la pestania '_catalogo' (primera fila = encabezados):
+  tabla | columna | descripcion | sistema_origen | frecuencia | dueño
+Una fila con columna = '*' describe la tabla completa.
 """
 
 import time
@@ -20,7 +26,9 @@ from gclient import abrir_libro
 
 logger = logging.getLogger("fachavi.sheets")
 
-# Cache por spreadsheet_id: {sid: {"ts": epoch, "con": duckdb_con, "schema": str}}
+CATALOGO_SHEET = "_catalogo"
+
+# Cache por spreadsheet_id: {sid: {"ts", "con", "schema", "catalogo"}}
 _cache = {}
 
 
@@ -51,13 +59,55 @@ def _coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _leer_catalogo(libro) -> str:
+    """
+    Lee la pestania '_catalogo' y arma un texto de metadata para el prompt.
+    Lanza excepcion si no existe (catalogo obligatorio).
+    """
+    try:
+        ws = libro.worksheet(CATALOGO_SHEET)
+    except Exception:  # noqa: BLE001
+        raise RuntimeError("SIN_CATALOGO")
+
+    filas = ws.get_all_records()
+    if not filas:
+        raise RuntimeError("SIN_CATALOGO")
+
+    lineas = []
+    for f in filas:
+        # Normaliza claves (quita espacios/tabs invisibles en encabezados)
+        f = { str(k).strip().lower(): str(v).strip() for k, v in f.items() }
+        tabla = f.get("tabla", "")
+        columna = f.get("columna", "")
+        desc = f.get("descripcion", "")
+        sistema = f.get("sistema_origen", "")
+        frec = f.get("frecuencia", "")
+        dueno = f.get("dueño", "") or f.get("dueno", "")
+
+        if columna == "*" or not columna:
+            lineas.append(
+                f"Tabla '{tabla}': {desc}. Sistema de origen: {sistema}. "
+                f"Frecuencia de actualizacion: {frec}. Dueño del dato: {dueno}."
+            )
+        else:
+            lineas.append(
+                f"Columna '{columna}' (tabla '{tabla}'): {desc}. "
+                f"Origen: {sistema}. Actualizacion: {frec}. Dueño: {dueno}."
+            )
+    return "\n".join(lineas)
+
+
 def _build(spreadsheet_id: str):
-    """Lee todas las pestanias del Sheet de datos de un cliente -> DuckDB."""
+    """Lee pestanias de datos -> DuckDB, y el catalogo aparte."""
     libro = abrir_libro(spreadsheet_id)
     con = duckdb.connect(database=":memory:")
     schema_parts = []
 
     for ws in libro.worksheets():
+        # Saltar pestanias de metadata (empiezan con '_')
+        if ws.title.startswith("_"):
+            continue
+
         registros = ws.get_all_values()
         if not registros or len(registros) < 2:
             continue
@@ -82,15 +132,21 @@ def _build(spreadsheet_id: str):
     if not schema_parts:
         raise RuntimeError("El Sheet de datos no tiene pestanias con datos.")
 
-    return con, "\n\n".join(schema_parts)
+    # Catalogo obligatorio
+    catalogo = _leer_catalogo(libro)
+
+    return con, "\n\n".join(schema_parts), catalogo
 
 
-def get_connection(spreadsheet_id: str):
-    """Devuelve (con, schema) para el Sheet de datos de un cliente, con cache TTL."""
+def get_data(spreadsheet_id: str):
+    """
+    Devuelve (con, schema, catalogo) para el Sheet de datos de un cliente,
+    con cache TTL. 'catalogo' es el texto de metadata/governance.
+    """
     ahora = time.time()
     entry = _cache.get(spreadsheet_id)
     if entry and (ahora - entry["ts"]) < config.DATA_CACHE_TTL:
-        return entry["con"], entry["schema"]
+        return entry["con"], entry["schema"], entry["catalogo"]
 
     if entry and entry.get("con") is not None:
         try:
@@ -98,6 +154,8 @@ def get_connection(spreadsheet_id: str):
         except Exception:  # noqa: BLE001
             pass
 
-    con, schema = _build(spreadsheet_id)
-    _cache[spreadsheet_id] = {"ts": ahora, "con": con, "schema": schema}
-    return con, schema
+    con, schema, catalogo = _build(spreadsheet_id)
+    _cache[spreadsheet_id] = {
+        "ts": ahora, "con": con, "schema": schema, "catalogo": catalogo,
+    }
+    return con, schema, catalogo
