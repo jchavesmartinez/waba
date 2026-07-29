@@ -71,16 +71,27 @@ class PostgresDestino(Destino):
             cx.execute(text(
                 f'CREATE TABLE IF NOT EXISTS "{esquema}"."_catalogo" ('
                 "fuente_id TEXT, tabla TEXT, columna TEXT, descripcion TEXT,"
+                "instruccion TEXT,"
                 "sistema_origen TEXT, frecuencia TEXT, dueno TEXT)"
+            ))
+            # Migracion suave: _catalogo creado por una version vieja no tiene
+            # 'instruccion'. La agregamos si falta, para no reventar el INSERT ni
+            # obligar a recrear la tabla a mano en Neon.
+            cx.execute(text(
+                f'ALTER TABLE "{esquema}"."_catalogo" '
+                "ADD COLUMN IF NOT EXISTS instruccion TEXT"
             ))
             cx.execute(text(f'DELETE FROM "{esquema}"."_catalogo" WHERE fuente_id=:f'),
                        {"f": fuente_id})
             for f in filas:
                 cx.execute(text(
-                    f'INSERT INTO "{esquema}"."_catalogo" VALUES '
-                    "(:fid,:tab,:col,:des,:sis,:fre,:due)"),
+                    f'INSERT INTO "{esquema}"."_catalogo" '
+                    "(fuente_id,tabla,columna,descripcion,instruccion,"
+                    "sistema_origen,frecuencia,dueno) VALUES "
+                    "(:fid,:tab,:col,:des,:ins,:sis,:fre,:due)"),
                     {"fid": fuente_id, "tab": f.get("tabla",""), "col": f.get("columna",""),
-                     "des": f.get("descripcion",""), "sis": f.get("sistema_origen",""),
+                     "des": f.get("descripcion",""), "ins": f.get("instruccion",""),
+                     "sis": f.get("sistema_origen",""),
                      "fre": f.get("frecuencia",""), "due": f.get("dueno","")})
         logger.info("catalogo de '%s': %d filas en %s._catalogo", fuente_id, len(filas), esquema)
 
