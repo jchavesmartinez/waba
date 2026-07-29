@@ -145,6 +145,18 @@ def _cargar():
             "frescura_minutos": _parse_entero(f.get("frescura_minutos", 0)),
             "config": _parse_config(f.get("config", "")),
         }
+        # Guarda: el fuente_id debe ser UNICO por cliente. Si se repite, las
+        # dos filas escriben las mismas tablas y se pisan el catalogo entre si,
+        # con resultado distinto segun cual corra primero (o si la frescura
+        # omite una). Se ignora la repetida y se avisa fuerte.
+        ya = {f["fuente_id"] for f in clientes[cid]["fuentes"]}
+        if fuente["fuente_id"] in ya:
+            logger.error(
+                "[%s] fuente_id DUPLICADO '%s' en la pestania 'fuentes'; "
+                "se ignora la fila repetida. Cada fuente necesita un id unico.",
+                cid, fuente["fuente_id"],
+            )
+            continue
         clientes[cid]["fuentes"].append(fuente)
 
     # --- retrocompatibilidad ---

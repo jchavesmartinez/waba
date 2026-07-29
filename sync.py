@@ -153,6 +153,31 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
             corrida.filas += len(df)
 
         corrida.estado = "ok_con_alertas" if corrida.alertas else "ok"
+
+        # Persistir el catalogo (governance) como TABLA en el warehouse.
+        # Es lo que permite que el bot responda preguntas de governance sin
+        # abrir Google Sheets en tiempo de request.
+        #
+        # Condicion clave: solo si la fuente CARGO tablas. Una fuente que no
+        # cargo nada no tiene nada que documentar, y dejarla escribir catalogo
+        # significaria pisar el de otra fuente con filas que no le corresponden.
+        if frag.catalogo_filas and corrida.tablas and not probar:
+            try:
+                destino.escribir_catalogo(esquema, fuente["fuente_id"], frag.catalogo_filas)
+                aplicar = getattr(destino, "aplicar_comentarios", None)
+                if aplicar:
+                    # mapa: nombre logico de la tabla en el catalogo -> tabla real
+                    mapa = {t.lower(): nombre_tabla(fuente["fuente_id"], t)
+                            for t in frag.tablas}
+                    aplicar(esquema, mapa, frag.catalogo_filas)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[%s/%s] no se pudo guardar el catalogo: %s",
+                               cid, fuente["fuente_id"], e)
+                corrida.alertas.append("no se pudo guardar el catalogo")
+        elif frag.catalogo_filas and probar:
+            logger.info("[PRUEBA] catalogo de '%s': %d filas (no se escribe)",
+                        fuente["fuente_id"], len(frag.catalogo_filas))
+
         logger.info(
             "[%s/%s] %s: %d tablas, %d filas",
             cid, fuente["fuente_id"], corrida.estado.upper(),
