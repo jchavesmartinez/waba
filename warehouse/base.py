@@ -127,6 +127,15 @@ class Destino(ABC):
     # --- control / metadata ---
 
     @abstractmethod
+    def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
+        """
+        Persiste el catalogo (governance) de UNA fuente en <esquema>._catalogo.
+        Semantica: borra solo las filas de esa fuente e inserta las nuevas, para
+        no pisar el catalogo de las otras fuentes del mismo cliente (que pueden
+        haberse omitido por frescura en esta corrida).
+        """
+
+    @abstractmethod
     def registrar_corrida(self, corrida: Corrida):
         """Persiste el resultado de una corrida en _meta.sync_corridas."""
 

@@ -58,6 +58,23 @@ class DuckDBDestino(Destino):
         con.unregister("_df_entrante")
         logger.info("escrito %s.%s (%d filas)", esquema, tabla, len(df))
 
+    def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
+        con = self.conectar()
+        self.asegurar_esquema(esquema)
+        con.execute(
+            f'CREATE TABLE IF NOT EXISTS "{esquema}"."_catalogo" ('
+            "fuente_id VARCHAR, tabla VARCHAR, columna VARCHAR, descripcion VARCHAR,"
+            "sistema_origen VARCHAR, frecuencia VARCHAR, dueno VARCHAR)"
+        )
+        con.execute(f'DELETE FROM "{esquema}"."_catalogo" WHERE fuente_id=?', [fuente_id])
+        for f in filas:
+            con.execute(
+                f'INSERT INTO "{esquema}"."_catalogo" VALUES (?,?,?,?,?,?,?)',
+                [fuente_id, f.get("tabla",""), f.get("columna",""), f.get("descripcion",""),
+                 f.get("sistema_origen",""), f.get("frecuencia",""), f.get("dueno","")],
+            )
+        logger.info("catalogo de '%s': %d filas en %s._catalogo", fuente_id, len(filas), esquema)
+
     # --- metadata de corridas ---
 
     def _asegurar_meta(self):
