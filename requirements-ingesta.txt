@@ -1,0 +1,13 @@
+# Dependencias SOLO de la ingesta (Fase 2). El cron no necesita el bot.
+# Build mas rapido y menos superficie de dependencias en el job.
+
+pandas==2.2.3
+pytz==2024.2
+duckdb==1.1.3           # motor temporal de carga (y destino local en dev)
+gspread==6.1.4          # fuentes Google Sheets + registro maestro
+google-auth==2.36.0
+httpx==0.28.1           # fuentes api_rest / csv_url
+
+# Destino Neon / Postgres
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
