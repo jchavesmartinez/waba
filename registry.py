@@ -93,10 +93,18 @@ def _cargar():
             "fuentes": [],
         }
 
-    # --- usuarios ---
-    ws_usr = libro.worksheet("usuarios")
+    # --- usuarios (solo lo usa el BOT para resolver numero -> cliente) ---
+    # Opcional: la ingesta no lo necesita. Asi se puede arrancar la Fase 2 con
+    # un Sheet maestro que solo tenga 'clientes' y 'fuentes'.
     usuarios = {}
-    for f in ws_usr.get_all_records():
+    try:
+        ws_usr = libro.worksheet("usuarios")
+        filas_usr = ws_usr.get_all_records()
+    except Exception:  # noqa: BLE001
+        filas_usr = []
+        logger.info("Sin pestania 'usuarios' (solo hace falta para el bot).")
+
+    for f in filas_usr:
         num = _normaliza_numero(f.get("numero", ""))
         cid = str(f.get("cliente_id", "")).strip()
         if num and cid:
