@@ -20,6 +20,7 @@ responder "¿de cuando es este dato?".
 """
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -61,12 +62,25 @@ def ahora_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _sanear(nombre: str) -> str:
+    """
+    Normaliza un identificador para el warehouse: minusculas y solo
+    [a-z0-9_]. Evita el clasico dolor de Postgres, donde un esquema
+    "raw_Demo" queda sensible a mayusculas y obliga a poner comillas en
+    TODA consulta para siempre.
+    """
+    limpio = re.sub(r"[^0-9a-zA-Z_]", "_", str(nombre).strip().lower())
+    if not limpio or limpio[0].isdigit():
+        limpio = "t_" + limpio
+    return limpio
+
+
 def nombre_esquema(cliente_id: str) -> str:
-    return f"raw_{cliente_id}"
+    return f"raw_{_sanear(cliente_id)}"
 
 
 def nombre_tabla(fuente_id: str, tabla: str) -> str:
-    return f"{fuente_id}__{tabla}"
+    return f"{_sanear(fuente_id)}__{_sanear(tabla)}"
 
 
 def agregar_trazabilidad(df: pd.DataFrame, corrida: Corrida) -> pd.DataFrame:
