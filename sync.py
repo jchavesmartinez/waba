@@ -22,6 +22,7 @@ Uso:
 import argparse
 import logging
 import os
+import re
 import sys
 import uuid
 from datetime import timedelta
@@ -168,13 +169,45 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
     return corrida
 
 
+class _Destinos:
+    """
+    Abre un destino por DSN y lo reutiliza. Si varios clientes comparten el
+    mismo proyecto de Neon, comparten conexion; si cada uno tiene el suyo,
+    se abre una por proyecto y se cierran todas al final.
+    """
+
+    def __init__(self, tipo):
+        self.tipo = tipo
+        self._abiertos = {}
+
+    def para(self, cliente: dict):
+        dsn = config.dsn_de_cliente(cliente)
+        if dsn not in self._abiertos:
+            d = crear_destino(self.tipo, dsn)
+            d.conectar()
+            self._abiertos[dsn] = d
+            logger.info("[%s] warehouse: %s", cliente.get("cliente_id"), _oculta(dsn))
+        return self._abiertos[dsn]
+
+    def cerrar(self):
+        for d in self._abiertos.values():
+            try:
+                d.cerrar()
+            except Exception:  # noqa: BLE001
+                pass
+        self._abiertos.clear()
+
+
+def _oculta(dsn: str) -> str:
+    """Enmascara la clave del DSN para poder loguearlo sin filtrar el secreto."""
+    return re.sub(r"//[^:]+:[^@]+@", "//***:***@", dsn)
+
+
 def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
     """Recorre el registro completo y sincroniza lo que corresponda."""
-    destino = crear_destino(config.WAREHOUSE_TIPO, config.WAREHOUSE_DSN)
-    destino.conectar()
-    logger.info("Warehouse: %s -> %s", config.WAREHOUSE_TIPO, config.WAREHOUSE_DSN)
-
+    destinos = _Destinos(config.WAREHOUSE_TIPO)
     resumen = {"ok": 0, "ok_con_alertas": 0, "error": 0, "omitido": 0, "filas": 0, "alertas": []}
+
     try:
         for cliente in registry.listar_clientes():
             cid = cliente["cliente_id"]
@@ -185,15 +218,23 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
                 logger.warning("[%s] sin fuentes activas", cid)
                 continue
 
+            try:
+                destino = destinos.para(cliente)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("[%s] no se pudo abrir su warehouse: %s", cid, e)
+                resumen["error"] += 1
+                continue
+
             for fuente in activas:
-                corrida = sincronizar_fuente(destino, cliente, fuente, forzar=forzar, probar=probar)
+                corrida = sincronizar_fuente(destino, cliente, fuente,
+                                             forzar=forzar, probar=probar)
                 if not probar:
                     destino.registrar_corrida(corrida)
                 resumen["alertas"] += corrida.alertas
                 resumen[corrida.estado] = resumen.get(corrida.estado, 0) + 1
                 resumen["filas"] += corrida.filas
     finally:
-        destino.cerrar()
+        destinos.cerrar()
 
     logger.info(
         "RESUMEN: %d ok, %d con alertas, %d error, %d omitidas, %d filas",
@@ -209,12 +250,16 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
 
 def mostrar_estado():
     """Imprime cuando se sincronizo por ultima vez cada fuente."""
-    destino = crear_destino(config.WAREHOUSE_TIPO, config.WAREHOUSE_DSN)
-    destino.conectar()
+    destinos = _Destinos(config.WAREHOUSE_TIPO)
     try:
         print(f"\n{'cliente':<16}{'fuente':<20}{'frescura':<12}{'ultima carga OK':<26}")
         print("-" * 74)
         for cliente in registry.listar_clientes():
+            try:
+                destino = destinos.para(cliente)
+            except Exception as e:  # noqa: BLE001
+                print(f"{cliente['cliente_id']:<16}ERROR de warehouse: {e}")
+                continue
             for f in cliente.get("fuentes", []):
                 if not f.get("activo", True):
                     continue
@@ -227,7 +272,7 @@ def mostrar_estado():
                 )
         print()
     finally:
-        destino.cerrar()
+        destinos.cerrar()
 
 
 if __name__ == "__main__":
