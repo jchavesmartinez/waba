@@ -31,8 +31,11 @@ logger = logging.getLogger("fachavi.sources")
 class Fragmento:
     """Aporte de una fuente al pipeline, ya cargada en la DuckDB compartida."""
     schema: str = ""                       # descripcion de tablas para el prompt SQL
-    catalogo: str = ""                     # metadata/governance para el prompt de governance
+    catalogo: str = ""                     # metadata/governance como texto (para el prompt)
     tablas: List[str] = field(default_factory=list)  # nombres finales de las tablas cargadas
+    # Filas estructuradas del catalogo, para persistirlas como TABLA en el
+    # warehouse. Asi el bot consulta governance sin tocar Google Sheets.
+    catalogo_filas: List[dict] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
