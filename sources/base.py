@@ -105,6 +105,23 @@ def normalizar_columnas(nombres) -> list:
     return limpios
 
 
+def _a_fecha(serie: pd.Series) -> pd.Series:
+    """
+    Convierte a fecha tolerando los formatos que aparecen en la practica:
+      - Google Sheets en es-CR : 07/01/2026        (dia primero)
+      - ISO de APIs            : 2026-01-07T14:30:00Z
+      - ISO con hora           : 2026-01-07 00:00:00
+
+    'format=mixed' parsea cada valor por separado, que es lo unico que acierta
+    en los cuatro casos. Con dayfirst=True desempata el 07/01 a favor de
+    'dia/mes', que es la convencion tica.
+    """
+    try:
+        return pd.to_datetime(serie, errors="coerce", format="mixed", dayfirst=True)
+    except (ValueError, TypeError):
+        return pd.to_datetime(serie, errors="coerce", dayfirst=True)
+
+
 def inferir_tipos(df: pd.DataFrame) -> pd.DataFrame:
     """
     Convierte columnas de texto a numero o fecha cuando >=80% de los valores
@@ -112,19 +129,23 @@ def inferir_tipos(df: pd.DataFrame) -> pd.DataFrame:
     """
     for col in df.columns:
         serie = df[col]
+        umbral = max(1, int(0.8 * len(serie)))
+
         limpio = (
             serie.astype(str)
             .str.replace(r"[,\s₡$]", "", regex=True)
             .str.replace(r"^$", "nan", regex=True)
         )
         num = pd.to_numeric(limpio, errors="coerce")
-        if num.notna().sum() >= max(1, int(0.8 * len(serie))):
+        if num.notna().sum() >= umbral:
             df[col] = num
             continue
-        fecha = pd.to_datetime(serie, errors="coerce", dayfirst=True)
-        if fecha.notna().sum() >= max(1, int(0.8 * len(serie))):
+
+        fecha = _a_fecha(serie)
+        if fecha.notna().sum() >= umbral:
             df[col] = fecha
             continue
+
         df[col] = serie.astype(str)
     return df
 
