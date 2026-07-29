@@ -12,6 +12,12 @@ sqlglot==30.14.0             # valida el SQL generado antes de ejecutarlo
 sqlalchemy==2.0.51
 psycopg2-binary==2.9.12
 
+# El bot importa helpers de warehouse.base (nombre_tabla, nombre_esquema) que
+# son solo strings, pero ese modulo carga pandas en el top -> hay que traerlo
+# aunque el bot no lo use. Version igual a la de la ingesta. (Ver nota abajo:
+# se puede desacoplar para NO cargar pandas en el bot.)
+pandas==3.0.5
+
 # Resolucion numero->cliente desde el Sheet maestro (reusa registry.py)
 gspread==6.2.1
 google-auth==2.36.0
