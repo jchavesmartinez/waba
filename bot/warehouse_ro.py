@@ -1,0 +1,115 @@
+"""
+Acceso de SOLO LECTURA al warehouse (Neon / Postgres) de un cliente.
+
+El bot NUNCA escribe. Esta capa:
+  - resuelve a que proyecto de Neon va cada cliente (reusa
+    config.dsn_de_cliente, la MISMA logica que usa la ingesta),
+  - cachea un engine de SQLAlchemy por DSN,
+  - ejecuta SQL dentro de una transaccion READ ONLY, con:
+      * search_path fijado al esquema del cliente (raw_<cliente_id>), para que
+        el modelo pueda nombrar las tablas sin prefijo y NO pueda saltar a otro
+        esquema por descuido;
+      * statement_timeout, que corta consultas que se pasen de tiempo;
+      * un tope de filas aplicado por la app (fetchmany), por si el SQL no trae
+        LIMIT.
+
+Esto es la ULTIMA linea de defensa, no la unica: el SQL ya viene validado por
+bot/nl2sql.py (solo SELECT, solo tablas permitidas). Aca la garantia es que,
+aunque algo se colara, la transaccion es de solo lectura y Postgres aborta
+cualquier escritura.
+"""
+
+import logging
+
+from sqlalchemy import create_engine, text
+
+import config
+from warehouse.base import nombre_esquema
+
+logger = logging.getLogger("fachavi.bot.warehouse_ro")
+
+_engines: dict = {}
+
+
+def _engine(cliente: dict):
+    """Devuelve (y cachea) un engine para el DSN de este cliente."""
+    dsn = config.dsn_de_cliente(cliente)
+    if dsn not in _engines:
+        # pool_pre_ping: las bases serverless de Neon se duermen; sin esto la
+        # primera consulta tras un rato falla con "connection closed".
+        _engines[dsn] = create_engine(dsn, pool_pre_ping=True)
+        logger.info("engine RO abierto para cliente '%s'", cliente.get("cliente_id"))
+    return _engines[dsn]
+
+
+def _prep(cx, esquema: str):
+    """Configura la sesion de solo lectura sobre una transaccion ya abierta."""
+    # READ ONLY tiene que ser lo primero de la transaccion. Aunque el SQL se
+    # cuele con un INSERT/UPDATE, Postgres lo rechaza.
+    cx.execute(text("SET TRANSACTION READ ONLY"))
+    cx.execute(text(f"SET LOCAL statement_timeout = {int(config.BOT_TIMEOUT_MS)}"))
+    # Aisla al cliente: solo ve su esquema. Sin 'public' ni otros raw_*.
+    cx.execute(text(f'SET LOCAL search_path = "{esquema}"'))
+
+
+def ejecutar(cliente: dict, sql: str, limite: int | None = None):
+    """
+    Ejecuta SQL (ya validado como solo-lectura) y devuelve (columnas, filas).
+
+    `filas` es una lista de tuplas; se corta a `limite` filas (por defecto
+    config.BOT_MAX_FILAS) aunque el SELECT devolviera mas.
+    """
+    limite = limite or config.BOT_MAX_FILAS
+    esquema = nombre_esquema(cliente["cliente_id"])
+    with _engine(cliente).connect() as cx:
+        trans = cx.begin()
+        try:
+            _prep(cx, esquema)
+            res = cx.execute(text(sql))
+            columnas = list(res.keys())
+            filas = [tuple(r) for r in res.fetchmany(limite)]
+            return columnas, filas
+        finally:
+            # Nunca commit: es solo lectura, no hay nada que confirmar.
+            trans.rollback()
+
+
+def listar_columnas(cliente: dict, tablas_reales) -> dict:
+    """
+    Devuelve {tabla_real: [(columna, tipo), ...]} leyendo information_schema,
+    SOLO de las tablas que se le pasan (las permitidas por el catalogo).
+    """
+    tablas = list(tablas_reales or [])
+    if not tablas:
+        return {}
+    esquema = nombre_esquema(cliente["cliente_id"])
+    sql = """
+        SELECT table_name, column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = :esq AND table_name = ANY(:tablas)
+        ORDER BY table_name, ordinal_position
+    """
+    filas = leer_interno(cliente, sql, {"esq": esquema, "tablas": tablas})
+    out: dict = {}
+    for f in filas:
+        out.setdefault(f["table_name"], []).append((f["column_name"], f["data_type"]))
+    return out
+
+
+def leer_interno(cliente: dict, sql: str, params: dict | None = None):
+    """
+    Consulta CONFIABLE de la propia app (catalogo, information_schema). No pasa
+    por el validador de nl2sql porque el SQL lo escribimos nosotros, con
+    parametros ligados. Igual corre READ ONLY y con search_path del cliente.
+    """
+    esquema = nombre_esquema(cliente["cliente_id"])
+    with _engine(cliente).connect() as cx:
+        trans = cx.begin()
+        try:
+            _prep(cx, esquema)
+            res = cx.execute(text(sql), params or {})
+            columnas = list(res.keys())
+            filas = [dict(zip(columnas, r)) for r in res.fetchall()]
+            return filas
+        finally:
+            trans.rollback()
