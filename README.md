@@ -182,6 +182,27 @@ vencido), se registra el error en la bitácora y el job sigue con las demás. El
 error queda **auditado, no silenciado**: `--estado` lo muestra como `NUNCA` o con
 la fecha vieja.
 
+### Un warehouse por cliente (aislamiento fisico)
+
+Cada cliente puede aterrizar en **su propio proyecto de Neon**, no solo en un
+esquema distinto del mismo proyecto. Con el free tier de Neon (0.5 GB por
+proyecto, hasta 100 proyectos) eso le da a cada cliente su propio espacio.
+
+El DSN **nunca** va en el Sheet maestro — llevaria la contrasenia en una hoja de
+calculo. Se resuelve por variable de entorno, en este orden:
+
+1. La variable nombrada en la columna opcional `dsn_env` de la pestania `clientes`
+2. Por convencion: `WAREHOUSE_DSN_<CLIENTE_ID en mayusculas>`
+3. `WAREHOUSE_DSN` global (todos comparten proyecto, separados por esquema)
+
+Ejemplo: para darle a `ferreteria_a` su propio proyecto, basta con agregar en
+Render la variable `WAREHOUSE_DSN_FERRETERIA_A`. Sin tocar codigo ni el Sheet.
+Asi se puede empezar con un proyecto compartido y migrar clientes de a uno.
+
+Nota: con proyectos separados, la bitacora `_meta.sync_corridas` vive en cada
+proyecto. `--estado` recorre todos los clientes y consulta el warehouse de cada
+uno, asi que sigue mostrando el panorama completo.
+
 ### Elegir warehouse
 
 | Opción | `WAREHOUSE_TIPO` | `WAREHOUSE_DSN` |
