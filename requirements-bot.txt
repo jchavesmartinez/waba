@@ -4,7 +4,7 @@
 
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-python-multipart==0.0.20     # Twilio manda el webhook como form-urlencoded
+httpx==0.28.1                # llamada saliente al Graph API de Meta (enviar msg)
 anthropic==0.40.0            # text-to-SQL + redaccion de la respuesta
 sqlglot==30.14.0             # valida el SQL generado antes de ejecutarlo
 

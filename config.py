@@ -89,3 +89,33 @@ BOT_PERMITIR_SIN_INSTRUCCION = (
     os.environ.get("BOT_PERMITIR_SIN_INSTRUCCION", "no").strip().lower()
     in ("si", "sí", "true", "1", "yes")
 )
+
+# --------------------------------------------------------------------------
+# WhatsApp Cloud API (Meta / Graph API) — transporte del bot.
+# Reemplaza a Twilio: el mensaje entra como JSON en el webhook y la respuesta
+# se manda con una llamada SALIENTE aparte al Graph API (no se responde en el
+# mismo HTTP response como hacia TwiML).
+# --------------------------------------------------------------------------
+
+# Token de acceso de la app de WhatsApp (Bearer). En produccion usa un
+# System User token permanente; el temporal del panel dura 24 h.
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
+
+# ID del NUMERO de telefono (phone_number_id), NO el WABA id ni el numero en si.
+# Es lo que va en la URL de envio: /{version}/{phone_number_id}/messages.
+WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
+
+# Token que VOS inventas y pegas en el panel de Meta al configurar el webhook.
+# Meta lo devuelve en el GET de verificacion (hub.verify_token) y debe coincidir.
+WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
+
+# App secret de la app de Meta. Si esta seteado, se valida la firma
+# X-Hub-Signature-256 de cada POST (recomendado). Vacio = no se valida (dev).
+WHATSAPP_APP_SECRET = os.environ.get("WHATSAPP_APP_SECRET", "")
+
+# Version del Graph API. Se puede subir sin tocar codigo.
+GRAPH_API_VERSION = os.environ.get("GRAPH_API_VERSION", "v21.0")
+
+# Tope de caracteres del cuerpo de un mensaje de texto de WhatsApp (limite de
+# Meta = 4096). Si la respuesta se pasa, se recorta antes de enviar.
+WHATSAPP_MAX_CHARS = int(os.environ.get("WHATSAPP_MAX_CHARS", "4096"))

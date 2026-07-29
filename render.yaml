@@ -44,9 +44,10 @@ services:
         sync: false
 
   # --- BOT de WhatsApp (capa de lectura) ---
-  # Servicio web que recibe el webhook de Twilio, resuelve numero->cliente,
-  # decide tablas por el catalogo y responde con text-to-SQL. Comparte el mismo
-  # Sheet maestro y el mismo Neon que la ingesta (solo lee).
+  # Servicio web que recibe el webhook de la Meta Cloud API, resuelve
+  # numero->cliente, decide tablas por el catalogo y responde con text-to-SQL
+  # (la respuesta sale por una llamada al Graph API). Comparte el mismo Sheet
+  # maestro y el mismo Neon que la ingesta (solo lee).
   - type: web
     name: fachavi-bot
     runtime: python
@@ -73,3 +74,14 @@ services:
       # Tabla sin 'instruccion' en el catalogo: no = fail-closed (seguro).
       - key: BOT_PERMITIR_SIN_INSTRUCCION
         value: "no"
+      # --- WhatsApp Cloud API (Meta) ---
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: GRAPH_API_VERSION
+        value: v21.0

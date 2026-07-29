@@ -122,8 +122,8 @@ controla con `BOT_PERMITIR_SIN_INSTRUCCION` (por defecto `no` = fail-closed).
 Paquete `bot/`. **Solo lee del warehouse**, nunca de los sistemas fuente.
 
 ```
-WhatsApp (Twilio)
-   |  bot/app.py         webhook FastAPI (From, Body)
+WhatsApp (Meta Cloud API)
+   |  bot/app.py         webhook FastAPI (JSON) + envio por Graph API
    v
 numero -> cliente        registry.resolver() sobre la pestaña 'usuarios'
    |
@@ -142,8 +142,12 @@ respuesta en español     bot/nl2sql.redactar_respuesta()
 ```
 
 Correr local: `uvicorn bot.app:app --reload --port 8000`, exponer con
-ngrok/cloudflared y pegar la URL `/webhook` en la consola de Twilio.
-Dependencias: `pip install -r requirements-bot.txt`.
+ngrok/cloudflared y en el panel de Meta (**WhatsApp > Configuration**) pegar la
+URL `.../webhook` y el mismo `WHATSAPP_VERIFY_TOKEN`. Meta hace primero un `GET`
+de verificación (devuelve `hub.challenge`) y luego manda los mensajes por `POST`
+en JSON; la respuesta al usuario sale por una llamada al Graph API
+(`bot/whatsapp.py`), no en el mismo response. Dependencias:
+`pip install -r requirements-bot.txt`.
 
 Dos barreras de seguridad, no una: (1) el prompt solo contiene el schema de las
 tablas permitidas; (2) el SQL se valida antes de ejecutarse y corre en una
