@@ -97,6 +97,59 @@ Una fila con `columna = *` describe la tabla completa.
 En Postgres, además de la tabla, las descripciones se escriben como **`COMMENT ON`
 nativo**, así Metabase, DBeaver o dbt las muestran sin conocer este catálogo.
 
+### La columna `instruccion` (qué puede leer el bot)
+
+El catálogo tiene una columna **`instruccion`** de texto libre que gobierna qué
+tablas puede consultar el bot de WhatsApp. Es **dato, no código**: se edita en el
+Sheet del cliente y viaja a `raw_<cliente>._catalogo` en cada corrida.
+
+| tabla | columna | instruccion |
+|---|---|---|
+| ventas | * | esta tabla puede ser usada por el bot |
+| nomina | * | uso interno, no exponer al bot |
+
+El bot lee ese texto (`bot/catalogo.py`) y decide **tabla por tabla**: si la
+instrucción habilita → entra al set consultable; si prohíbe o está vacía → queda
+fuera y **el modelo ni sabe que existe**. La política ante instrucción vacía se
+controla con `BOT_PERMITIR_SIN_INSTRUCCION` (por defecto `no` = fail-closed).
+
+> **Importante:** re-corré la ingesta (`python sync.py --forzar`) después de
+> agregar la columna `instruccion` al Sheet, para que aparezca en Neon. El
+> catálogo viejo se migra solo (la escritura hace `ADD COLUMN IF NOT EXISTS`).
+
+## El bot de WhatsApp (capa de lectura)
+
+Paquete `bot/`. **Solo lee del warehouse**, nunca de los sistemas fuente.
+
+```
+WhatsApp (Twilio)
+   |  bot/app.py         webhook FastAPI (From, Body)
+   v
+numero -> cliente        registry.resolver() sobre la pestaña 'usuarios'
+   |
+   v
+raw_<cliente>._catalogo  bot/catalogo.py: filtra tablas por 'instruccion'
+   |                     y arma el schema de SOLO las permitidas
+   v
+text-to-SQL              bot/nl2sql.py: Claude genera un SELECT; se VALIDA con
+   |                     sqlglot (1 sentencia, solo SELECT, solo tablas de la
+   |                     lista blanca, sin esquema ajeno) antes de correrlo
+   v
+bot/warehouse_ro.py      ejecuta en transacción READ ONLY (search_path al
+   |                     esquema del cliente, statement_timeout, tope de filas)
+   v
+respuesta en español     bot/nl2sql.redactar_respuesta()
+```
+
+Correr local: `uvicorn bot.app:app --reload --port 8000`, exponer con
+ngrok/cloudflared y pegar la URL `/webhook` en la consola de Twilio.
+Dependencias: `pip install -r requirements-bot.txt`.
+
+Dos barreras de seguridad, no una: (1) el prompt solo contiene el schema de las
+tablas permitidas; (2) el SQL se valida antes de ejecutarse y corre en una
+transacción de solo lectura. Aunque algo se colara, Postgres aborta cualquier
+escritura.
+
 ## Controles de calidad
 
 - **Normalización determinista de encabezados.** Encabezado vacío → `columna_N`;
