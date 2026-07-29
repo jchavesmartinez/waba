@@ -145,7 +145,9 @@ class GoogleSheetsSource(Source):
         filas = ws.get_all_records()
         if not filas:
             return "", []
-        # Normaliza claves para que la tabla del warehouse tenga columnas fijas
+        # Normaliza claves para que la tabla del warehouse tenga columnas fijas.
+        # 'instruccion' es gobernanza que consume el BOT (que tablas puede leer),
+        # por eso ahora VIAJA hasta el warehouse en vez de quedarse en el Sheet.
         norm = []
         for f in filas:
             f = {str(k).strip().lower(): str(v).strip() for k, v in f.items()}
@@ -153,6 +155,7 @@ class GoogleSheetsSource(Source):
                 "tabla": f.get("tabla", ""),
                 "columna": f.get("columna", ""),
                 "descripcion": f.get("descripcion", ""),
+                "instruccion": f.get("instruccion", ""),
                 "sistema_origen": f.get("sistema_origen", ""),
                 "frecuencia": f.get("frecuencia", ""),
                 "dueno": f.get("dueño", "") or f.get("dueno", ""),

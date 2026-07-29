@@ -203,8 +203,12 @@ def construir_catalogo(filas: List[dict]) -> str:
     """
     Formatea filas de catalogo (misma estructura para toda fuente) a texto para
     el prompt de governance. Cada fila es un dict con las claves:
-      tabla | columna | descripcion | sistema_origen | frecuencia | dueno
+      tabla | columna | descripcion | instruccion | sistema_origen | frecuencia | dueno
     Una fila con columna == '*' (o vacia) describe la tabla completa.
+
+    'instruccion' es texto libre de gobernanza (p.ej. "esta tabla puede ser
+    usada por el bot"). El bot lo usa para decidir que tablas puede consultar;
+    aca solo se documenta.
     """
     lineas = []
     for f in filas:
@@ -212,18 +216,20 @@ def construir_catalogo(filas: List[dict]) -> str:
         tabla = f.get("tabla", "")
         columna = f.get("columna", "")
         desc = f.get("descripcion", "")
+        instr = f.get("instruccion", "")
         sistema = f.get("sistema_origen", "")
         frec = f.get("frecuencia", "")
         dueno = f.get("dueño", "") or f.get("dueno", "")
 
+        extra = f" Instruccion: {instr}." if instr else ""
         if columna in ("*", ""):
             lineas.append(
                 f"Tabla '{tabla}': {desc}. Sistema de origen: {sistema}. "
-                f"Frecuencia de actualizacion: {frec}. Dueño del dato: {dueno}."
+                f"Frecuencia de actualizacion: {frec}. Dueño del dato: {dueno}.{extra}"
             )
         else:
             lineas.append(
                 f"Columna '{columna}' (tabla '{tabla}'): {desc}. "
-                f"Origen: {sistema}. Actualizacion: {frec}. Dueño: {dueno}."
+                f"Origen: {sistema}. Actualizacion: {frec}. Dueño: {dueno}.{extra}"
             )
     return "\n".join(lineas)
