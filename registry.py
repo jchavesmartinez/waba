@@ -99,6 +99,9 @@ def _cargar():
         clientes[cid] = {
             "cliente_id": cid,
             "nombre": str(f.get("nombre", "")).strip(),
+            # Opcional: nombre de la VARIABLE DE ENTORNO que guarda el DSN de
+            # este cliente. Nunca el DSN en si (llevaria la clave en el Sheet).
+            "dsn_env": str(f.get("dsn_env", "")).strip(),
             # legado: spreadsheet_id directo en la fila de cliente (opcional)
             "_spreadsheet_id_legado": str(f.get("spreadsheet_id", "")).strip(),
             "fuentes": [],
