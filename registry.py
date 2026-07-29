@@ -51,10 +51,21 @@ def _parse_activo(v) -> bool:
 
 
 def _parse_entero(v) -> int:
-    """Convierte a entero; vacio o invalido -> 0."""
+    """
+    Convierte a entero; vacio o invalido -> 0.
+
+    Tolera '15.0': Google Sheets y pandas devuelven los numeros como float
+    segun el formato de la celda, y un int('15.0') pelado revienta. Ese fallo
+    era SILENCIOSO: la frescura caia a 0 y la fuente se resincronizaba en cada
+    corrida, gastando llamadas de API sin que nadie lo notara.
+    """
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none"):
+        return 0
     try:
-        return int(str(v).strip() or 0)
+        return int(float(s))
     except ValueError:
+        logger.warning("Valor entero invalido en el registro: %r -> se usa 0", v)
         return 0
 
 
