@@ -78,7 +78,15 @@ El número puede ir con o sin `+`, con espacios o guiones — el bot lo normaliz
 ### Config por tipo de fuente
 
 - **`google_sheets`** → `{"spreadsheet_id": "1AbC..."}`
-  Cada pestaña que no empiece con `_` es una tabla; `_catalogo` aporta governance.
+  Cada pestaña que no empiece con `_` se carga como una tabla; `_catalogo` aporta
+  governance. Un Sheet con pestañas `ventas` e `inventario` produce **dos tablas**
+  con una sola fila en `fuentes`.
+  Filtros opcionales de pestañas:
+  - `{"spreadsheet_id":"1AbC...","hojas":["ventas"]}` → **solo** esas pestañas
+  - `{"spreadsheet_id":"1AbC...","excluir":["notas"]}` → todas menos esas
+
+  El filtro `hojas` sirve para partir **un mismo Sheet en varias fuentes** y darle
+  a cada una su propia `frescura_minutos` (ver abajo).
 - **`csv_url`** → `{"url": "https://.../datos.csv", "tabla": "ventas"}`
   o varias: `{"tablas":[{"url":"...","tabla":"ventas"},{"url":"...","tabla":"inv"}]}`.
   Catálogo opcional inline: `{"url":"...","tabla":"ventas","catalogo":[{...}]}`.
