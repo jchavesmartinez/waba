@@ -1,325 +1,171 @@
-# FACHAVI SQL Bot — Multi-cliente
+# FACHAVI — Capa de ingesta (Fase 2)
 
-Bot de WhatsApp que responde preguntas en lenguaje natural sobre los datos de
-**varios clientes**, todos escribiendo al **mismo número**. Según quién escribe,
-el bot resuelve a qué cliente pertenece y consulta **su** Google Sheet de datos.
+Extrae datos de los sistemas fuente de cada cliente y los aterriza en un
+warehouse (Neon / Postgres). **Corre fuera de cualquier request**, como job
+programado.
 
-## Cómo distingue a los clientes
-
-Un solo número de WhatsApp (el de Fachavi) atiende a todos. Cuando llega un
-mensaje, el bot mira el número de quien escribe y lo busca en un **Sheet maestro**
-(el registro). Un mismo cliente puede tener varios usuarios (varios números).
+> Este repo es **solo la ingesta**. El bot de WhatsApp se reconstruirá aparte y
+> leerá del warehouse — nunca de los sistemas fuente. Por eso acá no hay nada de
+> WhatsApp, Anthropic ni text-to-SQL.
 
 ```
-Cliente escribe -> POST /webhook (200 al instante)
-  -> resolver(número) en el Sheet maestro:
-        número -> cliente_id -> lista de FUENTES del cliente
-  -> si NO está registrado: mensaje pidiendo contactar a FACHAVI
-  -> si está: cargar TODAS sus fuentes ACTIVAS en UNA sola DuckDB
-        (Google Sheets, CSV, Postgres, ... combinadas y consultables juntas)
-  -> Claude genera SQL -> ejecutar -> Claude redacta -> responder
+Sheets / CSV / API / Postgres          (sistemas fuente del cliente)
+        |
+        v   job programado, respeta frescura por fuente
+    sync.py
+        |
+        v
+   raw_<cliente>.<fuente>__<tabla>     (datos, con columnas de linaje)
+   raw_<cliente>._catalogo             (governance)
+   _meta.sync_corridas                 (bitácora de todas las corridas)
 ```
 
-## Arquitectura modular de fuentes (encendé/apagá por cliente)
+## Cómo correr
 
-Cada cliente puede tener **varias fuentes de datos**, y cada una se **prende o
-apaga** desde el registro sin tocar código ni redeploy. Todas las fuentes
-activas de un cliente se cargan en **la misma** base DuckDB en memoria, así se
-pueden **cruzar datos entre fuentes** en una sola consulta (p.ej. ventas de
-Google Sheets con inventario de un Postgres).
+```bash
+python sync.py --probar           # extrae y muestra, NO escribe (al dar de alta)
+python sync.py                    # corrida normal, respeta frescura
+python sync.py --cliente demo     # solo un cliente
+python sync.py --forzar           # ignora frescura, recarga todo
+python sync.py --estado           # ¿cuándo se cargó cada fuente por última vez?
+```
 
-El pipeline (`nl2sql.py`) no sabe de dónde salen los datos: solo ve una conexión
-DuckDB, un texto de *schema* y un texto de *catálogo*. Por eso **agregar una
-fuente nueva = escribir una subclase**; no se toca el pipeline.
-
-Tipos de fuente incluidos: `google_sheets`, `csv_url`, `postgres` (ejemplo listo
-para activar).
+En Render el modo se controla con la variable **`SYNC_ARGS`**, sin tocar código.
 
 ## El Sheet maestro (registro)
 
-Es un Google Sheet **tuyo**, aparte de los Sheets de datos. Tiene dos pestañas:
+Un Google Sheet tuyo, aparte de los de datos. Dos pestañas obligatorias:
 
-**Pestaña `clientes`:**
+**`clientes`** — `cliente_id | nombre | [dsn_env]`
 
-| cliente_id | nombre | spreadsheet_id |
-|---|---|---|
-| ferreteria_a | Ferretería A | 1AbC... (ID del Sheet de datos de A) |
-| farmacia_b | Farmacia B | 1XyZ... (ID del Sheet de datos de B) |
-
-**Pestaña `usuarios`:**
-
-| numero | cliente_id |
+| cliente_id | nombre |
 |---|---|
-| 50688889999 | ferreteria_a |
-| 50611112222 | ferreteria_a |
-| 50677778888 | farmacia_b |
+| cliente_a | Cliente A |
 
-**Pestaña `fuentes`** (la parte modular — una fila por fuente de cada cliente):
+`cliente_id` da nombre al esquema en el warehouse (`cliente_a` → `raw_cliente_a`).
+Usar minúsculas, sin espacios ni tildes. La columna `dsn_env` es opcional (ver
+"un warehouse por cliente").
 
-| cliente_id | fuente_id | tipo | activo | config |
-|---|---|---|---|---|
-| ferreteria_a | ventas_sheet | google_sheets | si | `{"spreadsheet_id":"1AbC..."}` |
-| ferreteria_a | inv_csv | csv_url | no | `{"url":"https://.../inv.csv","tabla":"inventario"}` |
-| farmacia_b | erp | postgres | si | `{"dsn":"postgresql://...","tablas":["ventas"]}` |
+**`fuentes`** — una fila por fuente de datos de cada cliente
 
-- `activo`: `si` / `no` → así se **prende o apaga** una fuente. Cambiás la celda
-  y listo (efectivo en el próximo refresco del registro, `REGISTRY_CACHE_TTL`).
-- `config`: **JSON** con los datos de conexión de esa fuente (ver cada tipo abajo).
+| cliente_id | fuente_id | tipo | activo | frescura_minutos | config |
+|---|---|---|---|---|---|
+| cliente_a | sheet_ventas | google_sheets | si | 15 | `{"spreadsheet_id":"1AbC...","hojas":["ventas"]}` |
+| cliente_a | sheet_inventario | google_sheets | si | 1440 | `{"spreadsheet_id":"1AbC...","hojas":["inventario"]}` |
 
-Para dar de alta un cliente nuevo: agregás una fila en `clientes`, sus números
-en `usuarios`, y una o más filas en `fuentes`. **Sin tocar código ni redeploy.**
-El número puede ir con o sin `+`, con espacios o guiones — el bot lo normaliza.
+- **`fuente_id` debe ser único por cliente.** Si se repite, las dos filas escriben
+  las mismas tablas y se pisan el catálogo entre sí. El registro ignora la
+  repetida y lo avisa en el log.
+- **`activo`**: `si` / `no` → así se prende y apaga una fuente, sin tocar código.
+- **`frescura_minutos`**: cada cuánto vale la pena re-sincronizar. `0` o vacío =
+  en cada corrida. Un solo cron, N frecuencias efectivas.
+- **`config`**: JSON con los datos de conexión (ver abajo por tipo).
 
-> **Retrocompatibilidad:** si un cliente **no** tiene filas en `fuentes` pero sí
-> un `spreadsheet_id` en la pestaña `clientes`, el bot lo trata como una única
-> fuente `google_sheets` activa. Tu configuración actual sigue funcionando sin
-> cambios; podés migrar a `fuentes` cuando quieras.
+Una pestaña `usuarios` puede existir para el futuro bot; la ingesta la ignora.
 
-### Config por tipo de fuente
+## Config por tipo de fuente
 
 - **`google_sheets`** → `{"spreadsheet_id": "1AbC..."}`
-  Cada pestaña que no empiece con `_` se carga como una tabla; `_catalogo` aporta
-  governance. Un Sheet con pestañas `ventas` e `inventario` produce **dos tablas**
-  con una sola fila en `fuentes`.
-  Filtros opcionales de pestañas:
-  - `{"spreadsheet_id":"1AbC...","hojas":["ventas"]}` → **solo** esas pestañas
-  - `{"spreadsheet_id":"1AbC...","excluir":["notas"]}` → todas menos esas
+  Cada pestaña que no empiece con `_` se carga como tabla. Un Sheet con pestañas
+  `ventas` e `inventario` produce **dos tablas** con una sola fila en `fuentes`.
+  Filtros opcionales:
+  - `{"spreadsheet_id":"...","hojas":["ventas"]}` → **solo** esas pestañas
+  - `{"spreadsheet_id":"...","excluir":["notas"]}` → todas menos esas
 
-  El filtro `hojas` sirve para partir **un mismo Sheet en varias fuentes** y darle
-  a cada una su propia `frescura_minutos` (ver abajo).
-- **`csv_url`** → `{"url": "https://.../datos.csv", "tabla": "ventas"}`
-  o varias: `{"tablas":[{"url":"...","tabla":"ventas"},{"url":"...","tabla":"inv"}]}`.
-  Catálogo opcional inline: `{"url":"...","tabla":"ventas","catalogo":[{...}]}`.
-- **`postgres`** → `{"dsn":"postgresql://user:pass@host:5432/db","tablas":["ventas"],"esquema":"public"}`
-  Trae una copia de solo lectura de cada tabla; la base del cliente no se toca.
+  `hojas` sirve para partir **un mismo Sheet en varias fuentes** y darle a cada
+  una su propia `frescura_minutos`.
+- **`csv_url`** → `{"url":"https://.../datos.csv","tabla":"ventas"}`
+  o varias: `{"tablas":[{"url":"...","tabla":"ventas"},{"url":"...","tabla":"inv"}]}`
+- **`api_rest`** → `{"url":"https://api...","tabla":"ventas","ruta_datos":"data.items"}`
+  Admite `headers` (auth), `params` y `paginacion`. El JSON anidado se aplana solo.
+- **`postgres`** → `{"dsn":"postgresql://...","tablas":["ventas"],"esquema":"public"}`
+  Trae una copia de solo lectura; la base del cliente no se toca.
 
-## Un solo service account para todo
+## Catálogo de datos (governance)
 
-El **mismo** service account de Google lee el Sheet maestro Y los Sheets de datos
-de todos los clientes. Cada cliente solo comparte su hoja con el `client_email`
-del service account (permiso Lector). No necesitás credenciales por cliente.
+**No se configura como fuente: viaja solo.** Cada Sheet puede tener una pestaña
+`_catalogo` y la ingesta la persiste en `raw_<cliente>._catalogo`, filtrada a las
+tablas que esa fuente cargó.
+
+| tabla | columna | descripcion | sistema_origen | frecuencia | dueño |
+|---|---|---|---|---|---|
+| ventas | * | Registro de ventas | POS | Diaria | Gerencia comercial |
+| ventas | monto_total | Monto en colones | POS | Diaria | Gerencia comercial |
+
+Una fila con `columna = *` describe la tabla completa.
+
+En Postgres, además de la tabla, las descripciones se escriben como **`COMMENT ON`
+nativo**, así Metabase, DBeaver o dbt las muestran sin conocer este catálogo.
+
+## Controles de calidad
+
+- **Normalización determinista de encabezados.** Encabezado vacío → `columna_N`;
+  duplicado → `monto`, `monto_2`. Si no lo hiciéramos nosotros, cada motor
+  inventaría nombres distintos.
+- **Schema drift.** Cada corrida guarda columnas y conteo. Si aparecen o
+  desaparecen columnas, la corrida queda `ok_con_alertas` con el detalle, pero
+  escribe igual.
+- **Guarda de borrado.** Si una tabla llega **vacía** y antes tenía filas, la
+  escritura se **bloquea**: como la carga es full refresh, escribir cero filas
+  encima borraría la única copia buena. Caída de más del 50% alerta, no bloquea.
+- **Aislamiento de fallos.** Si una fuente truena, se registra el error en la
+  bitácora y el job sigue con las demás.
+
+## Un warehouse por cliente (opcional)
+
+Cada cliente puede aterrizar en **su propio proyecto de Neon**. El DSN **nunca**
+va en el Sheet — llevaría la contraseña en una hoja de cálculo. Se resuelve por
+variable de entorno, en este orden:
+
+1. La variable nombrada en la columna `dsn_env` de `clientes`
+2. Por convención: `WAREHOUSE_DSN_<CLIENTE_ID en mayúsculas>`
+3. `WAREHOUSE_DSN` global (todos comparten proyecto, separados por esquema)
+
+Para darle a `cliente_a` su propio proyecto basta con agregar
+`WAREHOUSE_DSN_CLIENTE_A` en Render. Sin tocar código ni el Sheet.
 
 ## Archivos
 
 | Archivo | Rol |
 |---|---|
-| `main.py` | Webhook; resuelve cliente por número y orquesta |
-| `registry.py` | Lee el Sheet maestro (clientes/usuarios/**fuentes**), resuelve número->cliente |
+| `sync.py` | Job de ingesta: frescura, calidad, linaje, bitácora |
+| `registry.py` | Lee el Sheet maestro (clientes/fuentes) |
 | `gclient.py` | Autenticación única del service account de Google |
-| `loader.py` | **Orquestador**: combina las fuentes activas del cliente en una DuckDB; caché por cliente |
-| `sources/base.py` | Contrato `Source` + `Fragmento` + helpers compartidos |
-| `sources/__init__.py` | Registro de tipos de fuente + `crear_fuente()` (factory) |
-| `sources/google_sheets.py` | Fuente Google Sheets (datos + `_catalogo`) |
-| `sources/csv_url.py` | Fuente CSV por URL (una o varias tablas) |
-| `sources/postgres.py` | Fuente PostgreSQL (ejemplo listo para activar) |
-| `nl2sql.py` | Motor text-to-SQL: genera, valida, ejecuta, redacta |
-| `memory.py` | Memoria de conversación (separada por cliente:usuario) |
-| `whatsapp.py` | Envío por Graph API |
-| `config.py` | Config desde variables de entorno |
+| `config.py` | Config desde variables de entorno + resolución de DSN por cliente |
+| `sources/base.py` | Contrato `Source` + helpers compartidos |
+| `sources/__init__.py` | Registro de tipos de fuente + factory |
+| `sources/google_sheets.py`, `csv_url.py`, `api_rest.py`, `postgres.py` | Connectors |
+| `warehouse/base.py` | Contrato `Destino` |
+| `warehouse/duckdb_dest.py` | DuckDB local / MotherDuck |
+| `warehouse/postgres_dest.py` | Neon / Supabase / Postgres |
+| `render.yaml` | Blueprint del cron job |
 
-## Fase 2 — Job de ingesta (`sync.py`)
-
-La ingesta corre **fuera** del request de WhatsApp. El bot ya no lee las fuentes:
-lee el warehouse. Esto desacopla la disponibilidad (si Google se cae, el bot
-sigue respondiendo con la última carga) y baja la latencia a una consulta SQL.
-
-```bash
-python sync.py --probar           # extrae y muestra, NO escribe (usar al dar de alta)
-python sync.py                    # todos los clientes, respeta frescura
-python sync.py --cliente ferre_a  # solo un cliente
-python sync.py --forzar           # ignora frescura, recarga todo
-python sync.py --estado           # ¿cuándo se cargó cada fuente por última vez?
-```
-
-### Controles de calidad (semilla de la Fase 6)
-
-**Normalización determinista de encabezados.** Los Sheets reales traen columnas
-duplicadas y encabezados vacíos. Si no los normalizamos nosotros, DuckDB inventa
-`C3`/`monto_1` y Postgres se comporta distinto — la misma hoja daría nombres
-distintos según el warehouse. Regla: encabezado vacío → `columna_N` (por
-posición); duplicado → `monto`, `monto_2`, `monto_3`.
-
-**Schema drift.** Cada corrida guarda las columnas y el conteo de filas de cada
-tabla. En la siguiente se compara: si aparecen o desaparecen columnas, la corrida
-queda en estado `ok_con_alertas` con el detalle, pero **sí escribe** (agregar una
-columna suele ser legítimo).
-
-**Guarda de borrado.** Si una tabla llega **vacía** y antes tenía filas, la
-escritura se **bloquea**. Como la carga es full refresh, escribir cero filas
-encima borraría la única copia buena. Se conserva el dato anterior y se alerta.
-Una caída de más del 50% de filas alerta pero no bloquea.
-
-**Modo prueba (`--probar`).** Extrae de las fuentes y muestra qué tablas y
-columnas produciría, sin escribir ni registrar nada. Es lo que hay que correr al
-dar de alta la fuente de un cliente nuevo, antes de automatizar.
-
-**Frescura por fuente, no global.** En la pestaña `fuentes` del Sheet maestro se
-agrega la columna `frescura_minutos`. El job omite las fuentes que todavía están
-frescas, así no gasta llamadas de API de gusto:
-
-| cliente_id | fuente_id | tipo | activo | frescura_minutos | config |
-|---|---|---|---|---|---|
-| ferreteria_a | sheet_ventas | google_sheets | si | 15 | `{"spreadsheet_id":"1AbC..."}` |
-| ferreteria_a | sheet_inv | google_sheets | si | 1440 | `{"spreadsheet_id":"1XyZ..."}` |
-
-`0` o vacío = sin política (se sincroniza en cada corrida).
-
-**Cómo queda el warehouse.** Un esquema por cliente (aislamiento), una tabla por
-fuente y pestaña:
-
-```
-raw_ferreteria_a.sheet_ventas__ventas
-raw_ferreteria_a.sheet_inv__inventario
-_meta.sync_corridas                     <- bitácora de todas las corridas
-```
-
-**Linaje (Fase 0).** Cada fila escrita lleva `_corrida_id`, `_fuente_id` e
-`_ingestado_en`. Con eso podés rastrear cualquier número hasta la corrida que lo
-trajo, y responder "¿de cuándo es este dato?".
-
-**Aislamiento de fallos.** Si una fuente truena (Sheet no compartido, token
-vencido), se registra el error en la bitácora y el job sigue con las demás. El
-error queda **auditado, no silenciado**: `--estado` lo muestra como `NUNCA` o con
-la fecha vieja.
-
-### Un warehouse por cliente (aislamiento fisico)
-
-Cada cliente puede aterrizar en **su propio proyecto de Neon**, no solo en un
-esquema distinto del mismo proyecto. Con el free tier de Neon (0.5 GB por
-proyecto, hasta 100 proyectos) eso le da a cada cliente su propio espacio.
-
-El DSN **nunca** va en el Sheet maestro — llevaria la contrasenia en una hoja de
-calculo. Se resuelve por variable de entorno, en este orden:
-
-1. La variable nombrada en la columna opcional `dsn_env` de la pestania `clientes`
-2. Por convencion: `WAREHOUSE_DSN_<CLIENTE_ID en mayusculas>`
-3. `WAREHOUSE_DSN` global (todos comparten proyecto, separados por esquema)
-
-Ejemplo: para darle a `ferreteria_a` su propio proyecto, basta con agregar en
-Render la variable `WAREHOUSE_DSN_FERRETERIA_A`. Sin tocar codigo ni el Sheet.
-Asi se puede empezar con un proyecto compartido y migrar clientes de a uno.
-
-Nota: con proyectos separados, la bitacora `_meta.sync_corridas` vive en cada
-proyecto. `--estado` recorre todos los clientes y consulta el warehouse de cada
-uno, asi que sigue mostrando el panorama completo.
-
-### Elegir warehouse
-
-| Opción | `WAREHOUSE_TIPO` | `WAREHOUSE_DSN` |
-|---|---|---|
-| DuckDB local (desarrollo) | `duckdb` | `fachavi.duckdb` |
-| MotherDuck (producción) | `duckdb` | `md:fachavi?motherduck_token=XXX` |
-| Postgres / Supabase / Neon | `postgres` | `postgresql://user:pass@host:5432/db` |
-
-DuckDB local y MotherDuck usan **el mismo código**: solo cambia el DSN. Por eso
-arrancar local no es trabajo tirado.
-
----
-
+## Agregar una fuente nueva (3 pasos)
 
 1. Creá `sources/mi_fuente.py` con una subclase de `Source`:
    ```python
    from .base import Source, Fragmento, registrar_df, describir_tabla, inferir_tipos
 
    class MiFuenteSource(Source):
-       tipo = "mi_fuente"  # este string va en la columna 'tipo' del registro
+       tipo = "mi_fuente"
 
        def cargar(self, con) -> Fragmento:
-           df = ...  # traé tus datos como DataFrame (API, DB, archivo, etc.)
+           df = ...                      # traé tus datos como DataFrame
            df = inferir_tipos(df)
            tabla = registrar_df(con, df, "mi_tabla", self.fuente_id)
-           return Fragmento(schema=describir_tabla(con, tabla),
-                            catalogo="", tablas=[tabla])
+           return Fragmento(schema=describir_tabla(con, tabla), tablas=[tabla])
    ```
-2. Registrala en `sources/__init__.py`: `registrar(MiFuenteSource)`.
-3. En el Sheet maestro, agregá filas con `tipo = mi_fuente`. Listo — el pipeline
-   no se toca.
+2. Registrala en `sources/__init__.py`: `registrar(MiFuenteSource)`
+3. Agregá filas con `tipo = mi_fuente` en el Sheet maestro
 
-## Variables de entorno (en Render)
+Frescura, linaje, drift, guardas y modo prueba se heredan gratis: viven en
+`sync.py`, no en el connector.
 
-| Variable | Qué es |
-|---|---|
-| `VERIFY_TOKEN` | String que inventás; el mismo va en Meta |
-| `WHATSAPP_TOKEN` | Token de WhatsApp (Meta) |
-| `PHONE_NUMBER_ID` | ID del número (Meta) |
-| `ANTHROPIC_API_KEY` | Tu key de Anthropic |
-| `CLAUDE_MODEL` | `claude-haiku-4-5-20251001` |
-| `GOOGLE_CREDENTIALS_JSON` | JSON del service account (uno solo) |
-| `MASTER_SPREADSHEET_ID` | ID del **Sheet maestro** (registro), no de datos |
-| `DATA_CACHE_TTL` | Frescura de datos (60s) |
-| `REGISTRY_CACHE_TTL` | Cada cuánto relee el registro (300s) |
+## Despliegue
 
-> Importante: el registro y los datos viven en Google Sheets, así que el disco
-> efímero de Render NO es problema. La única SQLite local es la memoria de chat,
-> que no pasa nada si se pierde en un redeploy.
+`render.yaml` declara un **cron job** que corre `python sync.py` cada 15 minutos.
+Variables necesarias: `GOOGLE_CREDENTIALS_JSON`, `MASTER_SPREADSHEET_ID`,
+`WAREHOUSE_TIPO`, `WAREHOUSE_DSN`, `SYNC_ARGS`, `PYTHON_VERSION`.
 
-## Setup de Google (service account)
-
-1. Google Cloud Console > proyecto > habilitar **Google Sheets API**.
-2. Crear **cuenta de servicio** > Claves > JSON (se descarga).
-3. Compartir el **Sheet maestro** y **cada Sheet de datos** con el `client_email`
-   del JSON, como **Lector**.
-4. El JSON completo va en `GOOGLE_CREDENTIALS_JSON`; el ID del maestro en
-   `MASTER_SPREADSHEET_ID`.
-
-## Deploy en Render + webhook en Meta
-
-1. Subí a GitHub (el `.gitignore` protege los secretos).
-2. Render > New Web Service > conectá el repo > cargá las variables.
-3. Callback URL en Meta: `https://TU-URL.onrender.com/webhook` + tu `VERIFY_TOKEN`;
-   suscribite a **messages**.
-
-## Probar
-
-1. En el Sheet maestro, agregá tu propio número (el que usás para probar) en
-   `usuarios`, apuntando a un `cliente_id` que tenga un Sheet de datos de prueba.
-2. Escribile al número de prueba: "¿cuánto se vendió en total?".
-3. Con un número que NO esté en el registro, deberías recibir el mensaje de
-   contactar a FACHAVI.
-
-## Seguridad
-
-- Números no registrados no acceden a ningún dato.
-- SQL de solo lectura (rechaza escrituras, `;`, comandos administrativos).
-- DuckDB en memoria sobre una copia; los Sheets nunca se modifican.
-- Cada cliente solo ve su propio Sheet (aislamiento por spreadsheet_id).
-
-## Notas
-
-- Token de WhatsApp temporal dura 24h; para producción generá el permanente.
-- Render Free duerme a los 15 min; para producción, Starter (~$7/mes).
-
----
-
-## Catálogo de datos (governance) — recomendado
-
-Cada fuente puede aportar **catálogo** (metadata/governance). En Google Sheets se
-documenta en una pestaña **`_catalogo`** (con guion bajo); en `csv_url`/`postgres`
-va inline en el `config` (clave `catalogo`, mismo formato de columnas). El bot usa
-ese catálogo para responder preguntas de governance.
-
-> **Cambio de comportamiento:** el catálogo ya **no** es obligatorio para que el
-> bot funcione. Antes, un cliente sin `_catalogo` quedaba inutilizable. Ahora las
-> consultas de **datos** funcionan aunque no haya catálogo; solo las preguntas de
-> **governance** responden "todavía no está documentado" si ninguna fuente activa
-> aporta catálogo. Se combina el catálogo de **todas** las fuentes del cliente.
-
-En Google Sheets, cualquier pestaña que empiece con `_` se excluye de las tablas
-consultables.
-
-**Estructura de la pestaña `_catalogo`** (primera fila = encabezados exactos):
-
-| tabla | columna | descripcion | sistema_origen | frecuencia | dueño |
-|---|---|---|---|---|---|
-| ventas | * | Registro de ventas diarias | POS Toshiba | Diaria | Gerencia comercial |
-| ventas | monto | Monto de la venta en colones | POS Toshiba | Diaria | Gerencia comercial |
-| ventas | vendedor | Vendedor que cerró la venta | CRM interno | Diaria | RRHH |
-
-- Una fila con `columna = *` describe la tabla completa.
-- Las demás filas describen cada columna.
-
-**Qué puede responder el bot ahora:**
-- Datos: "¿cuánto se vendió?", "¿quién vendió más?"
-- Governance: "¿de qué sistema vienen estos datos?", "¿qué significa monto?",
-  "¿quién es el dueño de esta data?", "¿cada cuánto se actualiza?"
-- Saludos: responde con una bienvenida y ejemplos de lo que puede hacer.
+> **`PYTHON_VERSION` importa**: si Render usa 3.14, pandas y duckdb no tienen
+> wheels y pip intenta compilarlos desde fuente → el build falla.

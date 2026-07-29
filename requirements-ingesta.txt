@@ -1,13 +1,16 @@
 # Dependencias SOLO de la ingesta (Fase 2). El cron no necesita el bot.
-# Build mas rapido y menos superficie de dependencias en el job.
+#
+# Versiones ACTUALES a proposito: publican wheels para Python 3.12, 3.13 y 3.14.
+# Con versiones viejas, si Render usa 3.14 no encuentra binarios e intenta
+# COMPILAR pandas/duckdb desde fuente -> el build tarda muchisimo y falla.
 
-pandas==2.2.3
+pandas==3.0.5
 pytz==2024.2
-duckdb==1.1.3           # motor temporal de carga (y destino local en dev)
-gspread==6.1.4          # fuentes Google Sheets + registro maestro
+duckdb==1.5.5           # motor temporal de carga (y destino local en dev)
+gspread==6.2.1          # fuentes Google Sheets + registro maestro
 google-auth==2.36.0
 httpx==0.28.1           # fuentes api_rest / csv_url
 
 # Destino Neon / Postgres
-sqlalchemy==2.0.36
-psycopg2-binary==2.9.10
+sqlalchemy==2.0.51
+psycopg2-binary==2.9.12
