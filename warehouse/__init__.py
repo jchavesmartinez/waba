@@ -27,6 +27,20 @@ def registrar(cls):
 
 def crear_destino(tipo: str, dsn: str = "") -> Destino:
     tipo = (tipo or "").strip().lower()
+
+    # Guarda anti-error-silencioso: si el DSN es de Postgres pero el tipo quedo
+    # en 'duckdb' (el default, porque falto definir WAREHOUSE_TIPO), la ingesta
+    # escribiria a un archivo local efimero y reportaria "OK" sin que nada
+    # llegue al warehouse de verdad. Mejor fallar fuerte y temprano.
+    if dsn.startswith(("postgres://", "postgresql://")) and tipo != "postgres":
+        raise RuntimeError(
+            f"WAREHOUSE_DSN es de Postgres pero WAREHOUSE_TIPO='{tipo}'. "
+            "Defini WAREHOUSE_TIPO=postgres (probablemente falta esa variable "
+            "de entorno y se esta usando el default 'duckdb')."
+        )
+    if tipo == "postgres" and not dsn:
+        raise RuntimeError("WAREHOUSE_TIPO=postgres pero falta WAREHOUSE_DSN.")
+
     if tipo not in _REGISTRO:
         raise RuntimeError(
             f"Tipo de warehouse desconocido: '{tipo}'. Disponibles: {tipos_disponibles()}"
