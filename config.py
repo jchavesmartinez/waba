@@ -59,3 +59,33 @@ def dsn_de_cliente(cliente: dict) -> str:
         return por_convencion
 
     return WAREHOUSE_DSN
+
+
+# ==========================================================================
+# BOT DE WHATSAPP (capa de LECTURA). La ingesta no usa nada de esto; son
+# variables opcionales que solo el bot (paquete bot/) necesita. Se dejan aca
+# para tener una sola superficie de configuracion.
+# ==========================================================================
+
+# Clave de la API de Anthropic (text-to-SQL + redaccion de la respuesta).
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# Modelo para GENERAR el SQL. Haiku alcanza de sobra para esto y es barato.
+BOT_MODELO_SQL = os.environ.get("BOT_MODELO_SQL", "claude-haiku-4-5-20251001")
+
+# Modelo para REDACTAR la respuesta en lenguaje natural a partir de las filas.
+BOT_MODELO_RESPUESTA = os.environ.get("BOT_MODELO_RESPUESTA", "claude-haiku-4-5-20251001")
+
+# Tope duro de filas que el bot trae del warehouse por consulta.
+BOT_MAX_FILAS = int(os.environ.get("BOT_MAX_FILAS", "200"))
+
+# Corta consultas que se pasen de tiempo (proteccion del warehouse).
+BOT_TIMEOUT_MS = int(os.environ.get("BOT_TIMEOUT_MS", "8000"))
+
+# Politica de gobernanza: ¿que hace el bot con una tabla cuya 'instruccion'
+# viene VACIA o ambigua en el catalogo? False = no la usa (fail-closed, la
+# opcion segura). Ponelo en True solo si preferis que "sin instruccion" = abierta.
+BOT_PERMITIR_SIN_INSTRUCCION = (
+    os.environ.get("BOT_PERMITIR_SIN_INSTRUCCION", "no").strip().lower()
+    in ("si", "sí", "true", "1", "yes")
+)
