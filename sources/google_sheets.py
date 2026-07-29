@@ -44,16 +44,35 @@ class GoogleSheetsSource(Source):
                 f"Fuente '{self.fuente_id}' (google_sheets) sin 'spreadsheet_id' en config."
             )
 
+        # Filtros opcionales de pestanias:
+        #   "hojas":   ["ventas"]        -> SOLO estas (lista blanca)
+        #   "excluir": ["notas","borra"] -> todas menos estas (lista negra)
+        # Sirven para partir UN mismo Sheet en varias fuentes con frescuras
+        # distintas, o para saltarse pestanias que no son tablas.
+        solo = {str(h).strip().lower() for h in self.config.get("hojas", []) if str(h).strip()}
+        excluir = {str(h).strip().lower() for h in self.config.get("excluir", []) if str(h).strip()}
+
         libro = abrir_libro(spreadsheet_id)
         schema_parts = []
         tablas = []
+        vistas = []
 
         for ws in libro.worksheets():
-            if ws.title.startswith("_"):
+            titulo = ws.title
+            vistas.append(titulo)
+
+            if titulo.startswith("_"):
                 continue  # metadata, no es tabla consultable
+            if solo and titulo.strip().lower() not in solo:
+                continue
+            if titulo.strip().lower() in excluir:
+                logger.info("[%s] pestania '%s' excluida por config", self.fuente_id, titulo)
+                continue
 
             registros = ws.get_all_values()
             if not registros or len(registros) < 2:
+                logger.info("[%s] pestania '%s' vacia o sin filas; se salta",
+                            self.fuente_id, titulo)
                 continue
 
             headers = registros[0]
@@ -61,10 +80,18 @@ class GoogleSheetsSource(Source):
             df.columns = normalizar_columnas(df.columns)
             df = inferir_tipos(df)
 
-            tabla = registrar_df(con, df, ws.title, self.fuente_id)
+            tabla = registrar_df(con, df, titulo, self.fuente_id)
             tablas.append(tabla)
             schema_parts.append(describir_tabla(con, tabla))
-            logger.info("[%s] tabla %s (%d filas)", spreadsheet_id[:8], tabla, len(df))
+            logger.info("[%s] tabla %s (%d filas)", self.fuente_id, tabla, len(df))
+
+        if solo:
+            faltan = solo - {v.strip().lower() for v in vistas}
+            if faltan:
+                logger.warning(
+                    "[%s] pedidas en 'hojas' pero NO existen en el Sheet: %s",
+                    self.fuente_id, ", ".join(sorted(faltan)),
+                )
 
         catalogo = self._leer_catalogo(libro)
 
