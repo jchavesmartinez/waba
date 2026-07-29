@@ -65,6 +65,52 @@ class PostgresDestino(Destino):
         )
         logger.info("escrito %s.%s (%d filas)", esquema, tabla, len(df))
 
+    def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
+        self.asegurar_esquema(esquema)
+        with self.conectar().begin() as cx:
+            cx.execute(text(
+                f'CREATE TABLE IF NOT EXISTS "{esquema}"."_catalogo" ('
+                "fuente_id TEXT, tabla TEXT, columna TEXT, descripcion TEXT,"
+                "sistema_origen TEXT, frecuencia TEXT, dueno TEXT)"
+            ))
+            cx.execute(text(f'DELETE FROM "{esquema}"."_catalogo" WHERE fuente_id=:f'),
+                       {"f": fuente_id})
+            for f in filas:
+                cx.execute(text(
+                    f'INSERT INTO "{esquema}"."_catalogo" VALUES '
+                    "(:fid,:tab,:col,:des,:sis,:fre,:due)"),
+                    {"fid": fuente_id, "tab": f.get("tabla",""), "col": f.get("columna",""),
+                     "des": f.get("descripcion",""), "sis": f.get("sistema_origen",""),
+                     "fre": f.get("frecuencia",""), "due": f.get("dueno","")})
+        logger.info("catalogo de '%s': %d filas en %s._catalogo", fuente_id, len(filas), esquema)
+
+    def aplicar_comentarios(self, esquema: str, mapa_tablas: dict, filas: list):
+        """
+        BONUS de Postgres: ademas de la tabla, escribe la descripcion como
+        COMMENT ON nativo. Asi Metabase, DBeaver, dbt y cualquier herramienta
+        que lea information_schema muestran la documentacion sin saber nada
+        de nuestro catalogo.
+        """
+        def esc(s):
+            return str(s).replace("'", "''")
+        with self.conectar().begin() as cx:
+            for f in filas:
+                tabla_real = mapa_tablas.get(str(f.get("tabla", "")).strip().lower())
+                desc = f.get("descripcion", "")
+                if not tabla_real or not desc:
+                    continue
+                col = str(f.get("columna", "")).strip()
+                try:
+                    if col in ("*", ""):
+                        cx.execute(text(
+                            f'COMMENT ON TABLE "{esquema}"."{tabla_real}" IS \'{esc(desc)}\''))
+                    else:
+                        cx.execute(text(
+                            f'COMMENT ON COLUMN "{esquema}"."{tabla_real}"."{col}" '
+                            f'IS \'{esc(desc)}\''))
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("comentario omitido (%s.%s): %s", tabla_real, col, e)
+
     # --- metadata de corridas ---
 
     def _asegurar_meta(self):
