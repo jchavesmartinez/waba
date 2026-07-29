@@ -52,8 +52,14 @@ def tipos_disponibles() -> list:
     return sorted(_REGISTRO)
 
 
-from .duckdb_dest import DuckDBDestino  # noqa: E402
-registrar(DuckDBDestino)
+# DuckDB es el destino por defecto de la INGESTA, pero el BOT (que solo lee de
+# Neon) no lo necesita. Se registra si esta instalado; asi importar warehouse.*
+# desde el bot no obliga a traer duckdb.
+try:  # noqa: SIM105
+    from .duckdb_dest import DuckDBDestino  # noqa: E402
+    registrar(DuckDBDestino)
+except Exception as e:  # noqa: BLE001
+    logger.info("Destino 'duckdb' no disponible en este entorno: %s", e)
 
 # Postgres es opcional: necesita sqlalchemy + driver instalados.
 try:  # noqa: SIM105

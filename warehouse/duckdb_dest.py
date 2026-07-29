@@ -64,13 +64,21 @@ class DuckDBDestino(Destino):
         con.execute(
             f'CREATE TABLE IF NOT EXISTS "{esquema}"."_catalogo" ('
             "fuente_id VARCHAR, tabla VARCHAR, columna VARCHAR, descripcion VARCHAR,"
+            "instruccion VARCHAR,"
             "sistema_origen VARCHAR, frecuencia VARCHAR, dueno VARCHAR)"
+        )
+        # Migracion suave para _catalogo creado por una version previa.
+        con.execute(
+            f'ALTER TABLE "{esquema}"."_catalogo" ADD COLUMN IF NOT EXISTS instruccion VARCHAR'
         )
         con.execute(f'DELETE FROM "{esquema}"."_catalogo" WHERE fuente_id=?', [fuente_id])
         for f in filas:
             con.execute(
-                f'INSERT INTO "{esquema}"."_catalogo" VALUES (?,?,?,?,?,?,?)',
+                f'INSERT INTO "{esquema}"."_catalogo" '
+                "(fuente_id,tabla,columna,descripcion,instruccion,"
+                "sistema_origen,frecuencia,dueno) VALUES (?,?,?,?,?,?,?,?)",
                 [fuente_id, f.get("tabla",""), f.get("columna",""), f.get("descripcion",""),
+                 f.get("instruccion",""),
                  f.get("sistema_origen",""), f.get("frecuencia",""), f.get("dueno","")],
             )
         logger.info("catalogo de '%s': %d filas en %s._catalogo", fuente_id, len(filas), esquema)
