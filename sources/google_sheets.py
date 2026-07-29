@@ -52,6 +52,19 @@ class GoogleSheetsSource(Source):
         solo = {str(h).strip().lower() for h in self.config.get("hojas", []) if str(h).strip()}
         excluir = {str(h).strip().lower() for h in self.config.get("excluir", []) if str(h).strip()}
 
+        # Guarda: pedir una pestania que empieza con '_' no tiene efecto, porque
+        # esas son metadata y se excluyen siempre. El catalogo NO se ingesta con
+        # una fila propia en 'fuentes': viaja automaticamente con cada fuente que
+        # lee ese Sheet y se guarda en <esquema>._catalogo.
+        ocultas = {h for h in solo if h.startswith("_")}
+        if ocultas:
+            logger.error(
+                "[%s] 'hojas' pide pestanias de metadata (%s). Esas se excluyen "
+                "siempre y esta fuente cargaria CERO tablas. El catalogo ya se "
+                "guarda solo; borra esta fila de la pestania 'fuentes'.",
+                self.fuente_id, ", ".join(sorted(ocultas)),
+            )
+
         libro = abrir_libro(spreadsheet_id)
         schema_parts = []
         tablas = []
@@ -93,15 +106,33 @@ class GoogleSheetsSource(Source):
                     self.fuente_id, ", ".join(sorted(faltan)),
                 )
 
-        catalogo = self._leer_catalogo(libro)
+        catalogo, catalogo_filas = self._leer_catalogo(libro)
+
+        # El catalogo del Sheet documenta TODAS sus pestanias. Si esta fuente
+        # solo cargo algunas (filtro 'hojas'), se queda unicamente con las filas
+        # de esas tablas. Sin esto, dos fuentes sobre el mismo Sheet duplicarian
+        # el catalogo entero y las consultas de governance darian filas repetidas.
+        cargadas = {t.strip().lower() for t in tablas}
+        if catalogo_filas and cargadas:
+            antes = len(catalogo_filas)
+            catalogo_filas = [
+                f for f in catalogo_filas
+                if str(f.get("tabla", "")).strip().lower() in cargadas
+            ]
+            if len(catalogo_filas) != antes:
+                logger.info(
+                    "[%s] catalogo filtrado a sus tablas: %d de %d filas",
+                    self.fuente_id, len(catalogo_filas), antes,
+                )
 
         return Fragmento(
             schema="\n\n".join(schema_parts),
             catalogo=catalogo,
             tablas=tablas,
+            catalogo_filas=catalogo_filas,
         )
 
-    def _leer_catalogo(self, libro) -> str:
+    def _leer_catalogo(self, libro):
         """Lee '_catalogo' si existe. Si falta, devuelve '' (fuente sin documentar)."""
         try:
             ws = libro.worksheet(CATALOGO_SHEET)
@@ -110,8 +141,20 @@ class GoogleSheetsSource(Source):
                 "Fuente '%s' sin pestania '%s' (sin catalogo/governance).",
                 self.fuente_id, CATALOGO_SHEET,
             )
-            return ""
+            return "", []
         filas = ws.get_all_records()
         if not filas:
-            return ""
-        return construir_catalogo(filas)
+            return "", []
+        # Normaliza claves para que la tabla del warehouse tenga columnas fijas
+        norm = []
+        for f in filas:
+            f = {str(k).strip().lower(): str(v).strip() for k, v in f.items()}
+            norm.append({
+                "tabla": f.get("tabla", ""),
+                "columna": f.get("columna", ""),
+                "descripcion": f.get("descripcion", ""),
+                "sistema_origen": f.get("sistema_origen", ""),
+                "frecuencia": f.get("frecuencia", ""),
+                "dueno": f.get("dueño", "") or f.get("dueno", ""),
+            })
+        return construir_catalogo(filas), norm
