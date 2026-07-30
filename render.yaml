@@ -49,7 +49,7 @@ services:
   # (la respuesta sale por una llamada al Graph API). Comparte el mismo Sheet
   # maestro y el mismo Neon que la ingesta (solo lee).
   - type: web
-    name: fachavi-bot
+    name: waba
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements-bot.txt
