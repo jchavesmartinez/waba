@@ -1,7 +1,4 @@
-# FASE 2 — INGESTA. Un solo servicio por ahora.
-#
-# El bot de WhatsApp se agrega despues (type: web). Hoy nos enfocamos en que la
-# data entre bien al warehouse.
+# DESPLIEGUE — dos servicios: el cron de INGESTA y el web del BOT.
 #
 # COMO PROBAR SIN TERMINAL:
 #   1. Deja SYNC_ARGS = --probar  (extrae y muestra, NO escribe nada)
@@ -29,11 +26,21 @@ services:
         value: "3.12.8"
       # Modo de corrida. Se cambia desde el dashboard sin tocar codigo:
       #   --probar  -> no escribe (para validar antes de automatizar)
-      #   (vacio)   -> corrida normal, respeta frescura
+      #   (vacio)   -> corrida normal, respeta frescura   <-- ESTE es el correcto
       #   --forzar  -> ignora frescura y recarga todo
       #   --estado  -> solo muestra cuando cargo cada fuente
+      #
+      # C-02: esto estaba en "--forzar" en produccion, y con eso TODO el
+      # mecanismo de frescura quedaba inerte: un catalogo configurado para
+      # recargarse una vez al dia se recargaba 96 veces. Se pagaba en cuota de
+      # Google, en escrituras de Neon, en tiempo de servidor y en ventanas de
+      # tabla inexistente (A-02). Es el valor que uno pone durante las primeras
+      # pruebas; el problema no fue el valor, fue que se quedo.
+      #
+      # OJO: cambiar esto en el archivo NO cambia lo que hay hoy en el panel.
+      # Hay que ponerlo en vacio TAMBIEN en el dashboard de Render.
       - key: SYNC_ARGS
-        value: --forzar
+        value: ""
       - key: GOOGLE_CREDENTIALS_JSON
         sync: false
       - key: MASTER_SPREADSHEET_ID
@@ -42,6 +49,20 @@ services:
         value: postgres
       - key: WAREHOUSE_DSN
         sync: false
+      # Retencion de la bitacora _meta.sync_corridas (A-04). 0 = no purgar.
+      - key: SYNC_RETENCION_DIAS
+        value: "180"
+      # Convencion de fecha por defecto (A-07): dia_primero | mes_primero
+      - key: FORMATO_FECHA
+        value: dia_primero
+      # Secretos de los conectores (C-04). Se declaran ACA, no en el Sheet.
+      # El Sheet lleva el NOMBRE de la variable ({"dsn_env":"PG_FERRETERIA_A"}),
+      # nunca la contraseña. Descomenta y renombra por cada cliente que use un
+      # conector postgres o api_rest.
+      # - key: PG_FERRETERIA_A
+      #   sync: false
+      # - key: API_TOKEN_FERRETERIA_A
+      #   sync: false
 
   # --- BOT de WhatsApp (capa de lectura) ---
   # Servicio web que recibe el webhook de la Meta Cloud API, resuelve
@@ -72,8 +93,28 @@ services:
       - key: BOT_MODELO_RESPUESTA
         value: claude-haiku-4-5-20251001
       # Tabla sin 'instruccion' en el catalogo: no = fail-closed (seguro).
+      # C-05: en "si", TODAS las tablas sin documentar de TODOS los clientes
+      # quedan consultables. El bot ahora deja una advertencia de nivel alto al
+      # arrancar y registra cada tabla que habilita por esta via, pero el valor
+      # correcto sigue siendo "no".
       - key: BOT_PERMITIR_SIN_INSTRUCCION
         value: "no"
+      # B-38: estas tres funcionaban con sus defaults pero no estaban
+      # declaradas, asi que nadie que mirara el panel sabia que existian ni que
+      # se podian ajustar.
+      - key: BOT_MAX_FILAS
+        value: "200"
+      - key: BOT_TIMEOUT_MS
+        value: "8000"
+      - key: WHATSAPP_MAX_CHARS
+        value: "4096"
+      - key: BOT_MAX_TOKENS_SQL
+        value: "1200"
+      # --- Topes de consumo (A-13, A-14). 0 = sin limite. ---
+      - key: BOT_MAX_MSJ_POR_MINUTO
+        value: "12"
+      - key: BOT_MAX_MSJ_POR_DIA
+        value: "300"
       # --- Memoria conversacional ---
       - key: BOT_MEMORIA
         value: "si"
@@ -89,13 +130,25 @@ services:
       - key: BOT_KPIS
         value: "si"
       # --- WhatsApp Cloud API (Meta) ---
+      # WHATSAPP_TOKEN: usa el permanente de System User. El del panel de Meta
+      # vence en 24 h y el sintoma es que el bot deja de contestar al dia
+      # siguiente, sin mas rastro que un error en el log (B-37). El arranque
+      # ahora avisa si parece el temporal.
       - key: WHATSAPP_TOKEN
         sync: false
       - key: WHATSAPP_PHONE_NUMBER_ID
         sync: false
       - key: WHATSAPP_VERIFY_TOKEN
         sync: false
+      # C-08 — OBLIGATORIA EN PRODUCCION. Sin este valor el bot no puede validar
+      # que el POST venga de Meta y RECHAZA todo el trafico entrante. Antes
+      # aceptaba cualquier cosa en silencio: cualquiera con la URL del webhook
+      # podia suplantar un numero registrado, extraer sus datos y consumir la
+      # cuenta de Anthropic.
       - key: WHATSAPP_APP_SECRET
         sync: false
+      # Solo para desarrollo local: permite arrancar sin app secret.
+      - key: BOT_PERMITIR_SIN_FIRMA
+        value: "no"
       - key: GRAPH_API_VERSION
         value: v21.0

@@ -1,12 +1,18 @@
-# FACHAVI — Capa de ingesta (Fase 2)
+# FACHAVI — waba
 
-Extrae datos de los sistemas fuente de cada cliente y los aterriza en un
-warehouse (Neon / Postgres). **Corre fuera de cualquier request**, como job
-programado.
+Un sistema que permite que el dueño de un negocio pregunte por WhatsApp
+«¿cuánto vendimos ayer?» y reciba la respuesta correcta en segundos.
 
-> Este repo es **solo la ingesta**. El bot de WhatsApp se reconstruirá aparte y
-> leerá del warehouse — nunca de los sistemas fuente. Por eso acá no hay nada de
-> WhatsApp, Anthropic ni text-to-SQL.
+El repo tiene **dos mitades**, deliberadamente separadas:
+
+| | Qué hace | Cuándo corre | Servicio en Render |
+|---|---|---|---|
+| **Ingesta** (`sync.py`, `sources/`, `warehouse/`) | Extrae de los sistemas fuente del cliente y aterriza los datos en el warehouse | Cron, cada 15 min, **fuera de cualquier request** | `fachavi-ingesta` |
+| **Bot** (`bot/`) | Responde preguntas por WhatsApp leyendo del warehouse, con text-to-SQL | Servicio web, en el momento del mensaje | `waba` |
+
+El bot **nunca** toca los sistemas fuente: lee lo que la ingesta ya dejó
+limpio. Esa separación es lo que hace que una consulta responda en segundos y
+que un Sheet mal compartido no rompa el chat.
 
 ```
 Sheets / CSV / API / Postgres          (sistemas fuente del cliente)
@@ -77,9 +83,19 @@ Una pestaña `usuarios` puede existir para el futuro bot; la ingesta la ignora.
 - **`csv_url`** → `{"url":"https://.../datos.csv","tabla":"ventas"}`
   o varias: `{"tablas":[{"url":"...","tabla":"ventas"},{"url":"...","tabla":"inv"}]}`
 - **`api_rest`** → `{"url":"https://api...","tabla":"ventas","ruta_datos":"data.items"}`
-  Admite `headers` (auth), `params` y `paginacion`. El JSON anidado se aplana solo.
-- **`postgres`** → `{"dsn":"postgresql://...","tablas":["ventas"],"esquema":"public"}`
-  Trae una copia de solo lectura; la base del cliente no se toca.
+  Admite `headers_env` (auth), `params` y `paginacion`. El JSON anidado se aplana solo.
+- **`postgres`** → `{"dsn_env":"PG_CLIENTE_A","tablas":["ventas"],"esquema":"public"}`
+  Trae una copia de solo lectura; la base del cliente no se toca. Acepta
+  `{"where":{"ventas":"fecha >= current_date - 90"}}` para no copiar la tabla
+  entera en cada corrida.
+
+> **Los secretos de los conectores tampoco van en el Sheet.** La regla es la
+> misma que para el warehouse: la celda `config` lleva el **nombre de la
+> variable de entorno** (`dsn_env`, `headers_env`), nunca la contraseña ni el
+> token. Cualquiera con acceso de lectura a la hoja los vería, y el historial de
+> versiones de Google los guarda para siempre aunque después se borre la celda.
+> Los campos `dsn` y `headers` literales siguen funcionando por
+> retrocompatibilidad, pero dejan una advertencia en el log.
 
 ## Catálogo de datos (governance)
 
@@ -165,6 +181,11 @@ escritura.
 - **Guarda de borrado.** Si una tabla llega **vacía** y antes tenía filas, la
   escritura se **bloquea**: como la carga es full refresh, escribir cero filas
   encima borraría la única copia buena. Caída de más del 50% alerta, no bloquea.
+  La corrida queda en estado `ok_con_bloqueo`, que se puede auditar de una:
+  ```sql
+  SELECT * FROM _meta.sync_corridas WHERE estado = 'ok_con_bloqueo'
+  ORDER BY fin DESC;
+  ```
 - **Aislamiento de fallos.** Si una fuente truena, se registra el error en la
   bitácora y el job sigue con las demás.
 
@@ -195,7 +216,13 @@ Para darle a `cliente_a` su propio proyecto basta con agregar
 | `warehouse/base.py` | Contrato `Destino` |
 | `warehouse/duckdb_dest.py` | DuckDB local / MotherDuck |
 | `warehouse/postgres_dest.py` | Neon / Supabase / Postgres |
-| `render.yaml` | Blueprint del cron job |
+| `bot/app.py` | Webhook de la Meta Cloud API + validación de firma y topes |
+| `bot/responder.py` | Orquestador: registro → memoria → catálogo → SQL |
+| `bot/nl2sql.py` | Genera el SELECT y lo valida con sqlglot |
+| `bot/catalogo.py` | Gobernanza: qué tablas puede leer el bot |
+| `bot/kpis.py`, `intencion.py`, `memoria.py`, `warehouse_ro.py`, `whatsapp.py` | Capa semántica, ruteo, memoria, lectura RO y envío |
+| `render.yaml` | Blueprint de los dos servicios |
+| `tests/` | Contrato de destinos y guarda de vaciado |
 
 ## Agregar una fuente nueva (3 pasos)
 
@@ -220,9 +247,38 @@ Frescura, linaje, drift, guardas y modo prueba se heredan gratis: viven en
 
 ## Despliegue
 
-`render.yaml` declara un **cron job** que corre `python sync.py` cada 15 minutos.
-Variables necesarias: `GOOGLE_CREDENTIALS_JSON`, `MASTER_SPREADSHEET_ID`,
-`WAREHOUSE_TIPO`, `WAREHOUSE_DSN`, `SYNC_ARGS`, `PYTHON_VERSION`.
+`render.yaml` declara **dos servicios**: el cron `fachavi-ingesta` (corre
+`python sync.py` cada 15 minutos) y el web `waba` (el bot). Ver `env.example`
+para la lista completa de variables.
 
 > **`PYTHON_VERSION` importa**: si Render usa 3.14, pandas y duckdb no tienen
 > wheels y pip intenta compilarlos desde fuente → el build falla.
+
+### Antes de desplegar, tres cosas que hay que verificar en el panel
+
+1. **`SYNC_ARGS` en vacío.** Con `--forzar` todo el sistema de frescura queda
+   inerte y cada fuente se recarga 96 veces al día.
+2. **`WHATSAPP_APP_SECRET` configurado.** Sin ese valor el bot no puede validar
+   que el POST venga de Meta y **rechaza todo el tráfico entrante**. (Para
+   desarrollo local: `BOT_PERMITIR_SIN_FIRMA=si`.)
+3. **`WHATSAPP_TOKEN` permanente**, no el temporal del panel de Meta: ese vence
+   en 24 h y el síntoma es que el bot deja de contestar al día siguiente.
+
+El bot revisa las tres al arrancar y deja advertencias de nivel alto en el log;
+también se ven en `GET /salud`.
+
+## Pruebas
+
+```bash
+pip install pytest
+pytest -q
+```
+
+Dos pruebas, y no son decorativas: cubren exactamente los dos errores que solo
+se encontraban leyendo el código con cuidado.
+
+- `tests/test_contrato_destinos.py` — verifica que los dos destinos implementen
+  los ocho métodos del contrato. Un decorador mal ubicado había sacado
+  `ultimo_detalle` de la lista de métodos obligatorios sin que nada fallara.
+- `tests/test_guarda_vaciado.py` — verifica que la guarda de borrado siga
+  bloqueando ante **dos** cargas vacías consecutivas, no solo la primera.

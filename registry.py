@@ -41,13 +41,26 @@ def _normaliza_numero(n: str) -> str:
     return "".join(ch for ch in str(n) if ch.isdigit())
 
 
-def _parse_activo(v) -> bool:
+def _parse_activo(v, contexto: str = "") -> bool:
+    """
+    Interpreta la celda 'activo'. Un valor inesperado se asume ACTIVA (es el
+    default menos destructivo: apagar una fuente por un tipeo dejaria de
+    actualizar datos en silencio).
+
+    B-09: pero el reves tambien pasa — un tipeo puede PRENDER una fuente que se
+    creia apagada. Antes eso era completamente mudo. Ahora avisa.
+    """
     s = str(v).strip().lower()
     if s in _ACTIVO_NO:
         return False
     if s in _ACTIVO_SI:
         return True
-    return True  # por defecto, activa
+    logger.warning(
+        "Valor inesperado en la columna 'activo'%s: %r. Se asume ACTIVA. "
+        "Los valores validos son 'si' y 'no'.",
+        f" de {contexto}" if contexto else "", v,
+    )
+    return True
 
 
 def _parse_entero(v) -> int:
@@ -134,12 +147,24 @@ def _cargar():
 
     for f in filas_src:
         cid = str(f.get("cliente_id", "")).strip()
+        fid = str(f.get("fuente_id", "")).strip() or "fuente"
         if cid not in clientes:
+            # B-01: esto se descartaba en absoluto silencio. Un tipeo en el
+            # cliente_id hacia DESAPARECER una fuente entera sin dejar rastro:
+            # nadie se entera hasta que alguien pregunta por un dato que nunca
+            # llego. Los clientes validos van en el mensaje para que el arreglo
+            # sea obvio.
+            logger.error(
+                "La fuente '%s' apunta al cliente_id '%s', que NO existe en la "
+                "pestania 'clientes'. Se ignora la fila entera. Clientes "
+                "validos: %s",
+                fid, cid or "(vacio)", ", ".join(sorted(clientes)) or "(ninguno)",
+            )
             continue
         fuente = {
-            "fuente_id": str(f.get("fuente_id", "")).strip() or "fuente",
+            "fuente_id": fid,
             "tipo": str(f.get("tipo", "")).strip().lower(),
-            "activo": _parse_activo(f.get("activo", "si")),
+            "activo": _parse_activo(f.get("activo", "si"), contexto=f"{cid}/{fid}"),
             # Cada cuantos minutos vale la pena re-sincronizar esta fuente.
             # 0 / vacio = sin politica (se sincroniza en cada corrida del job).
             "frescura_minutos": _parse_entero(f.get("frescura_minutos", 0)),
@@ -181,6 +206,16 @@ def _cargar():
 
 
 def _asegura_cache():
+    """
+    Relee el registro si la cache vencio.
+
+    B-02: la cache tiene una consecuencia de seguridad que conviene tener
+    presente. Revocarle el acceso a un telefono (borrar su fila de 'usuarios')
+    tarda hasta REGISTRY_CACHE_TTL segundos en aplicarse: durante esa ventana el
+    numero revocado sigue pudiendo consultar. Si necesitas que sea inmediato,
+    llama a recargar() o baja el TTL (a costa de mas lecturas de la API de
+    Google en cada corrida).
+    """
     ahora = time.time()
     if _cache["clientes"] and (ahora - _cache["ts"]) < config.REGISTRY_CACHE_TTL:
         return
