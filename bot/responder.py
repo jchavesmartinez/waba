@@ -20,7 +20,11 @@ solo decide si hace falta ir a la base o no.
 """
 
 import logging
+import threading
+from collections import defaultdict
+from datetime import date
 
+import config
 import registry
 from bot import catalogo, intencion, kpis, memoria, nl2sql, warehouse_ro
 
@@ -33,6 +37,17 @@ _NO_REGISTRADO = (
 _SIN_TABLAS = (
     "Todavía no hay tablas habilitadas para responder por este medio. "
     "El administrador debe marcarlas en el catálogo."
+)
+# B-26: no es lo mismo "el catálogo dice que no hay nada habilitado" que "no
+# pude leer el catálogo". El primero se arregla en el Sheet; el segundo es la
+# base caída o un permiso. Antes los dos daban el mismo mensaje.
+_SIN_CATALOGO = (
+    "No pude leer la configuración de datos en este momento. "
+    "Probá de nuevo en un ratito; si sigue igual, avisale al administrador."
+)
+_TOPE_DIARIO = (
+    "Ya llegamos al tope de consultas de hoy para esta cuenta. "
+    "Mañana se reinicia. Si necesitás más, hablá con el administrador."
 )
 _NO_SEGURO = (
     "No pude armar esa consulta de forma segura. "
@@ -48,8 +63,60 @@ _SALUDO = (
 )
 
 # Comandos para borrar la memoria del propio numero.
-_CMD_OLVIDAR = {"olvidá", "olvida", "olvidate", "olvídate", "reset", "reiniciar",
-                "borrá memoria", "borra memoria", "empezar de cero"}
+#
+# B-21: antes se exigia coincidencia EXACTA con el conjunto, asi que "olvidá
+# todo" o "olvidate por favor" no funcionaban y se trataban como pregunta de
+# datos (gastando llamadas al modelo para no hacer nada util). Ahora se acepta
+# el comando como PREFIJO del mensaje, que es como la gente lo escribe.
+_CMD_OLVIDAR = ("olvidá", "olvida", "olvidate", "olvídate", "olvidáte",
+                "reset", "reiniciar", "borrá memoria", "borra memoria",
+                "borrá la memoria", "borra la memoria", "empezar de cero")
+
+
+def _es_comando_olvidar(texto: str) -> bool:
+    t = (texto or "").strip().lower().rstrip("!.¡ ")
+    if not t:
+        return False
+    # Se exige que el mensaje sea corto: "olvidá lo que te dije de las ventas de
+    # marzo" es un comando; "olvidate de eso, mejor decime cuánto vendimos ayer"
+    # no deberia borrar la memoria del cliente por accidente.
+    if len(t.split()) > 5:
+        return False
+    return any(t == c or t.startswith(c + " ") for c in _CMD_OLVIDAR)
+
+
+# --------------------------------------------------------------------------
+# A-14: tope de consumo por cliente y por dia.
+#
+# Cada mensaje de datos gasta entre 3 y 5 llamadas al modelo (clasificacion +
+# planificacion + generacion de SQL, hasta 2 con reintento + redaccion). No
+# habia ningun tope: ni diario, ni por usuario, ni por cliente. Un usuario
+# entusiasta —o un abuso del webhook— se traducia directo en factura.
+#
+# El contador vive en el proceso: con un solo worker es exacto, con varios cada
+# uno lleva el suyo (o sea, el tope efectivo se multiplica por la cantidad de
+# workers, nunca se vuelve mas estricto de lo configurado). Para un tope duro y
+# compartido habria que moverlo a la tabla de memoria; esto ya evita el caso que
+# importa, que es la factura sorpresa.
+# --------------------------------------------------------------------------
+_CONSUMO: dict = defaultdict(int)
+_CONSUMO_DIA = {"fecha": date.today()}
+_LOCK_CONSUMO = threading.Lock()
+
+
+def _pasa_tope_diario(cliente_id: str) -> bool:
+    tope = int(getattr(config, "BOT_MAX_MSJ_POR_DIA", 0) or 0)
+    if tope <= 0:
+        return True
+    hoy = date.today()
+    with _LOCK_CONSUMO:
+        if _CONSUMO_DIA["fecha"] != hoy:
+            _CONSUMO.clear()
+            _CONSUMO_DIA["fecha"] = hoy
+        if _CONSUMO[cliente_id] >= tope:
+            return False
+        _CONSUMO[cliente_id] += 1
+    return True
 
 
 def responder(numero: str, pregunta: str) -> str:
@@ -61,9 +128,14 @@ def responder(numero: str, pregunta: str) -> str:
     cid = cliente["cliente_id"]
 
     # Comando explicito para olvidar el historial de este numero.
-    if pregunta.strip().lower() in _CMD_OLVIDAR:
+    if _es_comando_olvidar(pregunta):
         memoria.olvidar(cliente, numero)
         return _OLVIDADO
+
+    if not _pasa_tope_diario(cid):
+        logger.warning("[%s] tope diario de mensajes alcanzado (%s)",
+                       cid, config.BOT_MAX_MSJ_POR_DIA)
+        return _TOPE_DIARIO
 
     # La memoria es best-effort: si falla, seguimos sin historial.
     historial = memoria.cargar_historial(cliente, numero)
@@ -95,6 +167,9 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     cid = cliente["cliente_id"]
 
     ctx = catalogo.construir_contexto(cliente)
+    if ctx.error_lectura:
+        logger.error("[%s] no se pudo leer el catalogo; no se responde con datos", cid)
+        return _SIN_CATALOGO
     if not ctx.tablas_reales:
         logger.info("[%s] sin tablas habilitadas por catalogo", cid)
         return _SIN_TABLAS
@@ -124,6 +199,15 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     sql = ""
     if plan["accion"] == "usar_kpi" and plan.get("sql"):
         sql = plan["sql"]
+        # A-19: la formula canonica del KPI se le manda al modelo para que la
+        # "adapte" al periodo/dimension que pidio el usuario. El prompt dice
+        # "respetala", pero nada lo garantiza: el validador comprueba que el SQL
+        # sea SEGURO, no que sea CORRECTO. Un KPI mal adaptado devuelve un numero
+        # plausible y equivocado, que es el peor tipo de error. Como minimo, que
+        # quede el rastro para poder auditar despues cual formula produjo que
+        # numero.
+        logger.info("[%s] SQL derivado del KPI '%s': %s",
+                    cid, plan.get("kpi"), " ".join(sql.split()))
         ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
         if not ok:
             logger.info("[%s] SQL de KPI '%s' invalido (%s); cae a sql_libre",
@@ -159,4 +243,4 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         # Fallback sin LLM: al menos devolver el dato crudo.
         if not filas:
             return "No encontré datos para eso."
-        return nl2sql._tabla_texto(columnas, filas, tope=10)
+        return nl2sql.tabla_texto(columnas, filas, tope=10)
