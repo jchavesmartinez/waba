@@ -97,9 +97,18 @@ class PostgresDestino(Destino):
 
     def escribir_kpis(self, esquema: str, fuente_id: str, filas: list):
         """
-        Persiste los KPIs (capa semantica) en <esquema>._kpis. Misma semantica
-        que el catalogo: borra solo las filas de esta fuente e inserta las
-        nuevas, para no pisar los KPIs de otras fuentes del mismo cliente.
+        Persiste los KPIs (capa semantica) en <esquema>._kpis.
+
+        A diferencia del catalogo, los KPIs son a nivel de CLIENTE, no por
+        fuente: una metrica como 'runway_inventario' cruza ventas e inventario,
+        no pertenece a una sola fuente. Por eso hacemos REEMPLAZO TOTAL (borrar
+        todo e insertar) en vez de scopear por fuente_id. Asi, si dos fuentes
+        leen el mismo Sheet y traen el mismo tab '_kpis', la ultima en escribir
+        deja un unico juego de filas en vez de duplicarlas.
+
+        Supuesto: los KPIs se definen en UN solo tab '_kpis'. Si algun dia los
+        repartis en Sheets distintos, habria que unificarlos (este metodo se
+        queda con el ultimo que escribe).
         """
         self.asegurar_esquema(esquema)
         cols = ("kpi", "nombre", "descripcion", "preguntas_ejemplo", "formula_sql",
@@ -110,8 +119,8 @@ class PostgresDestino(Destino):
                 f'CREATE TABLE IF NOT EXISTS "{esquema}"."_kpis" ('
                 "fuente_id TEXT, " + ", ".join(f"{c} TEXT" for c in cols) + ")"
             ))
-            cx.execute(text(f'DELETE FROM "{esquema}"."_kpis" WHERE fuente_id=:f'),
-                       {"f": fuente_id})
+            # Reemplazo total: borra TODO (no solo esta fuente) para no duplicar.
+            cx.execute(text(f'DELETE FROM "{esquema}"."_kpis"'))
             campos = ", ".join(["fuente_id"] + list(cols))
             binds = ", ".join([":fuente_id"] + [f":{c}" for c in cols])
             for f in filas:
@@ -120,7 +129,7 @@ class PostgresDestino(Destino):
                 cx.execute(text(
                     f'INSERT INTO "{esquema}"."_kpis" ({campos}) VALUES ({binds})'
                 ), params)
-        logger.info("kpis de '%s': %d filas en %s._kpis", fuente_id, len(filas), esquema)
+        logger.info("kpis: %d filas en %s._kpis (reemplazo total)", len(filas), esquema)
 
     def aplicar_comentarios(self, esquema: str, mapa_tablas: dict, filas: list):
         """
