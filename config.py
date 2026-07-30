@@ -109,6 +109,17 @@ BOT_MEMORIA_VENTANA_HORAS = int(os.environ.get("BOT_MEMORIA_VENTANA_HORAS", "72"
 BOT_MEMORIA_TTL_DIAS = int(os.environ.get("BOT_MEMORIA_TTL_DIAS", "30"))
 
 # --------------------------------------------------------------------------
+# Clasificador de intencion: rutea cada mensaje a datos / meta / saludo antes
+# del text-to-SQL. Apagalo (no) para volver a mandar TODO al generador de SQL.
+# --------------------------------------------------------------------------
+BOT_INTENCION = os.environ.get("BOT_INTENCION", "si").strip().lower() in (
+    "si", "sí", "true", "1", "yes"
+)
+BOT_MODELO_INTENCION = os.environ.get(
+    "BOT_MODELO_INTENCION", "claude-haiku-4-5-20251001"
+)
+
+# --------------------------------------------------------------------------
 # WhatsApp Cloud API (Meta / Graph API) — transporte del bot.
 # Reemplaza a Twilio: el mensaje entra como JSON en el webhook y la respuesta
 # se manda con una llamada SALIENTE aparte al Graph API (no se responde en el
