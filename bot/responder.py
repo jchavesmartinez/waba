@@ -22,7 +22,7 @@ solo decide si hace falta ir a la base o no.
 import logging
 
 import registry
-from bot import catalogo, intencion, memoria, nl2sql, warehouse_ro
+from bot import catalogo, intencion, kpis, memoria, nl2sql, warehouse_ro
 
 logger = logging.getLogger("fachavi.bot.responder")
 
@@ -99,20 +99,37 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         logger.info("[%s] sin tablas habilitadas por catalogo", cid)
         return _SIN_TABLAS
 
-    # 1) Generar y validar el SQL. Un reintento pidiendo corregir si falla.
-    #    El historial es solo contexto para interpretar la pregunta; el esquema
-    #    (y por ende el acceso) se re-arma por gobernanza en CADA turno.
-    sql = nl2sql.generar_sql(pregunta, ctx.schema_text, historial=historial)
-    ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
-    if not ok:
-        logger.info("[%s] SQL rechazado (%s); reintento. sql=%s", cid, motivo, sql)
-        sql = nl2sql.generar_sql(pregunta, ctx.schema_text,
-                                 correccion=motivo, sql_previo=sql,
-                                 historial=historial)
+    # Capa semantica: ¿un KPI predefinido calza? ¿hay que pedir contexto o retar?
+    kpis_def = kpis.cargar_kpis(cliente)
+    plan = kpis.planificar(pregunta, kpis_def, ctx, historial=historial)
+    logger.info("[%s] plan=%s kpi=%s", cid, plan["accion"], plan.get("kpi"))
+
+    # El bot pregunta o advierte ANTES de responder: no improvisa un numero.
+    if plan["accion"] in ("pedir_contexto", "retar") and plan.get("mensaje"):
+        return plan["mensaje"]
+
+    # 1) Conseguir el SQL: del KPI (definicion canonica) o del text-to-SQL libre.
+    sql = ""
+    if plan["accion"] == "usar_kpi" and plan.get("sql"):
+        sql = plan["sql"]
         ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
         if not ok:
-            logger.warning("[%s] SQL invalido tras reintento (%s): %s", cid, motivo, sql)
-            return _NO_SEGURO
+            logger.info("[%s] SQL de KPI '%s' invalido (%s); cae a sql_libre",
+                        cid, plan.get("kpi"), motivo)
+            sql = ""  # cae al camino libre abajo
+
+    if not sql:
+        sql = nl2sql.generar_sql(pregunta, ctx.schema_text, historial=historial)
+        ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
+        if not ok:
+            logger.info("[%s] SQL rechazado (%s); reintento. sql=%s", cid, motivo, sql)
+            sql = nl2sql.generar_sql(pregunta, ctx.schema_text,
+                                     correccion=motivo, sql_previo=sql,
+                                     historial=historial)
+            ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
+            if not ok:
+                logger.warning("[%s] SQL invalido tras reintento (%s): %s", cid, motivo, sql)
+                return _NO_SEGURO
 
     # 2) Ejecutar en solo-lectura.
     try:
