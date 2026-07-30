@@ -92,7 +92,8 @@ def _responder_con_cliente(cliente: dict, numero: str, pregunta: str,
 
     # 3) Redactar la respuesta en lenguaje natural (con continuidad).
     try:
-        return nl2sql.redactar_respuesta(pregunta, columnas, filas, historial=historial)
+        return nl2sql.redactar_respuesta(pregunta, columnas, filas,
+                                         historial=historial, sql=sql)
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error redactando respuesta: %s", cid, e)
         # Fallback sin LLM: al menos devolver el dato crudo.

@@ -190,7 +190,14 @@ _SISTEMA_RESP = (
     "'preguntame por el producto que menos vendio') y se consultara en el momento.\n"
     "- Responde SOLO lo que la pregunta de este turno pide y que este en el "
     "resultado. Si el dato pedido no aparece en el resultado, decilo claro; no lo "
-    "inventes ni prometas ir por el."
+    "inventes ni prometas ir por el.\n"
+    "- Se te da la CONSULTA SQL que produjo el resultado. Interpreta las filas "
+    "segun lo que esa consulta calculo (fijate en ORDER BY ASC/DESC, MIN/MAX, "
+    "los filtros). NO copies la etiqueta ni la muletilla de respuestas anteriores: "
+    "si la consulta ordeno ascendente para traer el MENOR, no digas 'el mayor'. "
+    "La pregunta de este turno manda, no el formato del turno pasado.\n"
+    "- Nunca muestres el SQL ni hables de tablas/columnas tecnicas; hablale al "
+    "usuario en terminos de negocio."
 )
 
 
@@ -205,7 +212,7 @@ def _tabla_texto(columnas, filas, tope=30) -> str:
     return "\n".join(lineas)
 
 
-def redactar_respuesta(pregunta: str, columnas, filas, historial=None) -> str:
+def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="") -> str:
     """Convierte el resultado del SELECT en una respuesta de WhatsApp."""
     # Caso trivial: una sola celda -> se responde directo, sin gastar tokens.
     if len(filas) == 1 and len(columnas) == 1:
@@ -214,8 +221,12 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None) -> str:
             return ("No puedo responder eso con los datos habilitados para este "
                     "chat. Preguntame sobre ventas o inventario.")
 
+    # Se incluye el SQL para que el redactor sepa QUE se calculo (ASC/DESC,
+    # agregaciones) y no mal-etiquete un resultado de una pregunta eliptica.
+    bloque_sql = f"Consulta SQL ejecutada (para que la interpretes; NO la muestres):\n{sql}\n\n" if sql else ""
     contenido = (
-        f"Pregunta:\n{pregunta}\n\n"
+        f"Pregunta de este turno:\n{pregunta}\n\n"
+        f"{bloque_sql}"
         f"Resultado de la consulta ({len(filas)} filas):\n{_tabla_texto(columnas, filas)}"
     )
     # El historial va como turnos previos, para que la respuesta tenga
