@@ -8,6 +8,16 @@ Es EL MISMO codigo: solo cambia el DSN.
 Por eso arrancar local NO es trabajo tirado: cuando quieras pasar a MotherDuck
 cambias una variable de entorno y listo. Es la ruta de menor friccion porque
 todo el bot ya habla DuckDB.
+
+PARIDAD CON EL DESTINO POSTGRES (B-18) — que NO hace este destino:
+  - escribir_kpis: no persiste <esquema>._kpis (usa el no-op de la clase base).
+    Consecuencia practica: la capa semantica de KPIs no se puede probar en
+    desarrollo local, solo contra Neon.
+  - aplicar_comentarios: no escribe COMMENT ON nativos.
+  - purgar_corridas: no purga la bitacora (A-04); en local no hace falta.
+Todo lo demas —esquemas, tablas, catalogo, bitacora, frescura y la guarda de
+vaciado— se comporta igual en los dos destinos. Si algun dia esto deja de
+alcanzar, lo que falta esta listado aca arriba.
 """
 
 import json
@@ -21,6 +31,10 @@ import pandas as pd
 from .base import Destino, Corrida, ESQUEMA_META, TABLA_CORRIDAS
 
 logger = logging.getLogger("fachavi.warehouse.duckdb")
+
+# Igual que en el destino Postgres: cuantas corridas OK hacia atras se fusionan
+# para armar el punto de comparacion de la guarda de vaciado (C-01).
+_CORRIDAS_A_FUSIONAR = 20
 
 
 class DuckDBDestino(Destino):
@@ -126,18 +140,31 @@ class DuckDBDestino(Destino):
         )
 
     def ultimo_detalle(self, cliente_id: str, fuente_id: str) -> dict:
-        fila = self.conectar().execute(
+        """
+        Punto de comparacion de la guarda de vaciado. Misma semantica que el
+        destino Postgres (C-01): se FUSIONAN las ultimas corridas OK en vez de
+        tomar solo la ultima, para que un hueco en el historial —por ejemplo una
+        corrida que bloqueo la escritura de una tabla— no deje a esa tabla sin
+        con que compararse y desarme la guarda.
+        """
+        filas = self.conectar().execute(
             f'SELECT detalle FROM "{ESQUEMA_META}"."{TABLA_CORRIDAS}" '
             f"WHERE cliente_id=? AND fuente_id=? AND estado LIKE 'ok%' "
-            "ORDER BY fin DESC LIMIT 1",
-            [cliente_id, fuente_id],
-        ).fetchone()
-        if not fila or not fila[0]:
-            return {}
-        try:
-            return json.loads(fila[0])
-        except (ValueError, TypeError):
-            return {}
+            "ORDER BY fin DESC LIMIT ?",
+            [cliente_id, fuente_id, _CORRIDAS_A_FUSIONAR],
+        ).fetchall()
+
+        fusionado: dict = {}
+        for (crudo,) in reversed(filas):     # de la mas vieja a la mas nueva
+            if not crudo:
+                continue
+            try:
+                d = json.loads(crudo)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(d, dict):
+                fusionado.update(d)
+        return fusionado
 
     def ultima_corrida_ok(self, cliente_id: str, fuente_id: str) -> Optional[datetime]:
         fila = self.conectar().execute(

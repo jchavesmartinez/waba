@@ -17,16 +17,25 @@ Toda tabla escrita lleva columnas de trazabilidad (Fase 0 - linaje):
 Ademas cada corrida se registra en la tabla de control _meta.sync_corridas,
 que es lo que despues permite: medir frescura, detectar syncs rotos y
 responder "¿de cuando es este dato?".
+
+Nota de dependencias (B-05): este modulo NO importa pandas en el top. El bot lo
+importa solo por nombre_esquema()/nombre_tabla(), que son manipulacion de
+strings; cargar pandas ahi eran ~40 MB de RAM y varios segundos de arranque
+para nada. pandas se importa adentro de agregar_trazabilidad(), que es lo unico
+que de verdad lo necesita (y eso solo corre en la ingesta).
 """
+
+from __future__ import annotations
 
 import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-import pandas as pd
+if TYPE_CHECKING:  # solo para type checkers; no se ejecuta en runtime
+    import pandas as pd
 
 logger = logging.getLogger("fachavi.warehouse")
 
@@ -43,7 +52,8 @@ class Corrida:
     tipo: str
     inicio: datetime
     fin: Optional[datetime] = None
-    estado: str = "corriendo"          # corriendo | ok | error | omitido
+    # corriendo | ok | ok_con_alertas | bloqueado | error | omitido
+    estado: str = "corriendo"
     filas: int = 0
     tablas: list = field(default_factory=list)
     error: str = ""
@@ -83,7 +93,7 @@ def nombre_tabla(fuente_id: str, tabla: str) -> str:
     return f"{_sanear(fuente_id)}__{_sanear(tabla)}"
 
 
-def agregar_trazabilidad(df: pd.DataFrame, corrida: Corrida) -> pd.DataFrame:
+def agregar_trazabilidad(df: "pd.DataFrame", corrida: Corrida) -> "pd.DataFrame":
     """Agrega las columnas de linaje a cada fila antes de escribirla."""
     df = df.copy()
     df["_corrida_id"] = corrida.corrida_id
@@ -117,11 +127,14 @@ class Destino(ABC):
         """Crea el esquema si no existe (aislamiento por cliente)."""
 
     @abstractmethod
-    def escribir_tabla(self, esquema: str, tabla: str, df: pd.DataFrame):
+    def escribir_tabla(self, esquema: str, tabla: str, df: "pd.DataFrame"):
         """
         Escribe el DataFrame reemplazando la tabla completa (full refresh).
         Para el volumen de una PYME esto es lo correcto y lo mas simple:
         sin estado incremental que se pueda desincronizar.
+
+        El reemplazo debe ser ATOMICO: en ningun momento puede existir una
+        ventana en la que la tabla no exista, porque el bot consulta en vivo.
         """
 
     # --- control / metadata ---
@@ -137,11 +150,24 @@ class Destino(ABC):
 
     @abstractmethod
     def registrar_corrida(self, corrida: Corrida):
-        """Persiste el resultado de una corrida en _meta.sync_corridas."""    @abstractmethod
+        """Persiste el resultado de una corrida en _meta.sync_corridas."""
+
+    # OJO (C-07): este decorador estaba pegado al final del docstring de
+    # registrar_corrida. Python NO lo tomaba como error de sintaxis (desde 3.5
+    # '@' es tambien el operador de multiplicacion de matrices), asi que
+    # ultimo_detalle habia dejado de ser abstracto en silencio y quedaba una
+    # expresion 'str @ function' latente. El salto de linea es el arreglo.
+    @abstractmethod
     def ultimo_detalle(self, cliente_id: str, fuente_id: str) -> dict:
         """
         Devuelve el 'detalle' de la ultima corrida exitosa (forma previa de las
         tablas). Es contra esto que se detecta schema drift y colapso de filas.
+
+        Contrato reforzado (C-01): la implementacion NO debe devolver
+        simplemente el detalle de la ultima corrida, sino la FUSION de las
+        ultimas corridas OK (la mas reciente gana por tabla). Si no, un hueco
+        en el historial —por ejemplo una corrida que bloqueo la escritura y no
+        registro esa tabla— desarma la guarda de vaciado.
         """
 
     @abstractmethod
@@ -160,3 +186,14 @@ class Destino(ABC):
 
     def __repr__(self):
         return f"<{self.__class__.__name__} tipo={self.tipo}>"
+
+
+# Los OCHO metodos que todo destino concreto DEBE implementar (eran siete
+# mientras C-07 tenia a ultimo_detalle fuera del contrato). Se usa en la prueba
+# de conformidad (tests/test_contrato_destinos.py) para que un error como ese no
+# vuelva a pasar desapercibido.
+METODOS_CONTRATO = (
+    "conectar", "cerrar", "asegurar_esquema", "escribir_tabla",
+    "escribir_catalogo", "registrar_corrida", "ultimo_detalle",
+    "ultima_corrida_ok",
+)
