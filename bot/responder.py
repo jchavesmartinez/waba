@@ -1,18 +1,28 @@
 """
-Orquestador del bot: junta registro, catalogo, text-to-SQL, ejecucion y memoria.
+Orquestador del bot: clasifica la intencion y encadena registro, memoria,
+catalogo, text-to-SQL y ejecucion.
 
     responder(numero, pregunta) -> str  (texto listo para mandar por WhatsApp)
 
-Es lo unico que necesita conocer app.py (el webhook). Toda la logica de
-gobernanza (que tablas se pueden leer) esta en bot/catalogo.py; la memoria
-conversacional en bot/memoria.py; aca solo se encadena el flujo y se manejan
-los caminos de error con mensajes claros.
+Flujo:
+    1. Resolver numero -> cliente (registry).
+    2. Comando 'olvidá' -> borra memoria.
+    3. Cargar historial (memoria).
+    4. Clasificar intencion (intencion): datos / meta / saludo.
+         - saludo -> respuesta fija.
+         - meta   -> se responde con el historial, SIN tocar la base.
+         - datos  -> catalogo + text-to-SQL + ejecucion + redaccion (como siempre).
+    5. Guardar el intercambio.
+
+La gobernanza (que tablas se pueden leer) sigue en bot/catalogo.py y se
+re-evalua en cada consulta de datos. El clasificador NO afecta la seguridad:
+solo decide si hace falta ir a la base o no.
 """
 
 import logging
 
 import registry
-from bot import catalogo, memoria, nl2sql, warehouse_ro
+from bot import catalogo, intencion, memoria, nl2sql, warehouse_ro
 
 logger = logging.getLogger("fachavi.bot.responder")
 
@@ -31,6 +41,11 @@ _NO_SEGURO = (
 )
 _ERROR = "Tuve un problema consultando los datos. Intentá de nuevo en un momento."
 _OLVIDADO = "Listo, borré lo que veníamos hablando. Empezamos de cero. 🙂"
+_SALUDO = (
+    "¡Hola! 👋 Soy tu asistente de datos. Preguntame sobre tus ventas o "
+    "inventario, por ejemplo: «¿cuál fue el producto más vendido?» o «¿cuánto "
+    "vendimos ayer?»."
+)
 
 # Comandos para borrar la memoria del propio numero.
 _CMD_OLVIDAR = {"olvidá", "olvida", "olvidate", "olvídate", "reset", "reiniciar",
@@ -43,6 +58,8 @@ def responder(numero: str, pregunta: str) -> str:
         logger.info("numero no registrado: %s", numero)
         return _NO_REGISTRADO
 
+    cid = cliente["cliente_id"]
+
     # Comando explicito para olvidar el historial de este numero.
     if pregunta.strip().lower() in _CMD_OLVIDAR:
         memoria.olvidar(cliente, numero)
@@ -51,16 +68,30 @@ def responder(numero: str, pregunta: str) -> str:
     # La memoria es best-effort: si falla, seguimos sin historial.
     historial = memoria.cargar_historial(cliente, numero)
 
-    respuesta = _responder_con_cliente(cliente, numero, pregunta, historial)
+    # Ruteo por intencion.
+    intent = intencion.clasificar(pregunta, historial)
+    logger.info("[%s] intencion=%s", cid, intent)
+
+    if intent == "saludo":
+        respuesta = _SALUDO
+    elif intent == "meta":
+        # Pregunta sobre la conversacion: se responde con el historial, sin base.
+        try:
+            respuesta = intencion.responder_conversacional(pregunta, historial)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[%s] error respondiendo meta: %s", cid, e)
+            respuesta = ("No pude procesar eso. Preguntame algo sobre tus datos de "
+                         "ventas o inventario.")
+    else:  # "datos"
+        respuesta = _responder_datos(cliente, numero, pregunta, historial)
 
     # Guardar el intercambio para dar continuidad a los proximos mensajes.
-    # No se guardan los caminos "administrativos" (no registrado / olvidar).
     memoria.guardar_intercambio(cliente, numero, pregunta, respuesta)
     return respuesta
 
 
-def _responder_con_cliente(cliente: dict, numero: str, pregunta: str,
-                           historial: list) -> str:
+def _responder_datos(cliente: dict, numero: str, pregunta: str,
+                     historial: list) -> str:
     cid = cliente["cliente_id"]
 
     ctx = catalogo.construir_contexto(cliente)
