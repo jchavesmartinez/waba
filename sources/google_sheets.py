@@ -32,6 +32,7 @@ import pandas as pd
 logger = logging.getLogger("fachavi.sources.google_sheets")
 
 CATALOGO_SHEET = "_catalogo"
+KPIS_SHEET = "_kpis"
 
 
 class GoogleSheetsSource(Source):
@@ -125,11 +126,17 @@ class GoogleSheetsSource(Source):
                     self.fuente_id, len(catalogo_filas), antes,
                 )
 
+        # KPIs (capa semantica): se leen del tab '_kpis' del mismo Sheet y se
+        # adjuntan solo si esta fuente cargo tablas (mismo criterio que el
+        # catalogo, para no duplicar entre fuentes del mismo libro).
+        kpis_filas = self._leer_kpis(libro) if tablas else []
+
         return Fragmento(
             schema="\n\n".join(schema_parts),
             catalogo=catalogo,
             tablas=tablas,
             catalogo_filas=catalogo_filas,
+            kpis_filas=kpis_filas,
         )
 
     def _leer_catalogo(self, libro):
@@ -161,3 +168,27 @@ class GoogleSheetsSource(Source):
                 "dueno": f.get("dueño", "") or f.get("dueno", ""),
             })
         return construir_catalogo(filas), norm
+
+    # Columnas del tab '_kpis'. 'kpi' y 'formula_sql' son las obligatorias; el
+    # resto documenta/gobierna la metrica. Se normalizan para que la tabla del
+    # warehouse tenga columnas fijas aunque el Sheet traiga otras de mas.
+    _KPIS_COLS = ("kpi", "nombre", "descripcion", "preguntas_ejemplo",
+                  "formula_sql", "tabla", "dimensiones", "unidad",
+                  "supuestos", "minimo_datos", "instruccion")
+
+    def _leer_kpis(self, libro):
+        """Lee el tab '_kpis' si existe; si falta, no hay capa semantica."""
+        try:
+            ws = libro.worksheet(KPIS_SHEET)
+        except Exception:  # noqa: BLE001
+            logger.info("Fuente '%s' sin pestania '%s' (sin KPIs).",
+                        self.fuente_id, KPIS_SHEET)
+            return []
+        filas = ws.get_all_records()
+        norm = []
+        for f in filas:
+            f = {str(k).strip().lower(): str(v).strip() for k, v in f.items()}
+            if not f.get("kpi"):
+                continue
+            norm.append({c: f.get(c, "") for c in self._KPIS_COLS})
+        return norm

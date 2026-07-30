@@ -36,6 +36,9 @@ class Fragmento:
     # Filas estructuradas del catalogo, para persistirlas como TABLA en el
     # warehouse. Asi el bot consulta governance sin tocar Google Sheets.
     catalogo_filas: List[dict] = field(default_factory=list)
+    # Filas del tab '_kpis' (capa semantica): metricas predefinidas que el bot
+    # usa para responder de forma consistente. Se persisten en <esquema>._kpis.
+    kpis_filas: List[dict] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
