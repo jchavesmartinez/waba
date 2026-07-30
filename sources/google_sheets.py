@@ -19,6 +19,7 @@ from gclient import abrir_libro
 from .base import (
     Source,
     Fragmento,
+    dia_primero_de,
     inferir_tipos,
     registrar_df,
     describir_tabla,
@@ -66,10 +67,18 @@ class GoogleSheetsSource(Source):
                 self.fuente_id, ", ".join(sorted(ocultas)),
             )
 
+        # A-08: get_all_values() trae la hoja COMPLETA a memoria de un saque.
+        # Una hoja de cientos de miles de filas puede agotar el contenedor de
+        # Render y matar la corrida de TODOS los clientes. Con este tope, en vez
+        # de morir se recorta y se avisa fuerte. 0 = sin tope.
+        max_filas = int(self.config.get("max_filas", 0) or 0)
+        dia_primero = dia_primero_de(self.config)
+
         libro = abrir_libro(spreadsheet_id)
         schema_parts = []
         tablas = []
         vistas = []
+        alertas = []
 
         for ws in libro.worksheets():
             titulo = ws.title
@@ -85,14 +94,33 @@ class GoogleSheetsSource(Source):
 
             registros = ws.get_all_values()
             if not registros or len(registros) < 2:
-                logger.info("[%s] pestania '%s' vacia o sin filas; se salta",
-                            self.fuente_id, titulo)
+                # B-12: esto era un logger.info y por lo tanto invisible. Si la
+                # tabla YA existia con datos, saltarla significa que la guarda de
+                # vaciado nunca llega a evaluarse (no se crea tabla para
+                # comparar) y el dato viejo se queda ahi callado, envejeciendo.
+                msg = (f"[{self.fuente_id}] la pestania '{titulo}' llego SIN FILAS "
+                       "(solo encabezados o vacia); se salta y no se actualiza "
+                       "nada de esa tabla.")
+                logger.warning(msg)
+                alertas.append(msg)
                 continue
 
             headers = registros[0]
-            df = pd.DataFrame(registros[1:], columns=headers)
+            filas_datos = registros[1:]
+            if max_filas and len(filas_datos) > max_filas:
+                msg = (f"[{self.fuente_id}] la pestania '{titulo}' tiene "
+                       f"{len(filas_datos)} filas y el tope configurado es "
+                       f"{max_filas}: se cargan las primeras {max_filas}. "
+                       "HAY DATOS QUE NO ENTRARON.")
+                logger.warning(msg)
+                alertas.append(msg)
+                filas_datos = filas_datos[:max_filas]
+
+            df = pd.DataFrame(filas_datos, columns=headers)
             df.columns = normalizar_columnas(df.columns)
-            df = inferir_tipos(df)
+            df = inferir_tipos(df, alertas=alertas,
+                               contexto=f"{self.fuente_id}/{titulo}",
+                               dia_primero=dia_primero)
 
             tabla = registrar_df(con, df, titulo, self.fuente_id)
             tablas.append(tabla)
@@ -137,6 +165,7 @@ class GoogleSheetsSource(Source):
             tablas=tablas,
             catalogo_filas=catalogo_filas,
             kpis_filas=kpis_filas,
+            alertas=alertas,
         )
 
     def _leer_catalogo(self, libro):

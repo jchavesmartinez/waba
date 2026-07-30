@@ -22,15 +22,21 @@ Config esperada (JSON en la columna 'config' del registro):
         {"tabla":"ventas","columna":"*","descripcion":"Ventas diarias",
          "sistema_origen":"ERP","frecuencia":"Diaria","dueño":"Comercial"}
      ]}
+
+  Limites de descarga (opcionales; ver A-09):
+    {"timeout_seg": 30, "max_mb": 50}
 """
 
+import io
 import logging
 
+import httpx
 import pandas as pd
 
 from .base import (
     Source,
     Fragmento,
+    dia_primero_de,
     inferir_tipos,
     registrar_df,
     describir_tabla,
@@ -40,6 +46,13 @@ from .base import (
 )
 
 logger = logging.getLogger("fachavi.sources.csv_url")
+
+# A-09: pandas.read_csv(url) descargaba directo, sin limite de tiempo ni de
+# tamaño. Una direccion que responde muy lento colgaba la corrida ENTERA
+# (todos los clientes) de forma indefinida, y un archivo gigante agotaba la
+# memoria del contenedor. httpx ya es dependencia del proyecto.
+TIMEOUT_DEFECTO_SEG = 30.0
+MAX_MB_DEFECTO = 50
 
 
 class CSVURLSource(Source):
@@ -52,17 +65,25 @@ class CSVURLSource(Source):
                 f"Fuente '{self.fuente_id}' (csv_url) sin 'url' ni 'tablas' en config."
             )
 
+        timeout = float(self.config.get("timeout_seg", TIMEOUT_DEFECTO_SEG))
+        max_bytes = int(self.config.get("max_mb", MAX_MB_DEFECTO)) * 1024 * 1024
+        dia_primero = dia_primero_de(self.config)
+
         schema_parts = []
         tablas = []
+        alertas = []
         for spec in specs:
             url = spec.get("url", "").strip()
             if not url:
                 continue
             nombre_deseado = spec.get("tabla") or "datos"
 
-            df = pd.read_csv(url)
+            crudo = self._descargar(url, timeout, max_bytes)
+            df = pd.read_csv(io.BytesIO(crudo))
             df.columns = normalizar_columnas(df.columns)
-            df = inferir_tipos(df)
+            df = inferir_tipos(df, alertas=alertas,
+                               contexto=f"{self.fuente_id}/{nombre_deseado}",
+                               dia_primero=dia_primero)
 
             tabla = registrar_df(con, df, nombre_deseado, self.fuente_id)
             tablas.append(tabla)
@@ -76,7 +97,28 @@ class CSVURLSource(Source):
             schema="\n\n".join(schema_parts),
             catalogo=catalogo,
             tablas=tablas,
+            alertas=alertas,
         )
+
+    def _descargar(self, url: str, timeout: float, max_bytes: int) -> bytes:
+        """
+        Descarga el CSV con limite de tiempo y de tamaño (A-09). Se lee por
+        pedazos para poder cortar ANTES de traerse un archivo enorme entero a
+        memoria, no despues.
+        """
+        acumulado = bytearray()
+        with httpx.Client(timeout=timeout, follow_redirects=True) as cli:
+            with cli.stream("GET", url) as r:
+                r.raise_for_status()
+                for pedazo in r.iter_bytes():
+                    acumulado += pedazo
+                    if max_bytes and len(acumulado) > max_bytes:
+                        raise RuntimeError(
+                            f"Fuente '{self.fuente_id}': el CSV de {url[:80]} pasa "
+                            f"de {max_bytes // (1024*1024)} MB. Subi 'max_mb' en la "
+                            "config de la fuente si de verdad es asi de grande."
+                        )
+        return bytes(acumulado)
 
     def _normaliza_specs(self):
         """Acepta {url, tabla} o {tablas:[{url,tabla}, ...]} y devuelve una lista."""
