@@ -1,17 +1,18 @@
 """
-Orquestador del bot: junta registro, catalogo, text-to-SQL y ejecucion.
+Orquestador del bot: junta registro, catalogo, text-to-SQL, ejecucion y memoria.
 
     responder(numero, pregunta) -> str  (texto listo para mandar por WhatsApp)
 
 Es lo unico que necesita conocer app.py (el webhook). Toda la logica de
-gobernanza (que tablas se pueden leer) esta en bot/catalogo.py; aca solo se
-encadena el flujo y se manejan los caminos de error con mensajes claros.
+gobernanza (que tablas se pueden leer) esta en bot/catalogo.py; la memoria
+conversacional en bot/memoria.py; aca solo se encadena el flujo y se manejan
+los caminos de error con mensajes claros.
 """
 
 import logging
 
 import registry
-from bot import catalogo, nl2sql, warehouse_ro
+from bot import catalogo, memoria, nl2sql, warehouse_ro
 
 logger = logging.getLogger("fachavi.bot.responder")
 
@@ -29,6 +30,11 @@ _NO_SEGURO = (
     "«¿cuánto vendimos ayer?» o «¿qué productos tienen bajo inventario?»."
 )
 _ERROR = "Tuve un problema consultando los datos. Intentá de nuevo en un momento."
+_OLVIDADO = "Listo, borré lo que veníamos hablando. Empezamos de cero. 🙂"
+
+# Comandos para borrar la memoria del propio numero.
+_CMD_OLVIDAR = {"olvidá", "olvida", "olvidate", "olvídate", "reset", "reiniciar",
+                "borrá memoria", "borra memoria", "empezar de cero"}
 
 
 def responder(numero: str, pregunta: str) -> str:
@@ -37,6 +43,24 @@ def responder(numero: str, pregunta: str) -> str:
         logger.info("numero no registrado: %s", numero)
         return _NO_REGISTRADO
 
+    # Comando explicito para olvidar el historial de este numero.
+    if pregunta.strip().lower() in _CMD_OLVIDAR:
+        memoria.olvidar(cliente, numero)
+        return _OLVIDADO
+
+    # La memoria es best-effort: si falla, seguimos sin historial.
+    historial = memoria.cargar_historial(cliente, numero)
+
+    respuesta = _responder_con_cliente(cliente, numero, pregunta, historial)
+
+    # Guardar el intercambio para dar continuidad a los proximos mensajes.
+    # No se guardan los caminos "administrativos" (no registrado / olvidar).
+    memoria.guardar_intercambio(cliente, numero, pregunta, respuesta)
+    return respuesta
+
+
+def _responder_con_cliente(cliente: dict, numero: str, pregunta: str,
+                           historial: list) -> str:
     cid = cliente["cliente_id"]
 
     ctx = catalogo.construir_contexto(cliente)
@@ -45,12 +69,15 @@ def responder(numero: str, pregunta: str) -> str:
         return _SIN_TABLAS
 
     # 1) Generar y validar el SQL. Un reintento pidiendo corregir si falla.
-    sql = nl2sql.generar_sql(pregunta, ctx.schema_text)
+    #    El historial es solo contexto para interpretar la pregunta; el esquema
+    #    (y por ende el acceso) se re-arma por gobernanza en CADA turno.
+    sql = nl2sql.generar_sql(pregunta, ctx.schema_text, historial=historial)
     ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
     if not ok:
         logger.info("[%s] SQL rechazado (%s); reintento. sql=%s", cid, motivo, sql)
         sql = nl2sql.generar_sql(pregunta, ctx.schema_text,
-                                 correccion=motivo, sql_previo=sql)
+                                 correccion=motivo, sql_previo=sql,
+                                 historial=historial)
         ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
         if not ok:
             logger.warning("[%s] SQL invalido tras reintento (%s): %s", cid, motivo, sql)
@@ -63,9 +90,9 @@ def responder(numero: str, pregunta: str) -> str:
         logger.exception("[%s] error ejecutando SQL: %s", cid, e)
         return _ERROR
 
-    # 3) Redactar la respuesta en lenguaje natural.
+    # 3) Redactar la respuesta en lenguaje natural (con continuidad).
     try:
-        return nl2sql.redactar_respuesta(pregunta, columnas, filas)
+        return nl2sql.redactar_respuesta(pregunta, columnas, filas, historial=historial)
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error redactando respuesta: %s", cid, e)
         # Fallback sin LLM: al menos devolver el dato crudo.

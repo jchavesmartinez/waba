@@ -64,13 +64,51 @@ def _extraer_sql(texto: str) -> str:
     return t.strip().rstrip(";").strip()
 
 
+def _historial_texto(historial) -> str:
+    """Formatea el historial como bloque de texto (para el prompt de SQL)."""
+    if not historial:
+        return ""
+    etiqueta = {"user": "Usuario", "assistant": "Asistente"}
+    lineas = [f"{etiqueta.get(t['rol'], t['rol'])}: {t['contenido']}"
+              for t in historial]
+    return "\n".join(lineas)
+
+
+def _historial_a_messages(historial) -> list:
+    """
+    Convierte el historial en mensajes user/assistant para la API, saneado:
+    tiene que empezar en 'user' y alternar. Descarta turnos que rompan eso.
+    """
+    msgs = []
+    for t in historial or []:
+        rol = t.get("rol")
+        if rol not in ("user", "assistant"):
+            continue
+        if not msgs and rol != "user":
+            continue  # no puede arrancar con assistant
+        if msgs and msgs[-1]["role"] == rol:
+            continue  # sin dos del mismo rol seguidos
+        msgs.append({"role": rol, "content": t["contenido"]})
+    return msgs
+
+
 def generar_sql(pregunta: str, schema_text: str,
-                correccion: str = "", sql_previo: str = "") -> str:
+                correccion: str = "", sql_previo: str = "",
+                historial=None) -> str:
     """Le pide a Claude el SELECT. `correccion` se usa en el reintento."""
     partes = [
         f"Esquema disponible (unicas tablas que existen para vos):\n\n{schema_text}\n",
-        f"Pregunta del usuario:\n{pregunta}\n",
     ]
+    # El historial ayuda a resolver referencias ("y de proveedores?", "y ayer?").
+    # OJO: es solo contexto para entender la pregunta; NO amplia el esquema. Las
+    # unicas tablas que existen son las del bloque de arriba.
+    hist = _historial_texto(historial)
+    if hist:
+        partes.append(
+            "Conversacion reciente (contexto para interpretar la pregunta; NO "
+            f"agrega tablas ni columnas):\n{hist}\n"
+        )
+    partes.append(f"Pregunta actual del usuario:\n{pregunta}\n")
     if correccion:
         partes.append(
             f"El intento anterior fue rechazado por el validador: {correccion}\n"
@@ -156,7 +194,7 @@ def _tabla_texto(columnas, filas, tope=30) -> str:
     return "\n".join(lineas)
 
 
-def redactar_respuesta(pregunta: str, columnas, filas) -> str:
+def redactar_respuesta(pregunta: str, columnas, filas, historial=None) -> str:
     """Convierte el resultado del SELECT en una respuesta de WhatsApp."""
     # Caso trivial: una sola celda -> se responde directo, sin gastar tokens.
     if len(filas) == 1 and len(columnas) == 1:
@@ -169,10 +207,15 @@ def redactar_respuesta(pregunta: str, columnas, filas) -> str:
         f"Pregunta:\n{pregunta}\n\n"
         f"Resultado de la consulta ({len(filas)} filas):\n{_tabla_texto(columnas, filas)}"
     )
+    # El historial va como turnos previos, para que la respuesta tenga
+    # continuidad ("como te decia", "de esos 3 productos..."). El turno actual
+    # es el ultimo mensaje 'user'.
+    messages = _historial_a_messages(historial)
+    messages.append({"role": "user", "content": contenido})
     resp = _anthropic().messages.create(
         model=config.BOT_MODELO_RESPUESTA,
         max_tokens=500,
         system=_SISTEMA_RESP,
-        messages=[{"role": "user", "content": contenido}],
+        messages=messages,
     )
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
