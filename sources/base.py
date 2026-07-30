@@ -39,6 +39,11 @@ class Fragmento:
     # Filas del tab '_kpis' (capa semantica): metricas predefinidas que el bot
     # usa para responder de forma consistente. Se persisten en <esquema>._kpis.
     kpis_filas: List[dict] = field(default_factory=list)
+    # Alertas de calidad que detecta la PROPIA fuente (paginacion truncada,
+    # valores descartados al inferir tipos, tope de filas alcanzado...). sync.py
+    # las suma a corrida.alertas y quedan en la bitacora. Antes estas cosas solo
+    # se veian en el log, o sea: no se veian.
+    alertas: List[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -99,19 +104,27 @@ def normalizar_columnas(nombres) -> list:
     """
     limpios = []
     vistos = {}
+    usados = set()
     for i, n in enumerate(nombres):
         base = limpiar_nombre(n) if str(n).strip() else f"columna_{i + 1}"
         if base in vistos:
-            vistos[base] += 1
-            base = f"{base}_{vistos[base]}"
-            logger.warning("Encabezado duplicado; se renombra a '%s'", base)
+            # B-06: no basta con sumar el contador. Si la hoja YA trae una
+            # columna 'monto_2' y ademas dos 'monto', el contador generaba dos
+            # 'monto_2'. Se avanza hasta encontrar un nombre libre de verdad.
+            candidato = base
+            while candidato in usados:
+                vistos[base] += 1
+                candidato = f"{base}_{vistos[base]}"
+            logger.warning("Encabezado duplicado; se renombra a '%s'", candidato)
+            base = candidato
         else:
             vistos[base] = 1
+        usados.add(base)
         limpios.append(base)
     return limpios
 
 
-def _a_fecha(serie: pd.Series) -> pd.Series:
+def _a_fecha(serie: pd.Series, dia_primero: bool = True) -> pd.Series:
     """
     Convierte a fecha tolerando los formatos que aparecen en la practica:
       - Google Sheets en es-CR : 07/01/2026        (dia primero)
@@ -119,23 +132,49 @@ def _a_fecha(serie: pd.Series) -> pd.Series:
       - ISO con hora           : 2026-01-07 00:00:00
 
     'format=mixed' parsea cada valor por separado, que es lo unico que acierta
-    en los cuatro casos. Con dayfirst=True desempata el 07/01 a favor de
-    'dia/mes', que es la convencion tica.
+    en los cuatro casos.
+
+    A-07: `dia_primero` desempata 07/01. True (default) = convencion tica, 7 de
+    enero. Si el cliente exporta de un sistema en ingles es 1 de julio y nadie
+    se entera: los dias del 13 en adelante se salvan solos, los del 1 al 12 no.
+    Se controla por fuente con {"formato_fecha": "mes_primero"} en su config, o
+    global con la variable FORMATO_FECHA.
     """
     try:
-        return pd.to_datetime(serie, errors="coerce", format="mixed", dayfirst=True)
+        return pd.to_datetime(serie, errors="coerce", format="mixed",
+                              dayfirst=dia_primero)
     except (ValueError, TypeError):
-        return pd.to_datetime(serie, errors="coerce", dayfirst=True)
+        return pd.to_datetime(serie, errors="coerce", dayfirst=dia_primero)
 
 
-def inferir_tipos(df: pd.DataFrame) -> pd.DataFrame:
+# A-03: si al convertir una columna a numero/fecha se pierde mas de este
+# porcentaje de valores NO vacios, se genera una alerta de calidad. El umbral de
+# conversion sigue siendo 80%: entre 80% y 95% de aciertos, la columna se
+# convierte igual PERO el 5-20% descartado deja de ser invisible.
+UMBRAL_INFERENCIA = 0.8
+UMBRAL_ALERTA_DESCARTE = 0.05
+
+
+def inferir_tipos(df: pd.DataFrame, alertas: list = None,
+                  contexto: str = "", dia_primero: bool = True) -> pd.DataFrame:
     """
     Convierte columnas de texto a numero o fecha cuando >=80% de los valores
     lo permiten. Quita separadores de miles y simbolos de moneda (₡, $).
+
+    B-07: trabaja sobre una COPIA. Antes modificaba el DataFrame que recibia, lo
+    cual funcionaba de casualidad (nadie reusaba el original) y era una trampa
+    puesta para el proximo cambio.
+
+    A-03: `alertas` es una lista donde se anotan los valores que la conversion
+    descarto. Sin esto, un codigo '001' perdia los ceros, un 'A45' dentro de una
+    columna numerica se volvia vacio y una columna con '₡5.000' y '$10' producia
+    5000 y 10 sumables entre si — todo en absoluto silencio.
     """
+    df = df.copy()
     for col in df.columns:
         serie = df[col]
-        umbral = max(1, int(0.8 * len(serie)))
+        no_vacios = serie.astype(str).str.strip().ne("").sum()
+        umbral = max(1, int(UMBRAL_INFERENCIA * len(serie)))
 
         limpio = (
             serie.astype(str)
@@ -145,15 +184,50 @@ def inferir_tipos(df: pd.DataFrame) -> pd.DataFrame:
         num = pd.to_numeric(limpio, errors="coerce")
         if num.notna().sum() >= umbral:
             df[col] = num
+            _avisar_descartes(alertas, contexto, col, "numero",
+                              int(no_vacios - num.notna().sum()), int(no_vacios))
             continue
 
-        fecha = _a_fecha(serie)
+        fecha = _a_fecha(serie, dia_primero=dia_primero)
         if fecha.notna().sum() >= umbral:
             df[col] = fecha
+            _avisar_descartes(alertas, contexto, col, "fecha",
+                              int(no_vacios - fecha.notna().sum()), int(no_vacios))
             continue
 
         df[col] = serie.astype(str)
     return df
+
+
+def _avisar_descartes(alertas, contexto: str, columna: str, tipo: str,
+                      descartados: int, total: int) -> None:
+    """Anota una alerta si la conversion perdio una fraccion no trivial (A-03)."""
+    if descartados <= 0 or total <= 0:
+        return
+    fraccion = descartados / total
+    if fraccion < UMBRAL_ALERTA_DESCARTE:
+        return
+    msg = (
+        f"[{contexto or 'fuente'}] la columna '{columna}' se convirtio a {tipo} "
+        f"y {descartados} de {total} valores ({fraccion:.0%}) quedaron VACIOS. "
+        "Revisa si son datos con otro formato (codigos con ceros a la izquierda, "
+        "monedas mezcladas, fechas anglosajonas)."
+    )
+    logger.warning(msg)
+    if alertas is not None:
+        alertas.append(msg)
+
+
+def dia_primero_de(config_fuente: dict) -> bool:
+    """
+    Resuelve la convencion de fecha de una fuente (A-07):
+    su propio {"formato_fecha": "..."} y, si no lo trae, la global.
+    """
+    import config as _cfg
+    valor = str((config_fuente or {}).get("formato_fecha", "")).strip().lower()
+    if not valor:
+        valor = getattr(_cfg, "FORMATO_FECHA", "dia_primero")
+    return valor not in ("mes_primero", "mdy", "us", "en")
 
 
 def _tablas_existentes(con: duckdb.DuckDBPyConnection) -> set:
