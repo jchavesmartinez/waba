@@ -7,7 +7,7 @@ Para cada cliente del registro, para cada fuente ACTIVA:
     2. Carga la fuente con el connector existente (sources/) en una DuckDB
        temporal en memoria.
     3. Drena esas tablas hacia el warehouse, agregando columnas de linaje.
-    4. Registra la corrida en _meta.sync_corridas (exito o error).
+    4. Registra la corrida en _meta.sync_corridas (exito, bloqueo o error).
 
 Aislamiento de fallos: si una fuente truena, se registra el error y se sigue
 con las demas. Un Sheet mal compartido no debe frenar la ingesta del resto.
@@ -125,6 +125,11 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
         esquema = nombre_esquema(cid)
         previo = {} if probar else destino.ultimo_detalle(cid, fuente["fuente_id"])
 
+        # Alertas que reporta la propia fuente (paginacion truncada, tipos
+        # descartados en la inferencia, etc.). Antes se perdian en el log.
+        corrida.alertas += list(getattr(frag, "alertas", []))
+
+        bloqueadas = []
         for tabla in frag.tablas:
             df = tmp.execute(f"SELECT * FROM {tabla}").df()
             columnas = list(df.columns)
@@ -136,6 +141,15 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
                 logger.warning("[%s/%s] %s", cid, fuente["fuente_id"], a)
 
             if bloquear:
+                # C-01 — EL ARREGLO MAS IMPORTANTE DEL REPO.
+                # Antes este 'continue' salteaba la linea que llena
+                # corrida.detalle[destino_tabla]. Resultado: la corrida
+                # siguiente no encontraba con que comparar, la guarda no se
+                # disparaba y escribia 0 filas encima de los datos buenos. La
+                # guarda protegia 15 minutos y despues se desarmaba sola.
+                # Copiar el detalle anterior la sostiene indefinidamente.
+                corrida.detalle[destino_tabla] = previo[destino_tabla]
+                bloqueadas.append(destino_tabla)
                 continue  # se conserva la tabla anterior; no se pisa con vacio
 
             corrida.detalle[destino_tabla] = {"columnas": columnas, "filas": len(df)}
@@ -152,7 +166,21 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
             corrida.tablas.append(f"{esquema}.{destino_tabla}")
             corrida.filas += len(df)
 
-        corrida.estado = "ok_con_alertas" if corrida.alertas else "ok"
+        # Estado propio cuando la guarda bloqueo alguna escritura. Sigue
+        # empezando en "ok" a proposito: las consultas de frescura y de detalle
+        # filtran por estado LIKE 'ok%', y la corrida SI fue exitosa (la tabla
+        # vieja, buena, quedo intacta). El valor propio es para poder auditar:
+        #   SELECT * FROM _meta.sync_corridas WHERE estado = 'ok_con_bloqueo';
+        if bloqueadas:
+            corrida.estado = "ok_con_bloqueo"
+            logger.error(
+                "[%s/%s] BLOQUEO de escritura en %d tabla(s): %s. Se conservaron "
+                "los datos anteriores. Revisa la fuente (pestania renombrada, "
+                "filtro puesto, hoja borrada).",
+                cid, fuente["fuente_id"], len(bloqueadas), ", ".join(bloqueadas),
+            )
+        else:
+            corrida.estado = "ok_con_alertas" if corrida.alertas else "ok"
 
         # Persistir el catalogo (governance) como TABLA en el warehouse.
         # Es lo que permite que el bot responda preguntas de governance sin
@@ -227,6 +255,9 @@ class _Destinos:
             logger.info("[%s] warehouse: %s", cliente.get("cliente_id"), _oculta(dsn))
         return self._abiertos[dsn]
 
+    def abiertos(self):
+        return list(self._abiertos.values())
+
     def cerrar(self):
         for d in self._abiertos.values():
             try:
@@ -244,7 +275,8 @@ def _oculta(dsn: str) -> str:
 def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
     """Recorre el registro completo y sincroniza lo que corresponda."""
     destinos = _Destinos(config.WAREHOUSE_TIPO)
-    resumen = {"ok": 0, "ok_con_alertas": 0, "error": 0, "omitido": 0, "filas": 0, "alertas": []}
+    resumen = {"ok": 0, "ok_con_alertas": 0, "ok_con_bloqueo": 0,
+               "error": 0, "omitido": 0, "filas": 0, "alertas": []}
 
     try:
         for cliente in registry.listar_clientes():
@@ -271,14 +303,30 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
                 resumen["alertas"] += corrida.alertas
                 resumen[corrida.estado] = resumen.get(corrida.estado, 0) + 1
                 resumen["filas"] += corrida.filas
+        # A-04: la bitacora crecia sin limite. Se purga al final de la corrida
+        # completa (barato: una sola sentencia, y solo si hay retencion puesta).
+        if not probar:
+            for d in destinos.abiertos():
+                try:
+                    purgar = getattr(d, "purgar_corridas", None)
+                    if purgar:
+                        purgar()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("no se pudo purgar la bitacora: %s", e)
     finally:
         destinos.cerrar()
 
     logger.info(
-        "RESUMEN: %d ok, %d con alertas, %d error, %d omitidas, %d filas",
-        resumen["ok"], resumen["ok_con_alertas"], resumen["error"],
-        resumen["omitido"], resumen["filas"],
+        "RESUMEN: %d ok, %d con alertas, %d con BLOQUEO, %d error, %d omitidas, %d filas",
+        resumen["ok"], resumen["ok_con_alertas"], resumen["ok_con_bloqueo"],
+        resumen["error"], resumen["omitido"], resumen["filas"],
     )
+    if resumen["ok_con_bloqueo"]:
+        logger.error(
+            "--- %d FUENTE(S) CON ESCRITURA BLOQUEADA: llegaron vacias y se "
+            "conservo el dato anterior. Hay que revisarlas HOY. ---",
+            resumen["ok_con_bloqueo"],
+        )
     if resumen["alertas"]:
         logger.warning("--- %d ALERTAS DE CALIDAD ---", len(resumen["alertas"]))
         for a in resumen["alertas"]:
