@@ -22,6 +22,7 @@ memoria no serviria (muere en cada restart y no se comparte entre procesos).
 """
 
 import logging
+import threading
 
 from sqlalchemy import create_engine, text
 
@@ -30,7 +31,8 @@ import config
 logger = logging.getLogger("fachavi.bot.memoria")
 
 _engines: dict = {}      # DSN -> engine (escritura)
-_tabla_lista: set = set()  # DSNs donde ya garantizamos el esquema/tabla
+_tabla_lista: set = set()  # DSNs donde ya VERIFICAMOS que la tabla existe
+_lock = threading.Lock()   # serializa la creacion (evita la carrera de IF NOT EXISTS)
 
 _DDL = (
     'CREATE SCHEMA IF NOT EXISTS "_bot"',
@@ -60,15 +62,39 @@ def _engine(cliente: dict):
 
 
 def _asegurar_tabla(cliente: dict) -> bool:
-    """Crea esquema/tabla/indice una vez por DSN. True si la tabla esta lista."""
-    eng = _engine(cliente)
+    """
+    Crea esquema/tabla/indice si faltan y CONFIRMA que la tabla existe antes de
+    cachear el DSN como listo. Seguro ante concurrencia:
+      - un lock en proceso serializa a los BackgroundTasks del mismo worker;
+      - un pg_advisory_xact_lock serializa entre varios workers/procesos;
+      - se verifica con to_regclass DENTRO de la transaccion: si por la carrera
+        de 'CREATE IF NOT EXISTS' la tabla no quedo, NO se cachea y se reintenta.
+    Devuelve True solo si la tabla existe de verdad.
+    """
     dsn = config.dsn_de_cliente(cliente)
     if dsn in _tabla_lista:
         return True
-    with eng.begin() as cx:      # begin() = transaccion con commit al salir
-        for sentencia in _DDL:
-            cx.execute(text(sentencia))
-    _tabla_lista.add(dsn)
+    eng = _engine(cliente)
+    with _lock:
+        if dsn in _tabla_lista:      # doble chequeo: otro hilo ya la creo
+            return True
+        with eng.begin() as cx:      # begin() = transaccion con commit al salir
+            # Lock de asesor: dos workers no pueden crear la tabla a la vez.
+            cx.execute(text("SELECT pg_advisory_xact_lock(hashtext('fachavi_bot_memoria'))"))
+            for sentencia in _DDL:
+                cx.execute(text(sentencia))
+            existe = cx.execute(
+                text("SELECT to_regclass('\"_bot\".conversaciones')")
+            ).scalar()
+        if not existe:
+            # No cacheamos: se reintenta en el proximo mensaje. Si esto se repite,
+            # el problema es de permisos (el rol no puede CREATE en la base).
+            raise RuntimeError(
+                "la tabla _bot.conversaciones no quedo creada tras el DDL "
+                "(revisá que el rol de Neon tenga permiso CREATE)"
+            )
+        _tabla_lista.add(dsn)
+        logger.info("tabla de memoria lista para '%s'", cliente.get("cliente_id"))
     return True
 
 
