@@ -49,7 +49,7 @@ services:
   # (la respuesta sale por una llamada al Graph API). Comparte el mismo Sheet
   # maestro y el mismo Neon que la ingesta (solo lee).
   - type: web
-    name: waba
+    name: fachavi-bot
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements-bot.txt
@@ -74,6 +74,15 @@ services:
       # Tabla sin 'instruccion' en el catalogo: no = fail-closed (seguro).
       - key: BOT_PERMITIR_SIN_INSTRUCCION
         value: "no"
+      # --- Memoria conversacional ---
+      - key: BOT_MEMORIA
+        value: "si"
+      - key: BOT_MEMORIA_MAX_TURNOS
+        value: "20"
+      - key: BOT_MEMORIA_VENTANA_HORAS
+        value: "72"
+      - key: BOT_MEMORIA_TTL_DIAS
+        value: "30"
       # --- WhatsApp Cloud API (Meta) ---
       - key: WHATSAPP_TOKEN
         sync: false
