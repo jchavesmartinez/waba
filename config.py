@@ -120,6 +120,16 @@ BOT_MODELO_INTENCION = os.environ.get(
 )
 
 # --------------------------------------------------------------------------
+# Capa semantica de KPIs: usa metricas predefinidas del tab '_kpis' del Sheet
+# (persistidas en <esquema>._kpis). Apagala (no) para responder solo con
+# text-to-SQL libre, sin KPIs ni la logica de pedir contexto / retar.
+# --------------------------------------------------------------------------
+BOT_KPIS = os.environ.get("BOT_KPIS", "si").strip().lower() in (
+    "si", "sí", "true", "1", "yes"
+)
+BOT_MODELO_KPIS = os.environ.get("BOT_MODELO_KPIS", "claude-haiku-4-5-20251001")
+
+# --------------------------------------------------------------------------
 # WhatsApp Cloud API (Meta / Graph API) — transporte del bot.
 # Reemplaza a Twilio: el mensaje entra como JSON en el webhook y la respuesta
 # se manda con una llamada SALIENTE aparte al Graph API (no se responde en el

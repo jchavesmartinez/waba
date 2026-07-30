@@ -178,6 +178,19 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
             logger.info("[PRUEBA] catalogo de '%s': %d filas (no se escribe)",
                         fuente["fuente_id"], len(frag.catalogo_filas))
 
+        # Persistir los KPIs (capa semantica) en <esquema>._kpis. Misma condicion
+        # que el catalogo: solo si la fuente cargo tablas.
+        if frag.kpis_filas and corrida.tablas and not probar:
+            try:
+                destino.escribir_kpis(esquema, fuente["fuente_id"], frag.kpis_filas)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[%s/%s] no se pudieron guardar los KPIs: %s",
+                               cid, fuente["fuente_id"], e)
+                corrida.alertas.append("no se pudieron guardar los KPIs")
+        elif frag.kpis_filas and probar:
+            logger.info("[PRUEBA] KPIs de '%s': %d filas (no se escribe)",
+                        fuente["fuente_id"], len(frag.kpis_filas))
+
         logger.info(
             "[%s/%s] %s: %d tablas, %d filas",
             cid, fuente["fuente_id"], corrida.estado.upper(),
