@@ -53,12 +53,17 @@ _SISTEMA_CLASIF = (
     "UNA de tres categorias. Respondes SOLO la etiqueta, en minuscula, sin nada mas.\n"
     "- datos: pide informacion que sale de la base de datos del negocio (ventas, "
     "inventario, productos, montos, cantidades, proveedores, comparaciones, "
-    "totales, calculos, tendencias).\n"
-    "- meta: es sobre la CONVERSACION o el BOT, no sobre la base. Ej: que dijiste "
-    "antes, por que, que te pregunte, que me mencionaste, resumime lo que hablamos, "
-    "que podes hacer, no entendi, repetilo.\n"
+    "totales, calculos, tendencias, crecimiento, runway, ticket, promedios, "
+    "desglose, top, ranking). SIEMPRE es 'datos' si el mensaje pide CALCULAR, "
+    "CONSULTAR, MOSTRAR, DAME, CUANTO, CUANTOS, CUANTAS o cualquier operacion "
+    "sobre los datos, AUNQUE sea un seguimiento de la conversacion.\n"
+    "- meta: es SOLO sobre la CONVERSACION o el BOT en si, SIN pedir datos nuevos "
+    "ni calculos. Ej: que dijiste antes, por que lo dijiste, que te pregunte, que "
+    "me mencionaste, resumime lo que hablamos, como lo calculaste, que podes hacer, "
+    "no entendi, repetilo.\n"
     "- saludo: saludo o cortesia sin ningun pedido (hola, buenas, gracias, ok).\n"
-    "Ante la duda entre 'datos' y 'meta', responde 'datos'."
+    "Ante la duda entre 'datos' y 'meta', SIEMPRE 'datos'. Solo usa 'meta' cuando "
+    "el usuario NO pide ningun dato nuevo ni calculo."
 )
 
 _SISTEMA_META = (
@@ -66,12 +71,28 @@ _SISTEMA_META = (
     "(tico, natural, breve). El usuario hizo una pregunta sobre la CONVERSACION o "
     "sobre vos, no sobre la base de datos. Responde USANDO SOLO el historial que se "
     "te da.\n"
-    "- No inventes datos, cifras ni nombres que no esten en el historial.\n"
+    "REGLA CRITICA — NUNCA INVENTES:\n"
+    "- JAMAS inventes numeros, porcentajes, montos, cantidades, fechas ni resultados "
+    "que no aparezcan TEXTUALMENTE en el historial. Si el historial tiene datos "
+    "semanales y te piden quincenales, NO recalcules ni interpoles: decí que ese "
+    "dato no esta calculado y que lo pregunten directamente para que se consulte.\n"
+    "- Podés citar datos que el bot ya dijo en turnos anteriores, pero NO los "
+    "transformes, redondees, sumes ni adaptes. Repetilos tal cual o decí que no los "
+    "tenés.\n"
     "- Si te piden un dato que no aparece en la conversacion, deciles que lo "
-    "pregunten directamente y lo consultas en el momento. No prometas 'revisarlo "
-    "despues': no tenes acciones diferidas.\n"
+    "pregunten directamente y lo consultas en el momento.\n"
     "- Si preguntan que podes hacer, explica breve que respondes consultas sobre los "
-    "datos de ventas/inventario que tengan habilitados, con un par de ejemplos."
+    "datos de ventas/inventario que tengan habilitados, con un par de ejemplos.\n"
+    "- No prometas 'revisarlo despues': no tenes acciones diferidas."
+)
+
+# Verbos de accion que SIEMPRE son 'datos', aunque el contexto parezca meta.
+# Atajo sin LLM: evita que "calcula el crecimiento quincenal" vaya a meta.
+_VERBOS_DATOS = (
+    "calcula", "calculá", "calcular", "consulta", "consultá", "muestra",
+    "mostrá", "mostrame", "dame", "dime", "decime", "cuanto", "cuánto",
+    "cuantos", "cuántos", "cuantas", "cuántas", "cuales", "cuáles",
+    "compara", "compará", "desglosá", "desglose", "lista", "listá",
 )
 
 
@@ -91,6 +112,13 @@ def clasificar(pregunta: str, historial=None) -> str:
     limpia = re.sub(r"[¿?¡!.,\s]+$", "", (pregunta or "").strip().lower())
     if limpia in _SALUDOS:
         return "saludo"
+
+    # Atajo: si el mensaje empieza con un verbo de accion sobre datos, es
+    # SIEMPRE 'datos' — sin gastar una llamada al LLM. Esto evita que "calcula
+    # el crecimiento quincenal" se clasifique como 'meta' por contexto.
+    palabras = limpia.split()
+    if palabras and any(palabras[0].startswith(v) for v in _VERBOS_DATOS):
+        return "datos"
 
     try:
         contenido = (
