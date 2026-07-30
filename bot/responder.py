@@ -104,6 +104,18 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     plan = kpis.planificar(pregunta, kpis_def, ctx, historial=historial)
     logger.info("[%s] plan=%s kpi=%s", cid, plan["accion"], plan.get("kpi"))
 
+    # Freno anti-interrogatorio: si el turno anterior el bot YA pregunto (su
+    # ultimo mensaje termino en '?'), no volvemos a preguntar. El usuario ya
+    # respondio algo; ejecutamos con lo que haya en vez de repreguntar.
+    ya_pregunto = (
+        bool(historial)
+        and historial[-1].get("rol") == "assistant"
+        and historial[-1].get("contenido", "").rstrip().endswith("?")
+    )
+    if plan["accion"] in ("pedir_contexto", "retar") and ya_pregunto:
+        logger.info("[%s] ya se pregunto el turno previo; no repregunto, ejecuto", cid)
+        plan = {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+
     # El bot pregunta o advierte ANTES de responder: no improvisa un numero.
     if plan["accion"] in ("pedir_contexto", "retar") and plan.get("mensaje"):
         return plan["mensaje"]
