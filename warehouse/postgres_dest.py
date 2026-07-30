@@ -14,15 +14,36 @@ este destino simplemente no se registra).
 
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+import config
 from .base import Destino, Corrida, ESQUEMA_META, TABLA_CORRIDAS
 
 logger = logging.getLogger("fachavi.warehouse.postgres")
+
+# Cuantas corridas OK hacia atras se fusionan para armar el punto de
+# comparacion de la guarda de vaciado (C-01). Ver ultimo_detalle().
+_CORRIDAS_A_FUSIONAR = 20
+
+
+def _ident(nombre: str) -> str:
+    """
+    Normaliza un identificador SQL (esquema, tabla, columna) que viene de una
+    hoja de calculo del cliente. Es la MISMA regla que usa la ingesta al crear
+    las tablas, asi que un nombre legitimo pasa sin cambios.
+
+    C-03: sin esto, un nombre de columna con comillas dobles podia cerrar el
+    identificador de un COMMENT ON y continuar con SQL propio.
+    """
+    limpio = re.sub(r"[^0-9a-zA-Z_]", "_", str(nombre).strip().lower())
+    if not limpio or limpio[0].isdigit():
+        limpio = "t_" + limpio
+    return limpio
 
 
 class PostgresDestino(Destino):
@@ -52,18 +73,44 @@ class PostgresDestino(Destino):
             cx.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{esquema}"'))
 
     def escribir_tabla(self, esquema: str, tabla: str, df: pd.DataFrame):
+        """
+        Full refresh ATOMICO (A-02, B-17).
+
+        Antes: to_sql(if_exists="replace") hacia DROP + CREATE + INSERT. Entre
+        el DROP y el final del INSERT la tabla NO EXISTIA: si el bot consultaba
+        en ese instante, la consulta reventaba. Y el DROP se llevaba puestos los
+        GRANT otorgados sobre la tabla (B-17), asi que un rol de solo lectura
+        con permisos por tabla se rompia en cada corrida.
+
+        Ahora: se escribe en una tabla temporal <tabla>__nueva y se hace el
+        swap con DROP + RENAME dentro de UNA sola transaccion. Postgres hace
+        DDL transaccional, asi que el cambio de nombre es instantaneo y atomico
+        para cualquier lector.
+        """
         self.asegurar_esquema(esquema)
-        # to_sql con replace: recrea la tabla en cada corrida (full refresh).
+        tabla = _ident(tabla)
+        staging = f"{tabla}__nueva"[:63]     # Postgres trunca a 63 chars
+
+        eng = self.conectar()
+        with eng.begin() as cx:
+            cx.execute(text(f'DROP TABLE IF EXISTS "{esquema}"."{staging}"'))
+
         df.to_sql(
-            tabla,
-            self.conectar(),
+            staging,
+            eng,
             schema=esquema,
             if_exists="replace",
             index=False,
             method="multi",
             chunksize=1000,
         )
-        logger.info("escrito %s.%s (%d filas)", esquema, tabla, len(df))
+
+        with eng.begin() as cx:
+            cx.execute(text(f'DROP TABLE IF EXISTS "{esquema}"."{tabla}"'))
+            cx.execute(text(
+                f'ALTER TABLE "{esquema}"."{staging}" RENAME TO "{tabla}"'
+            ))
+        logger.info("escrito %s.%s (%d filas, swap atomico)", esquema, tabla, len(df))
 
     def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
         self.asegurar_esquema(esquema)
@@ -99,28 +146,42 @@ class PostgresDestino(Destino):
         """
         Persiste los KPIs (capa semantica) en <esquema>._kpis.
 
-        A diferencia del catalogo, los KPIs son a nivel de CLIENTE, no por
-        fuente: una metrica como 'runway_inventario' cruza ventas e inventario,
-        no pertenece a una sola fuente. Por eso hacemos REEMPLAZO TOTAL (borrar
-        todo e insertar) en vez de scopear por fuente_id. Asi, si dos fuentes
-        leen el mismo Sheet y traen el mismo tab '_kpis', la ultima en escribir
-        deja un unico juego de filas en vez de duplicarlas.
+        A-05: antes se hacia REEMPLAZO TOTAL (DELETE sin WHERE). Con dos fuentes
+        del mismo cliente que trajeran tab '_kpis', sobrevivian solo los de la
+        ultima en correr — y cual corria ultima dependia de la frescura, asi que
+        el resultado cambiaba entre corridas. Un no-determinismo silencioso.
 
-        Supuesto: los KPIs se definen en UN solo tab '_kpis'. Si algun dia los
-        repartis en Sheets distintos, habria que unificarlos (este metodo se
-        queda con el ultimo que escribe).
+        Ahora se borra e inserta SOLO lo de esta fuente, igual que el catalogo.
+        Si dos fuentes definen el mismo kpi_id, el choque queda VISIBLE (dos
+        filas) en vez de resolverse por orden de ejecucion, y se avisa fuerte.
         """
         self.asegurar_esquema(esquema)
         cols = ("kpi", "nombre", "descripcion", "preguntas_ejemplo", "formula_sql",
                 "tabla", "dimensiones", "unidad", "supuestos", "minimo_datos",
                 "instruccion")
+        ids_nuevos = {str(f.get("kpi", "")).strip().lower() for f in filas if f.get("kpi")}
         with self.conectar().begin() as cx:
             cx.execute(text(
                 f'CREATE TABLE IF NOT EXISTS "{esquema}"."_kpis" ('
                 "fuente_id TEXT, " + ", ".join(f"{c} TEXT" for c in cols) + ")"
             ))
-            # Reemplazo total: borra TODO (no solo esta fuente) para no duplicar.
-            cx.execute(text(f'DELETE FROM "{esquema}"."_kpis"'))
+            # Solo esta fuente: no se pisan los KPIs de las otras.
+            cx.execute(text(f'DELETE FROM "{esquema}"."_kpis" WHERE fuente_id=:f'),
+                       {"f": fuente_id})
+
+            # Aviso de colision entre fuentes: mismo kpi definido dos veces.
+            if ids_nuevos:
+                ajenos = cx.execute(text(
+                    f'SELECT DISTINCT kpi, fuente_id FROM "{esquema}"."_kpis" '
+                    "WHERE lower(trim(kpi)) = ANY(:ids)"
+                ), {"ids": sorted(ids_nuevos)}).fetchall()
+                for kpi_id, otra in ajenos:
+                    logger.warning(
+                        "KPI '%s' esta definido en dos fuentes ('%s' y '%s') del "
+                        "mismo cliente. Dejalo en UN solo tab '_kpis'.",
+                        kpi_id, otra, fuente_id,
+                    )
+
             campos = ", ".join(["fuente_id"] + list(cols))
             binds = ", ".join([":fuente_id"] + [f":{c}" for c in cols])
             for f in filas:
@@ -129,7 +190,7 @@ class PostgresDestino(Destino):
                 cx.execute(text(
                     f'INSERT INTO "{esquema}"."_kpis" ({campos}) VALUES ({binds})'
                 ), params)
-        logger.info("kpis: %d filas en %s._kpis (reemplazo total)", len(filas), esquema)
+        logger.info("kpis de '%s': %d filas en %s._kpis", fuente_id, len(filas), esquema)
 
     def aplicar_comentarios(self, esquema: str, mapa_tablas: dict, filas: list):
         """
@@ -137,26 +198,57 @@ class PostgresDestino(Destino):
         COMMENT ON nativo. Asi Metabase, DBeaver, dbt y cualquier herramienta
         que lea information_schema muestran la documentacion sin saber nada
         de nuestro catalogo.
+
+        C-03: COMMENT ON no acepta parametros ligados, asi que el SQL se arma
+        pegando texto. Tres defensas:
+          1. El nombre de columna pasa por _ident() (misma normalizacion con la
+             que se creo la tabla). Una comilla doble deja de poder cerrar el
+             identificador.
+          2. Se valida contra information_schema que la columna EXISTA de
+             verdad en esa tabla. Lista blanca, no lista negra.
+          3. Los fallos se registran en WARNING, no en DEBUG: un intento de
+             inyeccion tiene que dejar rastro visible en el log.
         """
         def esc(s):
             return str(s).replace("'", "''")
+
         with self.conectar().begin() as cx:
+            # Lista blanca de columnas reales por tabla (una sola consulta).
+            reales: dict = {}
+            for t, c in cx.execute(text(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = :esq"
+            ), {"esq": esquema}).fetchall():
+                reales.setdefault(t, set()).add(c)
+
             for f in filas:
                 tabla_real = mapa_tablas.get(str(f.get("tabla", "")).strip().lower())
                 desc = f.get("descripcion", "")
                 if not tabla_real or not desc:
                     continue
-                col = str(f.get("columna", "")).strip()
+                if tabla_real not in reales:
+                    continue
+                crudo = str(f.get("columna", "")).strip()
                 try:
-                    if col in ("*", ""):
+                    if crudo in ("*", ""):
                         cx.execute(text(
-                            f'COMMENT ON TABLE "{esquema}"."{tabla_real}" IS \'{esc(desc)}\''))
-                    else:
-                        cx.execute(text(
-                            f'COMMENT ON COLUMN "{esquema}"."{tabla_real}"."{col}" '
-                            f'IS \'{esc(desc)}\''))
+                            f'COMMENT ON TABLE "{esquema}"."{tabla_real}" '
+                            f"IS '{esc(desc)}'"))
+                        continue
+
+                    col = _ident(crudo)
+                    if col not in reales[tabla_real]:
+                        logger.warning(
+                            "catalogo: la columna '%s' no existe en %s.%s; no se "
+                            "comenta. Revisa la pestania _catalogo del cliente.",
+                            crudo, esquema, tabla_real,
+                        )
+                        continue
+                    cx.execute(text(
+                        f'COMMENT ON COLUMN "{esquema}"."{tabla_real}"."{col}" '
+                        f"IS '{esc(desc)}'"))
                 except Exception as e:  # noqa: BLE001
-                    logger.debug("comentario omitido (%s.%s): %s", tabla_real, col, e)
+                    logger.warning("comentario omitido (%s.%s): %s", tabla_real, crudo, e)
 
     # --- metadata de corridas ---
 
@@ -180,6 +272,35 @@ class PostgresDestino(Destino):
                         detalle      TEXT
                     )"""
             ))
+            # A-04: sin este indice, CADA revision de frescura y CADA busqueda
+            # del detalle previo recorren la bitacora completa. Con 4 fuentes y
+            # 96 corridas diarias son ~140.000 filas al año y la degradacion es
+            # gradual, o sea dificil de atribuir.
+            cx.execute(text(
+                f'CREATE INDEX IF NOT EXISTS ix_corridas_cliente_fuente_fin '
+                f'ON "{ESQUEMA_META}"."{TABLA_CORRIDAS}" '
+                "(cliente_id, fuente_id, fin DESC)"
+            ))
+
+    def purgar_corridas(self, dias: int = 0) -> int:
+        """
+        A-04: borra corridas mas viejas que `dias` (0 = usa
+        config.SYNC_RETENCION_DIAS; <=0 = no purga). Devuelve cuantas borro.
+        La llama sync.py al final de cada corrida completa.
+        """
+        dias = int(dias or getattr(config, "SYNC_RETENCION_DIAS", 0) or 0)
+        if dias <= 0:
+            return 0
+        with self.conectar().begin() as cx:
+            res = cx.execute(text(
+                f'DELETE FROM "{ESQUEMA_META}"."{TABLA_CORRIDAS}" '
+                "WHERE fin < now() - make_interval(days => :d)"
+            ), {"d": dias})
+        borradas = res.rowcount or 0
+        if borradas:
+            logger.info("bitacora: %d corridas de mas de %d dias purgadas",
+                        borradas, dias)
+        return borradas
 
     def registrar_corrida(self, corrida: Corrida):
         with self.conectar().begin() as cx:
@@ -201,21 +322,40 @@ class PostgresDestino(Destino):
             )
 
     def ultimo_detalle(self, cliente_id: str, fuente_id: str) -> dict:
+        """
+        Punto de comparacion de la guarda de vaciado.
+
+        C-01: antes devolvia el detalle de la ULTIMA corrida OK. Si esa corrida
+        no habia registrado una tabla —justamente lo que pasa cuando la guarda
+        bloquea una escritura— la corrida siguiente se quedaba sin con que
+        comparar y escribia las 0 filas encima. O sea: la guarda protegia 15
+        minutos y despues se desarmaba sola.
+
+        Ahora se FUSIONAN las ultimas N corridas OK, de la mas vieja a la mas
+        nueva, de modo que el valor mas reciente de CADA tabla gane y ninguna
+        desaparezca por un hueco en el historial.
+        """
         with self.conectar().begin() as cx:
-            fila = cx.execute(
+            filas = cx.execute(
                 text(
                     f'SELECT detalle FROM "{ESQUEMA_META}"."{TABLA_CORRIDAS}" '
                     "WHERE cliente_id=:c AND fuente_id=:f AND estado LIKE 'ok%' "
-                    "ORDER BY fin DESC LIMIT 1"
+                    "ORDER BY fin DESC LIMIT :n"
                 ),
-                {"c": cliente_id, "f": fuente_id},
-            ).fetchone()
-        if not fila or not fila[0]:
-            return {}
-        try:
-            return json.loads(fila[0])
-        except (ValueError, TypeError):
-            return {}
+                {"c": cliente_id, "f": fuente_id, "n": _CORRIDAS_A_FUSIONAR},
+            ).fetchall()
+
+        fusionado: dict = {}
+        for (crudo,) in reversed(filas):   # de la mas vieja a la mas nueva
+            if not crudo:
+                continue
+            try:
+                d = json.loads(crudo)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(d, dict):
+                fusionado.update(d)
+        return fusionado
 
     def ultima_corrida_ok(self, cliente_id: str, fuente_id: str) -> Optional[datetime]:
         with self.conectar().begin() as cx:
