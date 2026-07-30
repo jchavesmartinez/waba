@@ -95,6 +95,33 @@ class PostgresDestino(Destino):
                      "fre": f.get("frecuencia",""), "due": f.get("dueno","")})
         logger.info("catalogo de '%s': %d filas en %s._catalogo", fuente_id, len(filas), esquema)
 
+    def escribir_kpis(self, esquema: str, fuente_id: str, filas: list):
+        """
+        Persiste los KPIs (capa semantica) en <esquema>._kpis. Misma semantica
+        que el catalogo: borra solo las filas de esta fuente e inserta las
+        nuevas, para no pisar los KPIs de otras fuentes del mismo cliente.
+        """
+        self.asegurar_esquema(esquema)
+        cols = ("kpi", "nombre", "descripcion", "preguntas_ejemplo", "formula_sql",
+                "tabla", "dimensiones", "unidad", "supuestos", "minimo_datos",
+                "instruccion")
+        with self.conectar().begin() as cx:
+            cx.execute(text(
+                f'CREATE TABLE IF NOT EXISTS "{esquema}"."_kpis" ('
+                "fuente_id TEXT, " + ", ".join(f"{c} TEXT" for c in cols) + ")"
+            ))
+            cx.execute(text(f'DELETE FROM "{esquema}"."_kpis" WHERE fuente_id=:f'),
+                       {"f": fuente_id})
+            campos = ", ".join(["fuente_id"] + list(cols))
+            binds = ", ".join([":fuente_id"] + [f":{c}" for c in cols])
+            for f in filas:
+                params = {"fuente_id": fuente_id}
+                params.update({c: f.get(c, "") for c in cols})
+                cx.execute(text(
+                    f'INSERT INTO "{esquema}"."_kpis" ({campos}) VALUES ({binds})'
+                ), params)
+        logger.info("kpis de '%s': %d filas en %s._kpis", fuente_id, len(filas), esquema)
+
     def aplicar_comentarios(self, esquema: str, mapa_tablas: dict, filas: list):
         """
         BONUS de Postgres: ademas de la tabla, escribe la descripcion como

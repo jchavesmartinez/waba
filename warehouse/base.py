@@ -137,9 +137,7 @@ class Destino(ABC):
 
     @abstractmethod
     def registrar_corrida(self, corrida: Corrida):
-        """Persiste el resultado de una corrida en _meta.sync_corridas."""
-
-    @abstractmethod
+        """Persiste el resultado de una corrida en _meta.sync_corridas."""    @abstractmethod
     def ultimo_detalle(self, cliente_id: str, fuente_id: str) -> dict:
         """
         Devuelve el 'detalle' de la ultima corrida exitosa (forma previa de las
@@ -152,6 +150,13 @@ class Destino(ABC):
         Devuelve el 'fin' de la ultima corrida exitosa de esa fuente,
         o None si nunca corrio bien. Es la base del control de frescura.
         """
+
+    # Concreto (no abstracto) para no romper destinos que no soporten KPIs: por
+    # defecto no hace nada. El destino Postgres lo sobreescribe para persistir
+    # <esquema>._kpis. La capa semantica es opcional.
+    def escribir_kpis(self, esquema: str, fuente_id: str, filas: list):
+        """Persiste los KPIs de una fuente en <esquema>._kpis (default: no-op)."""
+        logger.info("escribir_kpis no soportado en destino '%s'; se omite.", self.tipo)
 
     def __repr__(self):
         return f"<{self.__class__.__name__} tipo={self.tipo}>"
