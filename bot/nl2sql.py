@@ -41,6 +41,11 @@ def _anthropic():
     return _cliente
 
 
+# B-24: era 600 fijo. Una consulta con varios JOIN y un CTE se pasa, sale
+# truncada y el motivo del rechazo confunde. Configurable.
+_MAX_TOKENS_SQL = int(getattr(config, "BOT_MAX_TOKENS_SQL", 1200))
+
+
 _SISTEMA_SQL = (
     "Sos un generador de SQL para PostgreSQL. Traduces la pregunta del usuario a "
     "UNA sola consulta SELECT de solo lectura.\n"
@@ -117,10 +122,19 @@ def generar_sql(pregunta: str, schema_text: str,
         )
     resp = _anthropic().messages.create(
         model=config.BOT_MODELO_SQL,
-        max_tokens=600,
+        max_tokens=_MAX_TOKENS_SQL,
         system=_SISTEMA_SQL,
         messages=[{"role": "user", "content": "\n".join(partes)}],
     )
+    # B-24: si el modelo se quedo sin tokens, el SQL viene CORTADO y el
+    # validador lo rechaza con "no parseable", un motivo que no tiene nada que
+    # ver con la causa real. Se registra para no perder una tarde ahi.
+    if getattr(resp, "stop_reason", "") == "max_tokens":
+        logger.warning(
+            "El SQL se trunco por el tope de %d tokens: la consulta va a quedar "
+            "incompleta y el validador la va a rechazar por 'no parseable'. "
+            "Subi BOT_MAX_TOKENS_SQL si esto se repite.", _MAX_TOKENS_SQL,
+        )
     texto = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
     return _extraer_sql(texto)
 
@@ -131,6 +145,20 @@ _PROHIBIDOS = (
     exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Create, exp.Alter,
     exp.TruncateTable, exp.Merge, exp.Grant, exp.Command,
 )
+
+# A-15: PostgreSQL permite CREAR una tabla con una sentencia que empieza con
+# SELECT ("SELECT ... INTO nueva_tabla"). Sintacticamente ES un Select, asi que
+# pasaba los controles de arriba. Lo detenia la transaccion READ ONLY —la
+# segunda capa, que hizo exactamente su trabajo— pero una defensa en profundidad
+# funciona porque cada capa se mantiene sana, no porque la otra tape.
+_PALABRA_INTO = re.compile(r"(?i)\binto\b")
+_LITERAL = re.compile(r"'(?:[^']|'')*'")
+
+
+def _sin_literales(sql: str) -> str:
+    """Quita los literales de texto para que un '%into%' en un LIKE no de un
+    falso positivo en los chequeos por palabra."""
+    return _LITERAL.sub("''", sql or "")
 
 
 def validar_sql(sql: str, tablas_permitidas) -> tuple[bool, str]:
@@ -153,6 +181,14 @@ def validar_sql(sql: str, tablas_permitidas) -> tuple[bool, str]:
 
     if not isinstance(arbol, (exp.Select, exp.Union, exp.Subquery, exp.With)):
         return False, "solo se permite SELECT."
+
+    # A-15: dos chequeos, el del arbol y el textual. sqlglot representa el INTO
+    # como propiedad del Select segun la version/dialecto, asi que no se confia
+    # en una sola forma de detectarlo.
+    if arbol.args.get("into") is not None:
+        return False, "no se permite SELECT ... INTO."
+    if _PALABRA_INTO.search(_sin_literales(sql)):
+        return False, "no se permite la palabra INTO en la consulta."
 
     for nodo in arbol.walk():
         if isinstance(nodo, _PROHIBIDOS):
@@ -201,7 +237,7 @@ _SISTEMA_RESP = (
 )
 
 
-def _tabla_texto(columnas, filas, tope=30) -> str:
+def tabla_texto(columnas, filas, tope=30) -> str:
     if not filas:
         return "(sin filas)"
     lineas = [" | ".join(str(c) for c in columnas)]
@@ -227,7 +263,7 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="") -
     contenido = (
         f"Pregunta de este turno:\n{pregunta}\n\n"
         f"{bloque_sql}"
-        f"Resultado de la consulta ({len(filas)} filas):\n{_tabla_texto(columnas, filas)}"
+        f"Resultado de la consulta ({len(filas)} filas):\n{tabla_texto(columnas, filas)}"
     )
     # El historial va como turnos previos, para que la respuesta tenga
     # continuidad ("como te decia", "de esos 3 productos..."). El turno actual
@@ -241,3 +277,8 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="") -
         messages=messages,
     )
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+
+
+# B-20: bot/responder.py usaba _tabla_texto (privada de este modulo) en su modo
+# de emergencia. Ahora la funcion es publica; el alias queda por compatibilidad.
+_tabla_texto = tabla_texto

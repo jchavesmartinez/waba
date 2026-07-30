@@ -63,13 +63,29 @@ def cargar_kpis(cliente: dict) -> list:
              for k, v in f.items()}
         if not f.get("kpi"):
             continue
-        if not catalogo._puede_bot(f.get("instruccion", "")):
+        # B-29: antes se importaba catalogo._puede_bot (privada). Si esa
+        # funcion cambiaba de nombre o de semantica, la gobernanza de los KPIs
+        # se rompia en silencio. Ahora se usa la publica.
+        if not catalogo.puede_bot(f.get("instruccion", ""),
+                                  etiqueta=f"el KPI '{f.get('kpi')}'"):
             continue
         out.append(f)
     return out
 
 
+# B-31: con muchos KPIs definidos el prompt se vuelve caro y el reconocimiento
+# EMPEORA por exceso de opciones. 0 = sin tope (todos).
+_TOPE_KPIS_EN_PROMPT = 25
+
+
 def _kpis_texto(kpis: list) -> str:
+    if _TOPE_KPIS_EN_PROMPT and len(kpis) > _TOPE_KPIS_EN_PROMPT:
+        logger.warning(
+            "el cliente tiene %d KPIs definidos; se mandan los primeros %d al "
+            "planificador. Conviene depurar el tab '_kpis'.",
+            len(kpis), _TOPE_KPIS_EN_PROMPT,
+        )
+        kpis = kpis[:_TOPE_KPIS_EN_PROMPT]
     bloques = []
     for k in kpis:
         campos = [f"kpi: {k.get('kpi','')}", f"nombre: {k.get('nombre','')}"]
@@ -133,9 +149,23 @@ _SISTEMA = (
     "5. Cuando preguntes, UNA sola pregunta y corta. Nada de listar 4 alternativas "
     "ni encadenar '¿y en que periodo? ¿y por que?'. El default primero, la pregunta "
     "solo si de verdad no se puede seguir sin ella.\n"
-    "6. Default de runway_inventario: POR PRODUCTO (evita el divide-por-cero del "
-    "total y es lo mas util). Asumilo y decilo, no lo preguntes."
+    "6. Si un KPI trae 'default' en sus supuestos, asumilo y decilo; no lo "
+    "preguntes.\n"
+    "7. Ante un agregado que pueda dividir por cero (un total sobre un promedio "
+    "que puede ser 0), preferi el desglose por la dimension mas fina disponible "
+    "antes que el total."
 )
+
+# B-30: la regla especifica de 'runway_inventario' vivia escrita AQUI, en el
+# prompt del sistema. Era logica de negocio de UN cliente dentro del codigo del
+# producto: no escala a diez clientes y obliga a desplegar para cambiarla. Ahora
+# el default se declara como DATO, en la columna 'supuestos' del tab '_kpis' del
+# Sheet del cliente:
+#
+#   kpi              | supuestos
+#   runway_inventario| default: por producto (evita el divide-por-cero del total)
+#
+# La regla 6 de arriba es la version generica que lee ese dato.
 
 
 def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:

@@ -20,6 +20,7 @@ cualquier escritura.
 """
 
 import logging
+import threading
 
 from sqlalchemy import create_engine, text
 
@@ -29,16 +30,26 @@ from warehouse.base import nombre_esquema
 logger = logging.getLogger("fachavi.bot.warehouse_ro")
 
 _engines: dict = {}
+# B-28: el diccionario de engines es global y el bot atiende varios mensajes a
+# la vez (BackgroundTasks). Sin lock, dos mensajes simultaneos del mismo cliente
+# podian crear dos engines y dejar uno huerfano con su pool de conexiones
+# abierto. Con Neon, que cobra por conexion-hora, eso no es gratis.
+_lock_engines = threading.Lock()
 
 
 def _engine(cliente: dict):
     """Devuelve (y cachea) un engine para el DSN de este cliente."""
     dsn = config.dsn_de_cliente(cliente)
-    if dsn not in _engines:
-        # pool_pre_ping: las bases serverless de Neon se duermen; sin esto la
-        # primera consulta tras un rato falla con "connection closed".
-        _engines[dsn] = create_engine(dsn, pool_pre_ping=True)
-        logger.info("engine RO abierto para cliente '%s'", cliente.get("cliente_id"))
+    eng = _engines.get(dsn)
+    if eng is not None:
+        return eng
+    with _lock_engines:
+        if dsn not in _engines:      # doble chequeo: otro hilo pudo crearlo
+            # pool_pre_ping: las bases serverless de Neon se duermen; sin esto la
+            # primera consulta tras un rato falla con "connection closed".
+            _engines[dsn] = create_engine(dsn, pool_pre_ping=True)
+            logger.info("engine RO abierto para cliente '%s'",
+                        cliente.get("cliente_id"))
     return _engines[dsn]
 
 
@@ -58,6 +69,12 @@ def ejecutar(cliente: dict, sql: str, limite: int | None = None):
 
     `filas` es una lista de tuplas; se corta a `limite` filas (por defecto
     config.BOT_MAX_FILAS) aunque el SELECT devolviera mas.
+
+    A-18 — que hay que entender de este tope: se aplica al TRAER los datos, no
+    al calcularlos. Una consulta puede procesar millones de filas en el servidor
+    de base de datos y devolver 200. La proteccion efectiva del warehouse es el
+    statement_timeout de _prep(), no este limite; este solo protege la memoria
+    del proceso del bot y el tamaño del prompt de redaccion.
     """
     limite = limite or config.BOT_MAX_FILAS
     esquema = nombre_esquema(cliente["cliente_id"])

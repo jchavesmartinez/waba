@@ -15,6 +15,7 @@ alcanza.
 """
 
 import logging
+import time
 
 import httpx
 
@@ -23,6 +24,15 @@ import config
 logger = logging.getLogger("fachavi.bot.whatsapp")
 
 _TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+
+# B-19: un fallo de envio se registraba y se descartaba. El usuario nunca
+# recibia nada y ni siquiera sabia que su pregunta se habia procesado (y se
+# habia pagado). Los fallos tipicos —Neon/Meta con un hipo de red, un 429, un
+# 5xx— se resuelven solos en segundos, asi que un par de reintentos con espera
+# creciente recupera la mayoria. Un 4xx que no sea 429 no se reintenta: token
+# vencido o numero fuera de la ventana de 24 h no mejoran esperando.
+_REINTENTOS = 3
+_ESPERA_BASE_SEG = 1.5
 
 
 def _url() -> str:
@@ -65,20 +75,34 @@ def enviar_texto(numero_destino: str, texto: str) -> bool:
         "Content-Type": "application/json",
     }
 
-    try:
-        r = httpx.post(_url(), json=payload, headers=headers, timeout=_TIMEOUT)
-    except httpx.HTTPError as e:
-        logger.exception("Error de red enviando a WhatsApp (%s): %s", numero_destino, e)
-        return False
+    for intento in range(1, _REINTENTOS + 1):
+        try:
+            r = httpx.post(_url(), json=payload, headers=headers, timeout=_TIMEOUT)
+        except httpx.HTTPError as e:
+            logger.warning("Error de red enviando a WhatsApp (%s), intento %d/%d: %s",
+                           numero_destino, intento, _REINTENTOS, e)
+            if intento == _REINTENTOS:
+                logger.error("No se pudo enviar a %s tras %d intentos; el usuario "
+                             "no va a recibir respuesta.", numero_destino, _REINTENTOS)
+                return False
+            time.sleep(_ESPERA_BASE_SEG * intento)
+            continue
 
-    if r.status_code >= 400:
+        if r.status_code < 400:
+            break
+
         # El cuerpo de error de Meta trae el motivo (token vencido, numero fuera
         # de la ventana de 24 h, phone_number_id malo, etc.). Va al log completo.
+        recuperable = r.status_code == 429 or r.status_code >= 500
         logger.error(
-            "Meta rechazo el envio a %s [%s]: %s",
-            numero_destino, r.status_code, r.text[:500],
+            "Meta rechazo el envio a %s [%s]%s: %s",
+            numero_destino, r.status_code,
+            f" (intento {intento}/{_REINTENTOS})" if recuperable else "",
+            r.text[:500],
         )
-        return False
+        if not recuperable or intento == _REINTENTOS:
+            return False
+        time.sleep(_ESPERA_BASE_SEG * intento)
 
     logger.info("Enviado a %s (%s)", numero_destino, r.status_code)
     return True

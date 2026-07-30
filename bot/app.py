@@ -28,7 +28,9 @@ pegar la URL .../webhook y el mismo WHATSAPP_VERIFY_TOKEN.
 import hashlib
 import hmac
 import logging
-from collections import OrderedDict
+import threading
+import time
+from collections import OrderedDict, deque
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 
@@ -42,41 +44,92 @@ logger = logging.getLogger("fachavi.bot.app")
 
 app = FastAPI(title="FACHAVI — WhatsApp bot (Meta Cloud API)")
 
+# C-05 / C-08 / B-37: se revisa la configuracion de seguridad AL ARRANCAR y se
+# deja en el log en nivel alto. Un default inseguro es discutible; uno
+# silencioso no lo es. Esto es lo que convierte "alguien dejo el modo permisivo
+# prendido hace tres meses" en algo que se ve en dos segundos.
+_AVISOS_ARRANQUE = config.revisar_arranque_bot()
+
 _SALUDO = "Hola 👋 Mandame tu consulta sobre los datos (ventas, inventario…)."
 _SOLO_TEXTO = "Por ahora solo entiendo mensajes de texto. Escribime tu consulta 🙂"
+_MUY_RAPIDO = (
+    "Estás mandando mensajes muy seguido y tengo que espaciarlos un toque. "
+    "Probá de nuevo en un minuto 🙂"
+)
 
 # Dedup: Meta reintenta el webhook si no ve un 200 a tiempo, y puede repetir un
 # mensaje. Guardamos los ultimos ids vistos para no contestar (ni gastar LLM)
 # dos veces. En memoria alcanza para un solo proceso; si se escala a varios
-# workers habria que mover esto a Redis.
+# workers habria que mover esto a Redis (A-12).
 _VISTOS: "OrderedDict[str, None]" = OrderedDict()
 _VISTOS_TOPE = 1000
+
+# A-13: limite de frecuencia por numero. Un numero registrado podia mandar cien
+# mensajes en un minuto y cada uno gasta entre 3 y 5 llamadas al modelo. Igual
+# que el dedup, esto vive en el proceso: con un solo worker alcanza, y con
+# varios cada uno aplica su propia cuota (mas laxo, nunca mas estricto).
+_HISTORIAL_ENVIOS: "OrderedDict[str, deque]" = OrderedDict()
+_LOCK = threading.Lock()
 
 
 def _ya_procesado(msg_id: str) -> bool:
     if not msg_id:
         return False
-    if msg_id in _VISTOS:
-        return True
-    _VISTOS[msg_id] = None
-    if len(_VISTOS) > _VISTOS_TOPE:
-        _VISTOS.popitem(last=False)
+    with _LOCK:
+        if msg_id in _VISTOS:
+            return True
+        _VISTOS[msg_id] = None
+        if len(_VISTOS) > _VISTOS_TOPE:
+            _VISTOS.popitem(last=False)
     return False
+
+
+def _pasa_limite(numero: str) -> bool:
+    """False si el numero se paso de config.BOT_MAX_MSJ_POR_MINUTO (A-13)."""
+    tope = int(config.BOT_MAX_MSJ_POR_MINUTO or 0)
+    if tope <= 0:
+        return True
+    ahora = time.time()
+    with _LOCK:
+        cola = _HISTORIAL_ENVIOS.setdefault(numero, deque())
+        while cola and ahora - cola[0] > 60:
+            cola.popleft()
+        if len(cola) >= tope:
+            return False
+        cola.append(ahora)
+        # Higiene de memoria: no guardar numeros inactivos para siempre.
+        if len(_HISTORIAL_ENVIOS) > 5000:
+            _HISTORIAL_ENVIOS.popitem(last=False)
+    return True
 
 
 def _firma_valida(cuerpo: bytes, firma_header: str) -> bool:
     """
     Valida X-Hub-Signature-256 (HMAC-SHA256 del cuerpo crudo con el app secret).
-    Si no hay WHATSAPP_APP_SECRET configurado, no se valida (modo dev).
+
+    C-08: antes, si no habia WHATSAPP_APP_SECRET esta funcion devolvia True y
+    TODO pasaba — o sea, el valor por defecto era "no validar nada", y nada
+    avisaba. Cualquiera que descubriera la URL del webhook podia hacerse pasar
+    por Meta, suplantar un numero registrado, extraer sus datos y consumir la
+    cuenta de Anthropic. Ahora, sin secreto, se rechaza; el modo inseguro
+    requiere poner BOT_PERMITIR_SIN_FIRMA=si a proposito (para desarrollo local).
     """
     if not config.WHATSAPP_APP_SECRET:
-        return True
+        if config.BOT_PERMITIR_SIN_FIRMA:
+            return True
+        logger.error(
+            "POST rechazado: no hay WHATSAPP_APP_SECRET para validar la firma de "
+            "Meta. Configuralo en el panel (o BOT_PERMITIR_SIN_FIRMA=si en local)."
+        )
+        return False
     if not firma_header or not firma_header.startswith("sha256="):
         return False
     esperado = hmac.new(
         config.WHATSAPP_APP_SECRET.encode("utf-8"), cuerpo, hashlib.sha256
     ).hexdigest()
     recibido = firma_header.split("=", 1)[1]
+    # compare_digest tarda lo mismo sin importar donde este la primera
+    # diferencia: comparar con == filtraria la firma correcta por tiempo.
     return hmac.compare_digest(esperado, recibido)
 
 
@@ -92,7 +145,8 @@ def _atender(numero: str, texto: str) -> None:
 
 @app.get("/salud")
 def salud():
-    return {"ok": True}
+    """Estado del servicio + advertencias de configuracion (sin filtrar secretos)."""
+    return {"ok": True, "advertencias": _AVISOS_ARRANQUE}
 
 
 @app.get("/webhook")
@@ -139,6 +193,14 @@ async def webhook(request: Request, tareas: BackgroundTasks):
 
                 numero = (msg.get("from") or "").strip()
                 if not numero:
+                    continue
+
+                if not _pasa_limite(numero):
+                    logger.warning(
+                        "Limite de frecuencia alcanzado para %s (%d msj/min); "
+                        "no se procesa.", numero, config.BOT_MAX_MSJ_POR_MINUTO,
+                    )
+                    tareas.add_task(whatsapp.enviar_texto, numero, _MUY_RAPIDO)
                     continue
 
                 tipo = msg.get("type")
