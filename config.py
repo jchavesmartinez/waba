@@ -91,6 +91,24 @@ BOT_PERMITIR_SIN_INSTRUCCION = (
 )
 
 # --------------------------------------------------------------------------
+# Memoria conversacional del bot.
+# Guarda los turnos (pregunta/respuesta) por numero en un esquema APARTE (_bot)
+# del MISMO Neon del cliente, para dar continuidad ("y de proveedores?") y
+# recordar incluso dias atras. Es escritura, asi que NO pasa por la via de
+# solo-lectura: vive en su propia tabla y jamas toca los datos del cliente.
+# --------------------------------------------------------------------------
+BOT_MEMORIA = os.environ.get("BOT_MEMORIA", "si").strip().lower() in (
+    "si", "sí", "true", "1", "yes"
+)
+# Cuantos turnos (user+assistant cuentan como 2) se cargan como contexto.
+BOT_MEMORIA_MAX_TURNOS = int(os.environ.get("BOT_MEMORIA_MAX_TURNOS", "20"))
+# Ventana de recencia: solo se recuerda lo hablado en las ultimas N horas.
+# 72 = tres dias. Subilo si queres memoria mas larga.
+BOT_MEMORIA_VENTANA_HORAS = int(os.environ.get("BOT_MEMORIA_VENTANA_HORAS", "72"))
+# Retencion: se borran los turnos mas viejos que esto (gobernanza/privacidad).
+BOT_MEMORIA_TTL_DIAS = int(os.environ.get("BOT_MEMORIA_TTL_DIAS", "30"))
+
+# --------------------------------------------------------------------------
 # WhatsApp Cloud API (Meta / Graph API) — transporte del bot.
 # Reemplaza a Twilio: el mensaje entra como JSON en el webhook y la respuesta
 # se manda con una llamada SALIENTE aparte al Graph API (no se responde en el
