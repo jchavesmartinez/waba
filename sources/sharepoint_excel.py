@@ -5,9 +5,12 @@ Se comporta EXACTAMENTE igual que el conector de Google Sheets, para que el
 cliente no tenga que aprender dos modelos mentales:
 
   - Cada pestania (hoja) que NO empiece con '_' se carga como tabla consultable.
-  - La pestania '_catalogo' (opcional) aporta la metadata y la gobernanza.
-  - La pestania '_kpis' (opcional) aporta la capa semantica.
-  - Cualquier pestania que empiece con '_' se excluye de las tablas.
+  - Cualquier pestania que empiece con '_' se excluye de las tablas (por si el
+    archivo trae una '_catalogo' o '_kpis' vieja; ya no se leen de aca).
+
+CATALOGO Y KPIS: ya NO se leen de este archivo. Viven en UN Sheet central por
+cliente (ver catalogo_cliente.py) que documenta todas sus fuentes juntas;
+sync.py lo lee una vez por cliente y lo reparte.
 
 Config esperada (columna 'config' del registro, como JSON). Tres formas de
 apuntar al archivo, de la mas comoda a la mas precisa:
@@ -77,15 +80,11 @@ from .base import (
     inferir_tipos,
     registrar_df,
     describir_tabla,
-    construir_catalogo,
     limpiar_nombre,
     normalizar_columnas,
 )
 
 logger = logging.getLogger("fachavi.sources.sharepoint_excel")
-
-CATALOGO_HOJA = "_catalogo"
-KPIS_HOJA = "_kpis"
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 LOGIN = "https://login.microsoftonline.com"
@@ -187,31 +186,12 @@ class SharePointExcelSource(Source):
                     self.fuente_id, ", ".join(sorted(faltan)),
                 )
 
-        catalogo, catalogo_filas = self._leer_catalogo(libro)
-
-        # Mismo filtrado que google_sheets: el catalogo documenta TODAS las
-        # hojas del archivo; si esta fuente cargo solo algunas, se queda con las
-        # filas de esas. Sin esto, dos fuentes sobre el mismo archivo duplicarian
-        # el catalogo entero.
-        cargadas = {t.strip().lower() for t in tablas}
-        if catalogo_filas and cargadas:
-            antes = len(catalogo_filas)
-            catalogo_filas = [
-                f for f in catalogo_filas
-                if str(f.get("tabla", "")).strip().lower() in cargadas
-            ]
-            if len(catalogo_filas) != antes:
-                logger.info("[%s] catalogo filtrado a sus tablas: %d de %d filas",
-                            self.fuente_id, len(catalogo_filas), antes)
-
-        kpis_filas = self._leer_kpis(libro) if tablas else []
-
+        # Catalogo y KPIs ya NO se leen de este archivo: vienen del Sheet
+        # central del cliente (catalogo_cliente.py), que sync.py lee una vez y
+        # reparte a cada fuente despues de cargar().
         return Fragmento(
             schema="\n\n".join(schema_parts),
-            catalogo=catalogo,
             tablas=tablas,
-            catalogo_filas=catalogo_filas,
-            kpis_filas=kpis_filas,
             alertas=alertas,
         )
 
@@ -366,63 +346,3 @@ class SharePointExcelSource(Source):
                     self.fuente_id, len(acumulado) / 1024 / 1024)
         return bytes(acumulado)
 
-    # ---------------- metadata: _catalogo y _kpis ----------------
-
-    @staticmethod
-    def _filas_de(hoja: pd.DataFrame) -> list:
-        """Convierte una hoja de metadata en lista de dicts con claves normalizadas."""
-        if hoja is None or hoja.empty:
-            return []
-        h = hoja.fillna("")
-        h.columns = [str(c).strip().lower() for c in h.columns]
-        return [{k: str(v).strip() for k, v in fila.items()}
-                for fila in h.to_dict("records")]
-
-    def _leer_catalogo(self, libro: dict):
-        """Lee '_catalogo' si existe. Si falta, la fuente queda sin documentar."""
-        hoja = next((v for k, v in libro.items()
-                     if k.strip().lower() == CATALOGO_HOJA), None)
-        if hoja is None:
-            logger.warning(
-                "Fuente '%s' sin hoja '%s' (sin catalogo/governance). Sin ella, "
-                "el bot no va a poder consultar ninguna de sus tablas.",
-                self.fuente_id, CATALOGO_HOJA,
-            )
-            return "", []
-
-        filas = self._filas_de(hoja)
-        if not filas:
-            return "", []
-        norm = []
-        for f in filas:
-            norm.append({
-                "tabla": f.get("tabla", ""),
-                "columna": f.get("columna", ""),
-                "descripcion": f.get("descripcion", ""),
-                "instruccion": f.get("instruccion", ""),
-                "sistema_origen": f.get("sistema_origen", ""),
-                "frecuencia": f.get("frecuencia", ""),
-                "dueno": f.get("dueño", "") or f.get("dueno", ""),
-            })
-        return construir_catalogo(filas), norm
-
-    # Mismas columnas que en google_sheets, a proposito: el cliente puede mover
-    # una pestania '_kpis' de un Sheet a un Excel sin cambiar nada.
-    _KPIS_COLS = ("kpi", "nombre", "descripcion", "preguntas_ejemplo",
-                  "formula_sql", "tabla", "dimensiones", "unidad",
-                  "supuestos", "minimo_datos", "instruccion")
-
-    def _leer_kpis(self, libro: dict):
-        """Lee la hoja '_kpis' si existe; si falta, no hay capa semantica."""
-        hoja = next((v for k, v in libro.items()
-                     if k.strip().lower() == KPIS_HOJA), None)
-        if hoja is None:
-            logger.info("Fuente '%s' sin hoja '%s' (sin KPIs).",
-                        self.fuente_id, KPIS_HOJA)
-            return []
-        norm = []
-        for f in self._filas_de(hoja):
-            if not f.get("kpi"):
-                continue
-            norm.append({c: f.get(c, "") for c in self._KPIS_COLS})
-        return norm

@@ -6,11 +6,17 @@ Config esperada (columna 'config' del registro, como JSON):
 
 Comportamiento:
   - Cada pestania que NO empiece con '_' se carga como tabla consultable.
-  - La pestania '_catalogo' (opcional) aporta la metadata/governance.
-  - Cualquier pestania que empiece con '_' se excluye de las tablas.
+  - Cualquier pestania que empiece con '_' se excluye de las tablas (por si
+    el Sheet trae una '_catalogo' o '_kpis' vieja; ya no se leen de aca).
 
 El mismo service account (gclient.py) lee este Sheet. El cliente solo debe
 compartir su hoja con el client_email del service account (permiso Lector).
+
+CATALOGO Y KPIS: ya NO se leen de este Sheet. Antes cada fuente traia su
+propio catalogo desde una pestania '_catalogo' interna; ahora el catalogo y
+los KPIs viven en UN Sheet central por cliente (ver catalogo_cliente.py), que
+documenta todas las fuentes de ese cliente juntas. sync.py lo lee una vez por
+cliente y lo reparte — este conector ya no necesita saber nada de eso.
 """
 
 import logging
@@ -24,7 +30,6 @@ from .base import (
     inferir_tipos,
     registrar_df,
     describir_tabla,
-    construir_catalogo,
     limpiar_nombre,
     normalizar_columnas,
 )
@@ -32,10 +37,6 @@ from .base import (
 import pandas as pd
 
 logger = logging.getLogger("fachavi.sources.google_sheets")
-
-CATALOGO_SHEET = "_catalogo"
-KPIS_SHEET = "_kpis"
-
 
 class GoogleSheetsSource(Source):
     tipo = "google_sheets"
@@ -138,89 +139,12 @@ class GoogleSheetsSource(Source):
                     self.fuente_id, ", ".join(sorted(faltan)),
                 )
 
-        catalogo, catalogo_filas = self._leer_catalogo(libro)
-
-        # El catalogo del Sheet documenta TODAS sus pestanias. Si esta fuente
-        # solo cargo algunas (filtro 'hojas'), se queda unicamente con las filas
-        # de esas tablas. Sin esto, dos fuentes sobre el mismo Sheet duplicarian
-        # el catalogo entero y las consultas de governance darian filas repetidas.
-        cargadas = {t.strip().lower() for t in tablas}
-        if catalogo_filas and cargadas:
-            antes = len(catalogo_filas)
-            catalogo_filas = [
-                f for f in catalogo_filas
-                if str(f.get("tabla", "")).strip().lower() in cargadas
-            ]
-            if len(catalogo_filas) != antes:
-                logger.info(
-                    "[%s] catalogo filtrado a sus tablas: %d de %d filas",
-                    self.fuente_id, len(catalogo_filas), antes,
-                )
-
-        # KPIs (capa semantica): se leen del tab '_kpis' del mismo Sheet y se
-        # adjuntan solo si esta fuente cargo tablas (mismo criterio que el
-        # catalogo, para no duplicar entre fuentes del mismo libro).
-        kpis_filas = self._leer_kpis(libro) if tablas else []
-
+        # Catalogo y KPIs ya NO se leen de este Sheet: vienen del Sheet central
+        # del cliente (catalogo_cliente.py), que sync.py lee una vez y reparte
+        # a cada fuente despues de cargar(). Este conector solo entrega las
+        # tablas y su schema.
         return Fragmento(
             schema="\n\n".join(schema_parts),
-            catalogo=catalogo,
             tablas=tablas,
-            catalogo_filas=catalogo_filas,
-            kpis_filas=kpis_filas,
             alertas=alertas,
         )
-
-    def _leer_catalogo(self, libro):
-        """Lee '_catalogo' si existe. Si falta, devuelve '' (fuente sin documentar)."""
-        try:
-            ws = libro.worksheet(CATALOGO_SHEET)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Fuente '%s' sin pestania '%s' (sin catalogo/governance).",
-                self.fuente_id, CATALOGO_SHEET,
-            )
-            return "", []
-        filas = ws.get_all_records()
-        if not filas:
-            return "", []
-        # Normaliza claves para que la tabla del warehouse tenga columnas fijas.
-        # 'instruccion' es gobernanza que consume el BOT (que tablas puede leer),
-        # por eso ahora VIAJA hasta el warehouse en vez de quedarse en el Sheet.
-        norm = []
-        for f in filas:
-            f = {str(k).strip().lower(): str(v).strip() for k, v in f.items()}
-            norm.append({
-                "tabla": f.get("tabla", ""),
-                "columna": f.get("columna", ""),
-                "descripcion": f.get("descripcion", ""),
-                "instruccion": f.get("instruccion", ""),
-                "sistema_origen": f.get("sistema_origen", ""),
-                "frecuencia": f.get("frecuencia", ""),
-                "dueno": f.get("dueño", "") or f.get("dueno", ""),
-            })
-        return construir_catalogo(filas), norm
-
-    # Columnas del tab '_kpis'. 'kpi' y 'formula_sql' son las obligatorias; el
-    # resto documenta/gobierna la metrica. Se normalizan para que la tabla del
-    # warehouse tenga columnas fijas aunque el Sheet traiga otras de mas.
-    _KPIS_COLS = ("kpi", "nombre", "descripcion", "preguntas_ejemplo",
-                  "formula_sql", "tabla", "dimensiones", "unidad",
-                  "supuestos", "minimo_datos", "instruccion")
-
-    def _leer_kpis(self, libro):
-        """Lee el tab '_kpis' si existe; si falta, no hay capa semantica."""
-        try:
-            ws = libro.worksheet(KPIS_SHEET)
-        except Exception:  # noqa: BLE001
-            logger.info("Fuente '%s' sin pestania '%s' (sin KPIs).",
-                        self.fuente_id, KPIS_SHEET)
-            return []
-        filas = ws.get_all_records()
-        norm = []
-        for f in filas:
-            f = {str(k).strip().lower(): str(v).strip() for k, v in f.items()}
-            if not f.get("kpi"):
-                continue
-            norm.append({c: f.get(c, "") for c in self._KPIS_COLS})
-        return norm
