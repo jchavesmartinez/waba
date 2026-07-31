@@ -190,6 +190,37 @@ class Destino(ABC):
         """Persiste los KPIs de una fuente en <esquema>._kpis (default: no-op)."""
         logger.info("escribir_kpis no soportado en destino '%s'; se omite.", self.tipo)
 
+    def fusionar_eventos_calendar(
+        self,
+        esquema: str,
+        tabla_actual: str,
+        tabla_historial: str,
+        df: "pd.DataFrame",
+        corrida: Corrida,
+        calendarios_reiniciados: tuple | list = (),
+    ) -> dict:
+        """
+        Fusiona eventos sin reemplazar tablas y devuelve estadisticas.
+
+        Es concreto para no romper destinos externos que no implementen
+        Google Calendar; el job da un error explicito si intenta usarlo.
+        """
+        raise NotImplementedError(
+            f"El destino '{self.tipo}' no soporta historico de Google Calendar."
+        )
+
+    def leer_estado_calendar(self, esquema: str, fuente_id: str) -> dict:
+        """Devuelve {calendar_id: sync_token}; default sin estado previo."""
+        return {}
+
+    def guardar_estado_calendar(
+        self, esquema: str, fuente_id: str, sync_tokens: dict
+    ) -> None:
+        """Persiste tokens incrementales; default falla de forma explicita."""
+        raise NotImplementedError(
+            f"El destino '{self.tipo}' no soporta sync tokens de Google Calendar."
+        )
+
     def __repr__(self):
         return f"<{self.__class__.__name__} tipo={self.tipo}>"
 
