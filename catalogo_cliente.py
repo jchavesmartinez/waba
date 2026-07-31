@@ -11,11 +11,18 @@ documenta TODAS las fuentes de ese cliente juntas — Sheets, SharePoint,
 Calendar, lo que sea. El cliente declara su ID en la pestania 'clientes' del
 Sheet maestro, columna 'catalogo_spreadsheet_id'.
 
-sync.py llama leer(cliente) UNA VEZ POR CLIENTE (no una vez por fuente) y
-reparte el resultado: cada fuente se queda solo con las filas de catalogo/kpis
-que le corresponden a las tablas que ELLA cargo (ver filtrar_para_fuente()).
-Sin ese filtrado, cada fuente pisaria en el warehouse el catalogo completo del
-cliente, y la ultima fuente en correr "ganaria" sobre las demas.
+sync.py llama leer(cliente) UNA VEZ POR CLIENTE (no una vez por fuente), deja
+que TODAS sus fuentes activas carguen sus datos, y RECIEN AL FINAL escribe el
+catalogo consolidado (ver sync.py:_escribir_catalogo_del_cliente).
+
+Por que al final y no fuente por fuente (B-40): un KPI o una fila de catalogo
+pueden mencionar tablas de VARIAS fuentes del mismo cliente -- el propio
+'runway_inventario' de este proyecto cruza 'ventas' e 'inventario' en un JOIN,
+y esas dos tablas perfectamente pueden venir de fuentes distintas. Escribir el
+catalogo por fuente, con cada fuente viendo solo sus propias tablas, hacia
+estructuralmente imposible que una fila asi encontrara sus dos tablas juntas.
+El filtrado correcto compara contra la UNION de tablas de todas las fuentes
+del cliente, y eso solo se conoce despues de que todas terminaron de correr.
 
 FAIL-CLOSED a proposito: si el cliente no tiene catalogo_spreadsheet_id, o el
 Sheet no tiene pestania '_catalogo', el resultado es catalogo vacio. Una tabla
@@ -120,28 +127,18 @@ def _leer_kpis(libro, cid: str) -> list:
     return norm
 
 
-def filtrar_para_fuente(filas: list, fuente_id: str, tablas_cargadas: set) -> list:
+def tablas_de(valor_tabla: str) -> list:
     """
-    Se queda con las filas de catalogo/kpis que le corresponden a UNA fuente.
-
-    Regla: si la fila trae 'fuente_id' y no coincide con esta fuente, se
-    descarta (evita que dos fuentes con una tabla del mismo nombre —p.ej. dos
-    hojas llamadas 'ventas' de fuentes distintas— se mezclen). Si la fila NO
-    trae 'fuente_id' (catalogo viejo o alguien lo dejo vacio a proposito), se
-    filtra solo por nombre de tabla, igual que se hacia antes.
-
-    Esto es lo que impide que la ULTIMA fuente en correr "gane" y pise en el
-    warehouse el catalogo completo del cliente: cada fuente escribe solo lo
-    que es suyo.
+    Separa la columna 'tabla' de una fila en sus nombres individuales.
+    Soporta el formato que ya usa 'runway_inventario' en este proyecto:
+    varias tablas separadas por ';' cuando la fila (tipicamente un KPI) las
+    cruza en un JOIN. Una sola tabla es el caso normal.
     """
-    cargadas = {t.strip().lower() for t in tablas_cargadas}
-    resultado = []
-    for f in filas:
-        fid_fila = str(f.get("fuente_id", "")).strip()
-        if fid_fila and fid_fila != fuente_id:
-            continue
-        tabla = str(f.get("tabla", "")).strip().lower()
-        if tabla and tabla not in cargadas:
-            continue
-        resultado.append(f)
-    return resultado
+    return [n.strip() for n in str(valor_tabla or "").split(";") if n.strip()]
+
+
+# NOTA: filtrar_para_fuente() se elimino (B-40). El filtrado por tabla vive
+# ahora en sync.py:_escribir_catalogo_del_cliente, porque necesita conocer la
+# union de tablas de TODAS las fuentes del cliente -- algo que este modulo,
+# que solo LEE el Sheet, no tiene forma de saber. tablas_de() de arriba es el
+# unico helper de parseo que sigue haciendo falta aca.
