@@ -91,6 +91,28 @@ def ejecutar(cliente: dict, sql: str, limite: int | None = None):
             trans.rollback()
 
 
+def listar_tablas(cliente: dict) -> list:
+    """
+    Devuelve los nombres REALES (fisicos) de todas las tablas de datos del
+    esquema de un cliente, leyendo information_schema. Excluye las de
+    metadata (_catalogo, _kpis) y cualquier otra que empiece con '_'.
+
+    B-40: el catalogo ahora es consolidado por cliente y sus filas ya NO
+    guardan de forma confiable el fuente_id real de cada tabla (ver
+    bot/catalogo.py:resolver_tablas). En vez de reconstruir el nombre fisico
+    a partir de fuente_id + tabla logica (que ya no es seguro), se resuelve
+    al reves: se listan las tablas reales que existen de verdad en el
+    warehouse, y se busca cual TERMINA en '__<tabla_logica>'.
+    """
+    esquema = nombre_esquema(cliente["cliente_id"])
+    sql = """
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = :esq AND table_type = 'BASE TABLE'
+    """
+    filas = leer_interno(cliente, sql, {"esq": esquema})
+    return [f["table_name"] for f in filas if not f["table_name"].startswith("_")]
+
+
 def listar_columnas(cliente: dict, tablas_reales) -> dict:
     """
     Devuelve {tabla_real: [(columna, tipo), ...]} leyendo information_schema,

@@ -16,15 +16,22 @@ ser usada por el bot"). Este modulo:
 
 Nombre real de la tabla en Neon:
     catalogo.tabla es el nombre LOGICO ('ventas'); en el warehouse la tabla se
-    llama <fuente_id>__<tabla> ('sheet_ventas__ventas'). El catalogo guarda
-    'fuente_id', asi que reconstruimos el nombre real con warehouse.nombre_tabla.
+    llama <fuente_id>__<tabla> ('sheet_ventas__ventas').
+
+    B-40 — esto YA NO se reconstruye a partir de 'fuente_id'. El catalogo es
+    ahora consolidado por CLIENTE (una fila puede describir una tabla sin que
+    esa fila sepa, ni le importe, de que fuente vino): un KPI que cruza
+    'ventas' e 'inventario' de dos fuentes distintas no tiene un 'fuente_id'
+    unico que reportar. En su lugar, se listan las tablas REALES que existen
+    en el warehouse (warehouse_ro.listar_tablas) y se busca cual TERMINA en
+    '__<tabla_logica>'. Es mas lento (una consulta extra a information_schema)
+    pero es correcto sin importar cuantas fuentes tenga el cliente.
 """
 
 import logging
 from dataclasses import dataclass, field
 
 import config
-from warehouse.base import nombre_tabla
 from bot import warehouse_ro
 
 logger = logging.getLogger("fachavi.bot.catalogo")
@@ -180,8 +187,9 @@ def _leer_filas_catalogo(cliente: dict) -> tuple[list, bool, bool]:
 def resolver_tablas(cliente: dict) -> tuple[list, bool]:
     """
     Aplica la regla de gobernanza y devuelve (lista de TablaPermitida, hubo_error).
-    Agrupa el catalogo por (fuente_id, tabla) y decide con la fila '*' si existe;
-    si no hay fila '*', exige que TODAS las filas de esa tabla habiliten (fail-closed).
+    Agrupa el catalogo por tabla LOGICA (ya no por fuente_id, ver B-40) y
+    decide con la fila '*' si existe; si no hay fila '*', exige que TODAS las
+    filas de esa tabla habiliten (fail-closed).
     """
     filas, hay_instr, hubo_error = _leer_filas_catalogo(cliente)
     if hubo_error:
@@ -193,18 +201,58 @@ def resolver_tablas(cliente: dict) -> tuple[list, bool]:
             cliente.get("cliente_id"),
         )
 
+    # B-40: se agrupa por TABLA LOGICA sola. Antes se agrupaba por
+    # (fuente_id, tabla) porque cada fuente escribia su propio catalogo con su
+    # propio fuente_id fiable. Con el catalogo consolidado por cliente, una
+    # fila puede describir una tabla sin depender de una fuente unica (un KPI
+    # que cruza dos tablas de fuentes distintas es el caso que motivo esto),
+    # asi que ya no se puede -ni hace falta- agrupar por fuente.
     grupos: dict = {}
     for f in filas:
         f = {str(k).strip().lower(): ("" if v is None else str(v).strip())
              for k, v in f.items()}
         tabla = f.get("tabla", "")
-        fuente = f.get("fuente_id", "")
-        if not tabla or not fuente:
+        if not tabla:
             continue
-        grupos.setdefault((fuente, tabla), []).append(f)
+        grupos.setdefault(tabla, []).append(f)
+
+    if not grupos:
+        return [], False
+
+    # Resolver nombre logico -> nombre real preguntandole al warehouse (no
+    # reconstruyendo con fuente_id, que ya no es confiable para esto).
+    tablas_reales = warehouse_ro.listar_tablas(cliente)
+    mapa_real = {}
+    for tabla_logica in grupos:
+        sufijo = f"__{tabla_logica.lower()}"
+        candidatas = [t for t in tablas_reales if t.lower().endswith(sufijo)]
+        if len(candidatas) == 1:
+            mapa_real[tabla_logica] = candidatas[0]
+        elif len(candidatas) > 1:
+            # Dos fuentes distintas cargaron una tabla con el MISMO nombre
+            # logico (dos hojas 'ventas' de sistemas distintos). Sin un
+            # fuente_id confiable en el catalogo no hay forma de saber cual
+            # de las dos describe esa fila: se rechazan las dos, fail-closed,
+            # y se avisa fuerte porque el arreglo es renombrar una de las
+            # tablas logicas en las fuentes (no algo que el bot pueda decidir).
+            logger.error(
+                "[%s] la tabla logica '%s' existe en MAS DE UNA fuente (%s). "
+                "El catalogo consolidado no puede saber a cual fila describe: "
+                "se bloquean las dos hasta que se le pongan nombres distintos "
+                "en la config de cada fuente (p.ej. 'ventas_pos' y "
+                "'ventas_ecommerce').",
+                cliente.get("cliente_id"), tabla_logica, ", ".join(candidatas),
+            )
+        # 0 candidatas: la tabla esta documentada en el catalogo pero no
+        # existe (todavia) en el warehouse -- normal si la fuente nunca
+        # corrio o esta fresca y no ha escrito. No es un error, se ignora.
 
     permitidas = []
-    for (fuente, tabla), rows in grupos.items():
+    for tabla, rows in grupos.items():
+        tabla_real = mapa_real.get(tabla)
+        if not tabla_real:
+            continue
+
         estrella = next((r for r in rows if r.get("columna", "") in ("*", "")), None)
         if estrella is not None:
             ok = puede_bot(estrella.get("instruccion", ""), etiqueta=f"la tabla '{tabla}'")
@@ -236,10 +284,12 @@ def resolver_tablas(cliente: dict) -> tuple[list, bool]:
 
         cols_doc = {r["columna"]: r.get("descripcion", "")
                     for r in rows if r.get("columna", "") not in ("*", "")}
+        # fuente_id ya no se puede afirmar con certeza para una fila del
+        # catalogo consolidado; se guarda vacio en vez de un valor inventado.
         permitidas.append(TablaPermitida(
             tabla_logica=tabla,
-            tabla_real=nombre_tabla(fuente, tabla),
-            fuente_id=fuente,
+            tabla_real=tabla_real,
+            fuente_id="",
             descripcion=desc,
             instruccion=instr,
             columnas_doc=cols_doc,
