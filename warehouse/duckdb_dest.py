@@ -107,7 +107,7 @@ class DuckDBDestino(Destino):
         con.unregister("_df_entrante")
         logger.info("escrito %s.%s (%d filas)", esquema, tabla, len(df))
 
-    # --- Google Calendar: estado actual + historico SCD2 ---
+    # --- Google Calendar: una sola tabla acumulativa ---
 
     def _tabla_existe(self, esquema: str, tabla: str) -> bool:
         fila = self.conectar().execute(
@@ -117,96 +117,61 @@ class DuckDBDestino(Destino):
         ).fetchone()
         return bool(fila)
 
-    def _columna_existe(self, esquema: str, tabla: str, columna: str) -> bool:
-        fila = self.conectar().execute(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_schema=? AND table_name=? AND column_name=?",
-            [esquema, tabla, columna],
-        ).fetchone()
-        return bool(fila)
-
-    def _asegurar_tablas_calendar(
-        self, esquema: str, tabla_actual: str, tabla_historial: str
-    ) -> None:
+    def _asegurar_tabla_calendar(self, esquema: str, tabla: str) -> None:
         con = self.conectar()
         self.asegurar_esquema(esquema)
-
-        # La version previa del conector hacia full refresh y no tenia
-        # calendar_id. Se conserva completa bajo otro nombre.
-        if (
-            self._tabla_existe(esquema, tabla_actual)
-            and not self._columna_existe(esquema, tabla_actual, "calendar_id")
-        ):
-            base = f"{tabla_actual}__snapshot_legacy"
-            legado = base
-            numero = 2
-            while self._tabla_existe(esquema, legado):
-                legado = f"{base}_{numero}"
-                numero += 1
+        definiciones = {
+            **_TIPOS_EVENTO,
+            "version_hash": "VARCHAR",
+            "_corrida_id": "VARCHAR",
+            "_fuente_id": "VARCHAR",
+            "_ingestado_en": "TIMESTAMPTZ",
+            "visto_por_ultima_vez": "TIMESTAMPTZ",
+        }
+        if not self._tabla_existe(esquema, tabla):
+            columnas = ", ".join(
+                f'"{nombre}" {tipo}' for nombre, tipo in definiciones.items()
+            )
             con.execute(
-                f'ALTER TABLE "{esquema}"."{tabla_actual}" RENAME TO "{legado}"'
+                f'CREATE TABLE "{esquema}"."{tabla}" ({columnas})'
             )
-            logger.warning(
-                "la tabla anterior %s.%s se preservo como %s antes de activar "
-                "el historico de Calendar",
-                esquema,
-                tabla_actual,
-                legado,
+            return
+
+        # Migracion EN LA MISMA TABLA: si venia del conector snapshot, se
+        # agregan las columnas nuevas sin renombrarla ni crear otra tabla.
+        for nombre, tipo in definiciones.items():
+            con.execute(
+                f'ALTER TABLE "{esquema}"."{tabla}" '
+                f'ADD COLUMN IF NOT EXISTS "{nombre}" {tipo}'
             )
 
-        columnas = ", ".join(
-            f'"{campo}" {_TIPOS_EVENTO[campo]}' for campo in CAMPOS_EVENTO
-        )
-        con.execute(
-            f'CREATE TABLE IF NOT EXISTS "{esquema}"."{tabla_actual}" ('
-            f"{columnas}, version_hash VARCHAR NOT NULL, "
-            "_corrida_id VARCHAR, _fuente_id VARCHAR, "
-            "_ingestado_en TIMESTAMPTZ, visto_por_ultima_vez TIMESTAMPTZ, "
-            "PRIMARY KEY (calendar_id, evento_id))"
-        )
-        con.execute(
-            f'CREATE TABLE IF NOT EXISTS "{esquema}"."{tabla_historial}" ('
-            f"{columnas}, version_hash VARCHAR NOT NULL, "
-            "vigente_desde TIMESTAMPTZ, vigente_hasta TIMESTAMPTZ, "
-            "es_version_actual BOOLEAN, _corrida_id VARCHAR, "
-            "_fuente_id VARCHAR, _ingestado_en TIMESTAMPTZ)"
-        )
-
-    def fusionar_eventos_calendar(
+    def actualizar_eventos_calendar(
         self,
         esquema: str,
-        tabla_actual: str,
-        tabla_historial: str,
+        tabla: str,
         df: pd.DataFrame,
         corrida: Corrida,
-        calendarios_reiniciados: tuple | list = (),
     ) -> dict:
         con = self.conectar()
-        self._asegurar_tablas_calendar(esquema, tabla_actual, tabla_historial)
+        self._asegurar_tabla_calendar(esquema, tabla)
         ahora = datetime.now(timezone.utc)
-        cols_actual = list(CAMPOS_EVENTO) + [
+        columnas = list(CAMPOS_EVENTO) + [
             "version_hash",
             "_corrida_id",
             "_fuente_id",
             "_ingestado_en",
             "visto_por_ultima_vez",
         ]
-        cols_hist = list(CAMPOS_EVENTO) + [
-            "version_hash",
-            "vigente_desde",
-            "vigente_hasta",
-            "es_version_actual",
-            "_corrida_id",
-            "_fuente_id",
-            "_ingestado_en",
-        ]
         seleccion = ", ".join(f'"{c}"' for c in list(CAMPOS_EVENTO) + ["version_hash"])
-        existentes = {}
+        por_clave, por_recurso = {}, {}
         for valores in con.execute(
-            f'SELECT {seleccion} FROM "{esquema}"."{tabla_actual}"'
+            f'SELECT {seleccion} FROM "{esquema}"."{tabla}"'
         ).fetchall():
             fila = dict(zip(list(CAMPOS_EVENTO) + ["version_hash"], valores))
-            existentes[(fila["calendar_id"], fila["evento_id"])] = fila
+            if fila.get("calendar_id") and fila.get("evento_id"):
+                por_clave[(fila["calendar_id"], fila["evento_id"])] = fila
+            if fila.get("recurso") and fila.get("evento_id"):
+                por_recurso[(fila["recurso"], fila["evento_id"])] = fila
 
         entrantes = {}
         for _, serie in df.iterrows():
@@ -218,56 +183,47 @@ class DuckDBDestino(Destino):
                 )
             entrantes[clave] = fila
 
-        stats = {
-            "nuevos": 0,
-            "cambiados": 0,
-            "sin_cambios": 0,
-            "retirados_actual": 0,
-        }
-        reiniciados = set(calendarios_reiniciados or ())
-        marcas_actual = ", ".join("?" for _ in cols_actual)
-        marcas_hist = ", ".join("?" for _ in cols_hist)
-        nombres_actual = ", ".join(f'"{c}"' for c in cols_actual)
-        nombres_hist = ", ".join(f'"{c}"' for c in cols_hist)
+        stats = {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+        marcas = ", ".join("?" for _ in columnas)
+        nombres = ", ".join(f'"{c}"' for c in columnas)
 
         con.execute("BEGIN TRANSACTION")
         try:
             for clave, entrante in entrantes.items():
-                anterior = existentes.get(clave)
+                recurso_clave = (entrante.get("recurso"), entrante.get("evento_id"))
+                anterior = por_clave.get(clave) or por_recurso.get(recurso_clave)
                 unido = fusionar_evento(anterior, entrante)
                 version = hash_evento(unido)
+                parametros_clave = [clave[0], clave[1], *recurso_clave]
 
                 if anterior and anterior.get("version_hash") == version:
                     con.execute(
-                        f'UPDATE "{esquema}"."{tabla_actual}" SET '
+                        f'UPDATE "{esquema}"."{tabla}" SET '
                         "visto_por_ultima_vez=?, _corrida_id=?, _fuente_id=?, "
-                        "_ingestado_en=? WHERE calendar_id=? AND evento_id=?",
-                        [ahora, corrida.corrida_id, corrida.fuente_id, ahora, *clave],
+                        "_ingestado_en=? WHERE "
+                        "(calendar_id=? AND evento_id=?) OR "
+                        "(recurso=? AND evento_id=?)",
+                        [ahora, corrida.corrida_id, corrida.fuente_id, ahora,
+                         *parametros_clave],
                     )
                     stats["sin_cambios"] += 1
                     continue
 
                 if anterior:
-                    con.execute(
-                        f'UPDATE "{esquema}"."{tabla_historial}" SET '
-                        "vigente_hasta=?, es_version_actual=false "
-                        "WHERE calendar_id=? AND evento_id=? "
-                        "AND es_version_actual=true",
-                        [ahora, *clave],
-                    )
-                    stats["cambiados"] += 1
+                    stats["actualizados"] += 1
                 else:
                     stats["nuevos"] += 1
 
                 con.execute(
-                    f'DELETE FROM "{esquema}"."{tabla_actual}" '
-                    "WHERE calendar_id=? AND evento_id=?",
-                    list(clave),
+                    f'DELETE FROM "{esquema}"."{tabla}" WHERE '
+                    "(calendar_id=? AND evento_id=?) OR "
+                    "(recurso=? AND evento_id=?)",
+                    parametros_clave,
                 )
                 valores_evento = [limpiar_valor(unido.get(c)) for c in CAMPOS_EVENTO]
                 con.execute(
-                    f'INSERT INTO "{esquema}"."{tabla_actual}" '
-                    f"({nombres_actual}) VALUES ({marcas_actual})",
+                    f'INSERT INTO "{esquema}"."{tabla}" '
+                    f"({nombres}) VALUES ({marcas})",
                     valores_evento
                     + [
                         version,
@@ -277,97 +233,25 @@ class DuckDBDestino(Destino):
                         ahora,
                     ],
                 )
-                con.execute(
-                    f'INSERT INTO "{esquema}"."{tabla_historial}" '
-                    f"({nombres_hist}) VALUES ({marcas_hist})",
-                    valores_evento
-                    + [
-                        version,
-                        ahora,
-                        None,
-                        True,
-                        corrida.corrida_id,
-                        corrida.fuente_id,
-                        ahora,
-                    ],
-                )
-
-            # Un 410 obliga a reconstruir el estado sincronizado de ese
-            # calendario. Lo que ya no vino en la carga completa sale de la
-            # tabla actual, pero su auditoria permanece en historial.
-            for clave in existentes:
-                if clave[0] in reiniciados and clave not in entrantes:
-                    con.execute(
-                        f'DELETE FROM "{esquema}"."{tabla_actual}" '
-                        "WHERE calendar_id=? AND evento_id=?",
-                        list(clave),
-                    )
-                    stats["retirados_actual"] += 1
             con.execute("COMMIT")
         except Exception:
             con.execute("ROLLBACK")
             raise
 
         stats["actual_total"] = con.execute(
-            f'SELECT COUNT(*) FROM "{esquema}"."{tabla_actual}"'
-        ).fetchone()[0]
-        stats["historial_total"] = con.execute(
-            f'SELECT COUNT(*) FROM "{esquema}"."{tabla_historial}"'
+            f'SELECT COUNT(*) FROM "{esquema}"."{tabla}"'
         ).fetchone()[0]
         logger.info(
-            "Calendar %s.%s: %d nuevos, %d cambiados, %d sin cambios, "
-            "%d retirados del estado actual",
+            "Calendar %s.%s: %d nuevos, %d actualizados, %d sin cambios; "
+            "%d acumulados",
             esquema,
-            tabla_actual,
+            tabla,
             stats["nuevos"],
-            stats["cambiados"],
+            stats["actualizados"],
             stats["sin_cambios"],
-            stats["retirados_actual"],
+            stats["actual_total"],
         )
         return stats
-
-    def _asegurar_estado_calendar(self, esquema: str) -> None:
-        self.asegurar_esquema(esquema)
-        self.conectar().execute(
-            f'CREATE TABLE IF NOT EXISTS "{esquema}"."_calendar_sync_state" ('
-            "fuente_id VARCHAR, calendar_id VARCHAR, sync_token VARCHAR, "
-            "actualizado_en TIMESTAMPTZ, PRIMARY KEY (fuente_id, calendar_id))"
-        )
-
-    def leer_estado_calendar(self, esquema: str, fuente_id: str) -> dict:
-        if not self._tabla_existe(esquema, "_calendar_sync_state"):
-            return {}
-        filas = self.conectar().execute(
-            f'SELECT calendar_id, sync_token FROM '
-            f'"{esquema}"."_calendar_sync_state" WHERE fuente_id=?',
-            [fuente_id],
-        ).fetchall()
-        return {calendar_id: token for calendar_id, token in filas}
-
-    def guardar_estado_calendar(
-        self, esquema: str, fuente_id: str, sync_tokens: dict
-    ) -> None:
-        self._asegurar_estado_calendar(esquema)
-        con = self.conectar()
-        ahora = datetime.now(timezone.utc)
-        con.execute("BEGIN TRANSACTION")
-        try:
-            for calendar_id, token in sync_tokens.items():
-                con.execute(
-                    f'DELETE FROM "{esquema}"."_calendar_sync_state" '
-                    "WHERE fuente_id=? AND calendar_id=?",
-                    [fuente_id, calendar_id],
-                )
-                con.execute(
-                    f'INSERT INTO "{esquema}"."_calendar_sync_state" '
-                    "(fuente_id,calendar_id,sync_token,actualizado_en) "
-                    "VALUES (?,?,?,?)",
-                    [fuente_id, calendar_id, token, ahora],
-                )
-            con.execute("COMMIT")
-        except Exception:
-            con.execute("ROLLBACK")
-            raise
 
     def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
         con = self.conectar()
