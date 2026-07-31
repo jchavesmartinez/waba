@@ -29,6 +29,7 @@ from datetime import timedelta
 
 import duckdb
 
+from sources.google_calendar import CAMPOS_EVENTO
 import catalogo_cliente
 import config
 import registry
@@ -46,6 +47,135 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 logger = logging.getLogger("fachavi.sync")
+
+
+def _sincronizar_google_calendar(
+    destino,
+    cliente: dict,
+    fuente: dict,
+    corrida: Corrida,
+    fresca: bool,
+    probar: bool,
+) -> Corrida:
+    """
+    Ruta especial de Calendar.
+
+    A diferencia de las fuentes snapshot, no reemplaza la tabla. Fusiona los
+    cambios por (calendar_id, evento_id), versiona solo cuando cambia el hash y
+    persiste el nextSyncToken unicamente despues de escribir Neon con exito.
+    """
+    cid = cliente["cliente_id"]
+    fid = fuente["fuente_id"]
+    esquema = nombre_esquema(cid)
+    actual = nombre_tabla(fid, "citas")
+    historial = nombre_tabla(fid, "citas_historial")
+
+    # Una corrida OK de la version snapshot anterior puede ser reciente, pero
+    # todavia no existe estado incremental. En ese caso no se debe omitir la
+    # primera migracion aunque la politica de frescura diga que si.
+    if fresca and not destino.leer_estado_calendar(esquema, fid):
+        fresca = False
+
+    if fresca:
+        corrida.tablas = [f"{esquema}.{actual}", f"{esquema}.{historial}"]
+        corrida.tablas_logicas = {"citas", "citas_historial"}
+        corrida.estado = "omitido"
+        corrida.detalle = destino.ultimo_detalle(cid, fid)
+        corrida.fin = ahora_utc()
+        logger.info("[%s/%s] OMITIDO: Google Calendar sigue fresco", cid, fid)
+        return corrida
+
+    tmp = duckdb.connect(database=":memory:")
+    try:
+        conf = dict(fuente.get("config", {}))
+        # En --probar no se lee ni escribe estado persistente: la prueba hace
+        # una carga inicial completa sin mutar el warehouse.
+        conf["_sync_tokens"] = (
+            {} if probar else destino.leer_estado_calendar(esquema, fid)
+        )
+        obj = crear_fuente("google_calendar", fid, conf)
+        frag = obj.cargar(tmp)
+        corrida.alertas += list(getattr(frag, "alertas", []))
+        df = tmp.execute("SELECT * FROM citas").df()
+        corrida.filas = len(df)
+
+        cols_actual = list(CAMPOS_EVENTO) + [
+            "version_hash",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+            "visto_por_ultima_vez",
+        ]
+        cols_historial = list(CAMPOS_EVENTO) + [
+            "version_hash",
+            "vigente_desde",
+            "vigente_hasta",
+            "es_version_actual",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+        ]
+
+        if probar:
+            logger.info(
+                "[PRUEBA] %s.%s: %d eventos en carga inicial; no se escribe "
+                "data ni syncTokens",
+                esquema,
+                actual,
+                len(df),
+            )
+            stats = {
+                "actual_total": len(df),
+                "historial_total": len(df),
+                "nuevos": len(df),
+                "cambiados": 0,
+                "sin_cambios": 0,
+            }
+        else:
+            stats = destino.fusionar_eventos_calendar(
+                esquema,
+                actual,
+                historial,
+                df,
+                corrida,
+                getattr(obj, "calendarios_reiniciados", ()),
+            )
+            # Si esto falla, la corrida queda en error y el token anterior se
+            # conserva. Repetir el mismo delta es seguro gracias al hash.
+            destino.guardar_estado_calendar(
+                esquema, fid, getattr(obj, "sync_tokens_siguientes", {})
+            )
+
+        corrida.detalle = {
+            actual: {
+                "columnas": cols_actual,
+                "filas": int(stats["actual_total"]),
+            },
+            historial: {
+                "columnas": cols_historial,
+                "filas": int(stats["historial_total"]),
+            },
+        }
+        corrida.tablas = [f"{esquema}.{actual}", f"{esquema}.{historial}"]
+        corrida.tablas_logicas = {"citas", "citas_historial"}
+        corrida.estado = "ok_con_alertas" if corrida.alertas else "ok"
+        logger.info(
+            "[%s/%s] %s: %d cambios recibidos; %d actuales, %d versiones",
+            cid,
+            fid,
+            corrida.estado.upper(),
+            len(df),
+            stats["actual_total"],
+            stats["historial_total"],
+        )
+    except Exception as e:  # noqa: BLE001
+        corrida.estado = "error"
+        corrida.error = f"{type(e).__name__}: {e}"
+        logger.exception("[%s/%s] FALLO: %s", cid, fid, e)
+    finally:
+        tmp.close()
+        corrida.fin = ahora_utc()
+    return corrida
 
 
 def _esta_fresca(destino, cliente_id, fuente) -> bool:
@@ -131,6 +261,11 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
     # y no pasaba nada hasta que la frescura venciera.
     fresca = (not forzar and not probar
               and _esta_fresca(destino, cid, fuente))
+
+    if fuente.get("tipo") == "google_calendar":
+        return _sincronizar_google_calendar(
+            destino, cliente, fuente, corrida, fresca, probar
+        )
 
     tmp = duckdb.connect(database=":memory:")
     try:
