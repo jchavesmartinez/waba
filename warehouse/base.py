@@ -56,6 +56,12 @@ class Corrida:
     estado: str = "corriendo"
     filas: int = 0
     tablas: list = field(default_factory=list)
+    # Nombres LOGICOS de las tablas cargadas (sin el prefijo fuente_id__), tal
+    # como los declara el catalogo del cliente. 'tablas' arriba tiene el
+    # nombre FISICO completo (esquema.fuente__tabla); esto es lo que sync.py
+    # necesita para saber si el catalogo/KPIs de un cliente ya pueden
+    # escribirse (B-40).
+    tablas_logicas: set = field(default_factory=set)
     error: str = ""
     alertas: list = field(default_factory=list)
     # detalle: {tabla: {"columnas": [...], "filas": N}} -> base del drift check
