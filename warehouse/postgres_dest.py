@@ -15,12 +15,19 @@ este destino simplemente no se registra).
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+from sources.google_calendar import (
+    CAMPOS_EVENTO,
+    fila_evento,
+    fusionar_evento,
+    hash_evento,
+    limpiar_valor,
+)
 import config
 from .base import Destino, Corrida, ESQUEMA_META, TABLA_CORRIDAS
 
@@ -29,6 +36,34 @@ logger = logging.getLogger("fachavi.warehouse.postgres")
 # Cuantas corridas OK hacia atras se fusionan para armar el punto de
 # comparacion de la guarda de vaciado (C-01). Ver ultimo_detalle().
 _CORRIDAS_A_FUSIONAR = 20
+
+_TIPOS_EVENTO = {
+    "calendar_id": "TEXT",
+    "recurso": "TEXT",
+    "evento_id": "TEXT",
+    "ical_uid": "TEXT",
+    "titulo": "TEXT",
+    "descripcion": "TEXT",
+    "ubicacion": "TEXT",
+    "inicio": "TIMESTAMPTZ",
+    "fin": "TIMESTAMPTZ",
+    "zona_horaria": "TEXT",
+    "duracion_min": "BIGINT",
+    "todo_el_dia": "BOOLEAN",
+    "estado": "TEXT",
+    "transparencia": "TEXT",
+    "visibilidad": "TEXT",
+    "tipo_evento": "TEXT",
+    "evento_recurrente_id": "TEXT",
+    "inicio_original": "TIMESTAMPTZ",
+    "creado_en": "TIMESTAMPTZ",
+    "actualizado_en": "TIMESTAMPTZ",
+    "enlace_evento": "TEXT",
+    "organizador": "TEXT",
+    "invitados": "TEXT",
+    "propiedades": "TEXT",
+    "raw_evento": "TEXT",
+}
 
 
 def _ident(nombre: str) -> str:
@@ -111,6 +146,330 @@ class PostgresDestino(Destino):
                 f'ALTER TABLE "{esquema}"."{staging}" RENAME TO "{tabla}"'
             ))
         logger.info("escrito %s.%s (%d filas, swap atomico)", esquema, tabla, len(df))
+
+    # --- Google Calendar: estado actual + historico SCD2 ---
+
+    def _asegurar_tablas_calendar(
+        self, esquema: str, tabla_actual: str, tabla_historial: str
+    ) -> tuple[str, str, str]:
+        esquema = _ident(esquema)
+        tabla_actual = _ident(tabla_actual)
+        tabla_historial = _ident(tabla_historial)
+        self.asegurar_esquema(esquema)
+
+        with self.conectar().begin() as cx:
+            existe = cx.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema=:e AND table_name=:t)"
+                ),
+                {"e": esquema, "t": tabla_actual},
+            ).scalar()
+            tiene_calendar_id = False
+            if existe:
+                tiene_calendar_id = cx.execute(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                        "WHERE table_schema=:e AND table_name=:t "
+                        "AND column_name='calendar_id')"
+                    ),
+                    {"e": esquema, "t": tabla_actual},
+                ).scalar()
+
+            if existe and not tiene_calendar_id:
+                base = _ident(f"{tabla_actual}__snapshot_legacy")[:63]
+                legado = base
+                numero = 2
+                while cx.execute(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema=:e AND table_name=:t)"
+                    ),
+                    {"e": esquema, "t": legado},
+                ).scalar():
+                    sufijo = f"_{numero}"
+                    legado = f"{base[:63-len(sufijo)]}{sufijo}"
+                    numero += 1
+                cx.execute(
+                    text(
+                        f'ALTER TABLE "{esquema}"."{tabla_actual}" '
+                        f'RENAME TO "{legado}"'
+                    )
+                )
+                logger.warning(
+                    "la tabla anterior %s.%s se preservo como %s antes de "
+                    "activar el historico de Calendar",
+                    esquema,
+                    tabla_actual,
+                    legado,
+                )
+
+            columnas = ", ".join(
+                f'"{campo}" {_TIPOS_EVENTO[campo]}' for campo in CAMPOS_EVENTO
+            )
+            cx.execute(
+                text(
+                    f'CREATE TABLE IF NOT EXISTS "{esquema}"."{tabla_actual}" ('
+                    f"{columnas}, version_hash TEXT NOT NULL, "
+                    "_corrida_id TEXT, _fuente_id TEXT, "
+                    "_ingestado_en TIMESTAMPTZ, "
+                    "visto_por_ultima_vez TIMESTAMPTZ, "
+                    "PRIMARY KEY (calendar_id, evento_id))"
+                )
+            )
+            cx.execute(
+                text(
+                    f'CREATE TABLE IF NOT EXISTS "{esquema}"."{tabla_historial}" ('
+                    f"{columnas}, version_hash TEXT NOT NULL, "
+                    "vigente_desde TIMESTAMPTZ, vigente_hasta TIMESTAMPTZ, "
+                    "es_version_actual BOOLEAN, _corrida_id TEXT, "
+                    "_fuente_id TEXT, _ingestado_en TIMESTAMPTZ)"
+                )
+            )
+            indice = _ident(f"{tabla_historial}__evento_idx")[:63]
+            cx.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "{indice}" ON '
+                    f'"{esquema}"."{tabla_historial}" '
+                    "(calendar_id, evento_id, vigente_desde)"
+                )
+            )
+        return esquema, tabla_actual, tabla_historial
+
+    def fusionar_eventos_calendar(
+        self,
+        esquema: str,
+        tabla_actual: str,
+        tabla_historial: str,
+        df: pd.DataFrame,
+        corrida: Corrida,
+        calendarios_reiniciados: tuple | list = (),
+    ) -> dict:
+        esquema, tabla_actual, tabla_historial = self._asegurar_tablas_calendar(
+            esquema, tabla_actual, tabla_historial
+        )
+        ahora = datetime.now(timezone.utc)
+        campos_lectura = list(CAMPOS_EVENTO) + ["version_hash"]
+        seleccion = ", ".join(f'"{c}"' for c in campos_lectura)
+        columnas_actual = list(CAMPOS_EVENTO) + [
+            "version_hash",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+            "visto_por_ultima_vez",
+        ]
+        columnas_hist = list(CAMPOS_EVENTO) + [
+            "version_hash",
+            "vigente_desde",
+            "vigente_hasta",
+            "es_version_actual",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+        ]
+
+        entrantes = {}
+        for _, serie in df.iterrows():
+            fila = fila_evento(serie)
+            clave = (fila.get("calendar_id"), fila.get("evento_id"))
+            if not all(clave):
+                raise RuntimeError(
+                    f"Google Calendar devolvio un evento con clave vacia: {clave}"
+                )
+            entrantes[clave] = fila
+
+        stats = {
+            "nuevos": 0,
+            "cambiados": 0,
+            "sin_cambios": 0,
+            "retirados_actual": 0,
+        }
+        reiniciados = set(calendarios_reiniciados or ())
+        eng = self.conectar()
+        with eng.begin() as cx:
+            existentes = {}
+            for fila in cx.execute(
+                text(f'SELECT {seleccion} FROM "{esquema}"."{tabla_actual}"')
+            ).mappings():
+                d = dict(fila)
+                existentes[(d["calendar_id"], d["evento_id"])] = d
+
+            nombres_actual = ", ".join(f'"{c}"' for c in columnas_actual)
+            binds_actual = ", ".join(f":{c}" for c in columnas_actual)
+            nombres_hist = ", ".join(f'"{c}"' for c in columnas_hist)
+            binds_hist = ", ".join(f":{c}" for c in columnas_hist)
+
+            for clave, entrante in entrantes.items():
+                anterior = existentes.get(clave)
+                unido = fusionar_evento(anterior, entrante)
+                version = hash_evento(unido)
+                clave_sql = {"calendar_id": clave[0], "evento_id": clave[1]}
+
+                if anterior and anterior.get("version_hash") == version:
+                    cx.execute(
+                        text(
+                            f'UPDATE "{esquema}"."{tabla_actual}" SET '
+                            "visto_por_ultima_vez=:ahora, "
+                            "_corrida_id=:corrida, _fuente_id=:fuente, "
+                            "_ingestado_en=:ahora "
+                            "WHERE calendar_id=:calendar_id "
+                            "AND evento_id=:evento_id"
+                        ),
+                        {
+                            **clave_sql,
+                            "ahora": ahora,
+                            "corrida": corrida.corrida_id,
+                            "fuente": corrida.fuente_id,
+                        },
+                    )
+                    stats["sin_cambios"] += 1
+                    continue
+
+                if anterior:
+                    cx.execute(
+                        text(
+                            f'UPDATE "{esquema}"."{tabla_historial}" SET '
+                            "vigente_hasta=:ahora, es_version_actual=false "
+                            "WHERE calendar_id=:calendar_id "
+                            "AND evento_id=:evento_id "
+                            "AND es_version_actual=true"
+                        ),
+                        {**clave_sql, "ahora": ahora},
+                    )
+                    stats["cambiados"] += 1
+                else:
+                    stats["nuevos"] += 1
+
+                cx.execute(
+                    text(
+                        f'DELETE FROM "{esquema}"."{tabla_actual}" '
+                        "WHERE calendar_id=:calendar_id "
+                        "AND evento_id=:evento_id"
+                    ),
+                    clave_sql,
+                )
+                base = {c: limpiar_valor(unido.get(c)) for c in CAMPOS_EVENTO}
+                actual = {
+                    **base,
+                    "version_hash": version,
+                    "_corrida_id": corrida.corrida_id,
+                    "_fuente_id": corrida.fuente_id,
+                    "_ingestado_en": ahora,
+                    "visto_por_ultima_vez": ahora,
+                }
+                cx.execute(
+                    text(
+                        f'INSERT INTO "{esquema}"."{tabla_actual}" '
+                        f"({nombres_actual}) VALUES ({binds_actual})"
+                    ),
+                    actual,
+                )
+                historica = {
+                    **base,
+                    "version_hash": version,
+                    "vigente_desde": ahora,
+                    "vigente_hasta": None,
+                    "es_version_actual": True,
+                    "_corrida_id": corrida.corrida_id,
+                    "_fuente_id": corrida.fuente_id,
+                    "_ingestado_en": ahora,
+                }
+                cx.execute(
+                    text(
+                        f'INSERT INTO "{esquema}"."{tabla_historial}" '
+                        f"({nombres_hist}) VALUES ({binds_hist})"
+                    ),
+                    historica,
+                )
+
+            # Google exige reconstruir el store tras un 410. Solo se limpia la
+            # tabla de estado actual; las versiones historicas se conservan.
+            for clave in existentes:
+                if clave[0] in reiniciados and clave not in entrantes:
+                    cx.execute(
+                        text(
+                            f'DELETE FROM "{esquema}"."{tabla_actual}" '
+                            "WHERE calendar_id=:calendar_id "
+                            "AND evento_id=:evento_id"
+                        ),
+                        {"calendar_id": clave[0], "evento_id": clave[1]},
+                    )
+                    stats["retirados_actual"] += 1
+
+            stats["actual_total"] = cx.execute(
+                text(f'SELECT COUNT(*) FROM "{esquema}"."{tabla_actual}"')
+            ).scalar()
+            stats["historial_total"] = cx.execute(
+                text(f'SELECT COUNT(*) FROM "{esquema}"."{tabla_historial}"')
+            ).scalar()
+
+        logger.info(
+            "Calendar %s.%s: %d nuevos, %d cambiados, %d sin cambios, "
+            "%d retirados del estado actual",
+            esquema,
+            tabla_actual,
+            stats["nuevos"],
+            stats["cambiados"],
+            stats["sin_cambios"],
+            stats["retirados_actual"],
+        )
+        return stats
+
+    def _asegurar_estado_calendar(self, esquema: str) -> str:
+        esquema = _ident(esquema)
+        self.asegurar_esquema(esquema)
+        with self.conectar().begin() as cx:
+            cx.execute(
+                text(
+                    f'CREATE TABLE IF NOT EXISTS "{esquema}".'
+                    '"_calendar_sync_state" ('
+                    "fuente_id TEXT, calendar_id TEXT, sync_token TEXT, "
+                    "actualizado_en TIMESTAMPTZ, "
+                    "PRIMARY KEY (fuente_id, calendar_id))"
+                )
+            )
+        return esquema
+
+    def leer_estado_calendar(self, esquema: str, fuente_id: str) -> dict:
+        esquema = _ident(esquema)
+        with self.conectar().begin() as cx:
+            existe = cx.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema=:e "
+                    "AND table_name='_calendar_sync_state')"
+                ),
+                {"e": esquema},
+            ).scalar()
+            if not existe:
+                return {}
+            filas = cx.execute(
+                text(
+                    f'SELECT calendar_id, sync_token FROM "{esquema}".'
+                    '"_calendar_sync_state" WHERE fuente_id=:f'
+                ),
+                {"f": fuente_id},
+            ).fetchall()
+        return {calendar_id: token for calendar_id, token in filas}
+
+    def guardar_estado_calendar(
+        self, esquema: str, fuente_id: str, sync_tokens: dict
+    ) -> None:
+        esquema = self._asegurar_estado_calendar(esquema)
+        ahora = datetime.now(timezone.utc)
+        with self.conectar().begin() as cx:
+            for calendar_id, token in sync_tokens.items():
+                cx.execute(
+                    text(
+                        f'INSERT INTO "{esquema}"."_calendar_sync_state" '
+                        "(fuente_id,calendar_id,sync_token,actualizado_en) "
+                        "VALUES (:f,:c,:t,:a) "
+                        "ON CONFLICT (fuente_id,calendar_id) DO UPDATE SET "
+                        "sync_token=EXCLUDED.sync_token, "
+                        "actualizado_en=EXCLUDED.actualizado_en"
+                    ),
+                    {"f": fuente_id, "c": calendar_id, "t": token, "a": ahora},
+                )
 
     def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
         self.asegurar_esquema(esquema)
