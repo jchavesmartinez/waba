@@ -45,6 +45,7 @@ import config
 from .base import (
     Source,
     Fragmento,
+    coma_decimal_de,
     dia_primero_de,
     inferir_tipos,
     registrar_df,
@@ -83,7 +84,8 @@ class ApiRestSource(Source):
         df = pd.json_normalize(registros)          # anidados -> col 'autor.nombre' etc.
         df.columns = normalizar_columnas(df.columns)
         df = inferir_tipos(df, alertas=alertas, contexto=self.fuente_id,
-                           dia_primero=dia_primero_de(self.config))
+                           dia_primero=dia_primero_de(self.config),
+                           coma_decimal=coma_decimal_de(self.config))
 
         nombre_deseado = self.config.get("tabla") or "datos"
         tabla = registrar_df(con, df, nombre_deseado, self.fuente_id)

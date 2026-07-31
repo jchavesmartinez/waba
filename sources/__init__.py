@@ -50,23 +50,8 @@ registrar(CSVURLSource)
 registrar(ApiRestSource)
 
 # SharePoint/Excel es opcional: necesita openpyxl para leer .xlsx. Si no esta
-# instalado, los tipos simplemente no se registran y las demas fuentes siguen
+# instalado, el tipo simplemente no se registra y las demas fuentes siguen
 # funcionando (mismo criterio que postgres).
-#
-# Hay dos variantes, y cual usar depende del cliente:
-#   - sharepoint_link  : para PYMEs. El cliente pega un «link de compartir»
-#                        publico y listo. Sin Azure, sin admin. Los datos
-#                        quedan accesibles a quien tenga el link.
-#   - sharepoint_excel : para clientes con IT. Registro de aplicacion en Azure
-#                        AD del cliente, con permiso Sites.Read.All y
-#                        consentimiento de admin. Acceso privado y auditable,
-#                        pero implica configuracion tecnica del lado del cliente.
-try:  # noqa: SIM105
-    from .sharepoint_link import SharePointLinkSource  # noqa: E402
-    registrar(SharePointLinkSource)
-except Exception as e:  # noqa: BLE001
-    logger.info("Fuente 'sharepoint_link' no disponible en este entorno: %s", e)
-
 try:  # noqa: SIM105
     from .sharepoint_excel import SharePointExcelSource  # noqa: E402
     registrar(SharePointExcelSource)
