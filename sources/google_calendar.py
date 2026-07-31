@@ -157,11 +157,18 @@ def limpiar_valor(valor):
     """Convierte valores pandas/numpy a tipos simples aceptados por SQL/JSON."""
     if valor is None:
         return None
+
+    # pd.NA no se comporta como NaN: ``pd.NA != pd.NA`` devuelve otro pd.NA
+    # y no un booleano. psycopg2 tampoco sabe convertir NAType. pd.isna cubre
+    # de forma uniforme pd.NA, pd.NaT, NaN y datetime64('NaT').
     try:
-        if valor != valor:  # NaN / NaT
+        if bool(pd.isna(valor)):
             return None
     except (TypeError, ValueError):
+        # Listas/dicts pueden producir un arreglo de booleanos. Esos valores
+        # no son nulos escalares y se procesan normalmente abajo.
         pass
+
     if hasattr(valor, "to_pydatetime"):
         try:
             return valor.to_pydatetime()
@@ -169,7 +176,8 @@ def limpiar_valor(valor):
             pass
     if hasattr(valor, "item"):
         try:
-            return valor.item()
+            item = valor.item()
+            return None if item is valor else limpiar_valor(item)
         except (TypeError, ValueError):
             pass
     return valor
