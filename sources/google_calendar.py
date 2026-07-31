@@ -31,11 +31,12 @@ Config esperada (columna 'config' del registro, como JSON):
   calendario > "ID de calendario", en Google Calendar.
 
 Opcionales:
-  "dias_atras": 30 -> limite inferior de la primera carga (default 30)
+  "dias_atras": 30      -> cuantos dias hacia atras leer (default 30)
+  "dias_adelante": 60   -> cuantos dias hacia adelante leer (default 60)
 
-Despues de la primera carga se usa nextSyncToken: Google entrega solamente
-eventos creados, modificados o cancelados desde la corrida anterior. Los
-tokens se guardan en el warehouse, nunca en la Hoja Maestra.
+Cada corrida vuelve a leer esa ventana y hace UPSERT en la misma tabla de
+Neon: agrega citas nuevas, actualiza las que cambiaron y nunca elimina las que
+ya quedaron fuera del rango.
 
 CADA FILA de la tabla resultante es UNA cita, con estas columnas:
   calendar_id     -> calendario origen; junto con evento_id forma la clave
@@ -220,6 +221,7 @@ CALENDAR_API = "https://www.googleapis.com/calendar/v3"
 TIMEOUT_SEG = 30.0
 
 DIAS_ATRAS_DEFECTO = 30
+DIAS_ADELANTE_DEFECTO = 60
 
 
 class GoogleCalendarSource(Source):
@@ -236,39 +238,27 @@ class GoogleCalendarSource(Source):
         dias_atras = _entero_no_negativo(
             self.config.get("dias_atras", DIAS_ATRAS_DEFECTO), "dias_atras"
         )
+        dias_adelante = _entero_no_negativo(
+            self.config.get("dias_adelante", DIAS_ADELANTE_DEFECTO),
+            "dias_adelante",
+        )
         ahora = datetime.now(timezone.utc)
         desde = ahora - timedelta(days=dias_atras)
+        hasta = ahora + timedelta(days=dias_adelante)
 
         alertas = []
         filas = []
         exitosos = 0
-        self.sync_tokens_siguientes = {}
-        self.calendarios_reiniciados = []
-        tokens_previos = self.config.get("_sync_tokens", {})
-        if not isinstance(tokens_previos, dict):
-            tokens_previos = {}
-
-        if "dias_adelante" in self.config:
-            logger.info(
-                "[%s] 'dias_adelante' ya no limita Calendar: con syncToken la "
-                "primera carga trae todos los eventos futuros para no perder "
-                "citas cuando el horizonte avanza.",
-                self.fuente_id,
-            )
         if not _es_verdadero(self.config.get("incluir_cancelados", True)):
             logger.warning(
                 "[%s] se ignora incluir_cancelados=false: los tombstones son "
-                "necesarios para conservar un historico correcto.",
+                "necesarios para actualizar el estado de una cita cancelada.",
                 self.fuente_id,
             )
 
         for nombre, calendar_id in calendarios.items():
             try:
-                eventos, token_nuevo, reiniciado = self._listar_eventos(
-                    calendar_id,
-                    desde,
-                    str(tokens_previos.get(calendar_id, "") or ""),
-                )
+                eventos = self._listar_eventos(calendar_id, desde, hasta)
             except (RuntimeError, httpx.HTTPError) as e:
                 # Un calendario que falla (no compartido, id mal escrito) no
                 # tiene por que tumbar a los demas del mismo cliente. B-12: se
@@ -279,13 +269,6 @@ class GoogleCalendarSource(Source):
                 continue
 
             exitosos += 1
-            self.sync_tokens_siguientes[calendar_id] = token_nuevo
-            if reiniciado:
-                self.calendarios_reiniciados.append(calendar_id)
-                alertas.append(
-                    f"[{self.fuente_id}] el syncToken de '{nombre}' vencio; "
-                    "Google solicito y completo una resincronizacion."
-                )
             for ev in eventos:
                 filas.append(_evento_a_fila(nombre, calendar_id, ev))
 
@@ -296,8 +279,9 @@ class GoogleCalendarSource(Source):
             )
         if not filas:
             logger.info(
-                "[%s] Google Calendar no devolvio cambios en esta corrida.",
-                self.fuente_id,
+                "[%s] ningun evento en el rango [-%d, +%d] dias; la tabla "
+                "acumulativa no se vacia.", self.fuente_id, dias_atras,
+                dias_adelante,
             )
 
         df = pd.DataFrame(
@@ -372,50 +356,26 @@ class GoogleCalendarSource(Source):
         return creds.token
 
     def _listar_eventos(
-        self, calendar_id: str, desde: datetime, sync_token: str = ""
-    ) -> tuple[list, str, bool]:
+        self, calendar_id: str, desde: datetime, hasta: datetime
+    ) -> list:
         """
-        Primera vez: carga completa desde ``desde`` y obtiene nextSyncToken.
-        Siguientes veces: envia el token y recibe solo cambios/cancelaciones.
-
-        Si Google responde 410, el token vencio. Se repite automaticamente una
-        carga completa; el historico local NO se borra.
+        Lee la ventana [desde, hasta] completa y pagina hasta terminar.
+        showDeleted permite actualizar en Neon una cita que fue cancelada.
         """
         headers = {"Authorization": f"Bearer {self._token()}"}
         url = f"{CALENDAR_API}/calendars/{_url_quote(calendar_id)}/events"
-
-        def parametros(token: str) -> dict:
-            base = {
-                "singleEvents": "true",
-                "maxResults": 2500,
-                # Con syncToken Google exige incluir eliminados.
-                "showDeleted": "true",
-            }
-            if token:
-                base["syncToken"] = token
-            else:
-                # No se usa timeMax: un limite futuro quedaria congelado dentro
-                # del token y eventualmente haria perder citas nuevas.
-                base["timeMin"] = desde.isoformat()
-            return base
-
-        params = parametros(sync_token)
+        params = {
+            "timeMin": desde.isoformat(),
+            "timeMax": hasta.isoformat(),
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "maxResults": 2500,
+            "showDeleted": "true",
+        }
         eventos = []
-        reiniciado = False
         with httpx.Client(timeout=TIMEOUT_SEG) as cli:
             while True:
                 r = cli.get(url, headers=headers, params=params)
-                if r.status_code == 410 and sync_token and not reiniciado:
-                    logger.warning(
-                        "[%s] syncToken vencido para %s; se hace carga completa.",
-                        self.fuente_id,
-                        calendar_id,
-                    )
-                    eventos = []
-                    sync_token = ""
-                    reiniciado = True
-                    params = parametros("")
-                    continue
                 if r.status_code == 404:
                     raise RuntimeError(
                         "no existe o el service account no tiene acceso. "
@@ -435,16 +395,10 @@ class GoogleCalendarSource(Source):
 
                 token = datos.get("nextPageToken")
                 if not token:
-                    siguiente = str(datos.get("nextSyncToken", "") or "")
-                    if not siguiente:
-                        raise RuntimeError(
-                            "Google no devolvio nextSyncToken en la ultima "
-                            "pagina; no se guarda una sincronizacion incompleta."
-                        )
                     break
                 params["pageToken"] = token
 
-        return eventos, siguiente, reiniciado
+        return eventos
 
 
 def _url_quote(texto: str) -> str:
