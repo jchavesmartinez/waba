@@ -36,6 +36,7 @@ import pandas as pd
 from .base import (
     Source,
     Fragmento,
+    coma_decimal_de,
     dia_primero_de,
     inferir_tipos,
     registrar_df,
@@ -68,6 +69,7 @@ class CSVURLSource(Source):
         timeout = float(self.config.get("timeout_seg", TIMEOUT_DEFECTO_SEG))
         max_bytes = int(self.config.get("max_mb", MAX_MB_DEFECTO)) * 1024 * 1024
         dia_primero = dia_primero_de(self.config)
+        coma_dec = coma_decimal_de(self.config)
 
         schema_parts = []
         tablas = []
@@ -83,7 +85,8 @@ class CSVURLSource(Source):
             df.columns = normalizar_columnas(df.columns)
             df = inferir_tipos(df, alertas=alertas,
                                contexto=f"{self.fuente_id}/{nombre_deseado}",
-                               dia_primero=dia_primero)
+                               dia_primero=dia_primero,
+                           coma_decimal=coma_dec)
 
             tabla = registrar_df(con, df, nombre_deseado, self.fuente_id)
             tablas.append(tabla)

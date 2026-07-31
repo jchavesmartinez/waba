@@ -155,8 +155,80 @@ UMBRAL_INFERENCIA = 0.8
 UMBRAL_ALERTA_DESCARTE = 0.05
 
 
-def inferir_tipos(df: pd.DataFrame, alertas: list = None,
-                  contexto: str = "", dia_primero: bool = True) -> pd.DataFrame:
+# --------------------------------------------------------------------------
+# Separador de miles: el error mas caro que puede cometer este archivo.
+#
+# La version anterior hacia .str.replace(r"[,\s₡$]", "") y pasaba el resto a
+# pd.to_numeric(). Eso quita la coma —separador de miles ANGLOSAJON— pero deja
+# el punto, que es el separador de miles TICO. Resultado sobre datos reales de
+# un cliente costarricense:
+#
+#     "₡5.000"      ->     5.0        (mil veces menos)
+#     "₡1.250.000"  ->     NaN        (el valor se pierde entero)
+#     "₡500"        ->   500.0        (correcto, por casualidad)
+#
+# Una columna entera de montos escrita "₡5.000" convierte al 100 %, o sea que
+# pasa el umbral del 80 % sin descartar NADA: la alerta de A-03 no se dispara,
+# porque desde el punto de vista del codigo no hubo ningun fallo. El bot
+# responde "vendimos 47" cuando fueron 47.000, y el numero es plausible.
+#
+# La ambiguedad no se puede resolver valor por valor —"5.000" es 5000 en Costa
+# Rica y 5.0 en Estados Unidos— asi que se resuelve por COLUMNA, con la
+# convencion declarada de la fuente, igual que se hizo con las fechas (A-07).
+# --------------------------------------------------------------------------
+
+_MILES_PUNTO = re.compile(r"^\s*[₡$€]?\s*-?\d{1,3}(\.\d{3})+(,\d+)?\s*$")
+_MILES_COMA  = re.compile(r"^\s*[₡$€]?\s*-?\d{1,3}(,\d{3})+(\.\d+)?\s*$")
+
+
+def _limpiar_numero(serie: pd.Series, coma_decimal: bool = True) -> pd.Series:
+    """
+    Quita moneda y separadores de miles respetando la convencion de la fuente.
+
+    coma_decimal=True  (default, convencion tica):  punto = miles, coma = decimal
+    coma_decimal=False (convencion anglosajona):    coma  = miles, punto = decimal
+    """
+    t = serie.astype(str).str.strip()
+    t = t.str.replace(r"[\s₡$€]", "", regex=True)      # moneda y espacios
+    if coma_decimal:
+        t = t.str.replace(".", "", regex=False)         # miles
+        t = t.str.replace(",", ".", regex=False)        # decimal -> punto
+    else:
+        t = t.str.replace(",", "", regex=False)         # miles
+    return t.str.replace(r"^$", "nan", regex=True)
+
+
+def coma_decimal_de(config_fuente: dict) -> bool:
+    """
+    Resuelve la convencion numerica de una fuente: su propio
+    {"formato_numero": "punto_decimal"} y, si no lo trae, la global.
+    """
+    import config as _cfg
+    valor = str((config_fuente or {}).get("formato_numero", "")).strip().lower()
+    if not valor:
+        valor = getattr(_cfg, "FORMATO_NUMERO", "coma_decimal")
+    return valor not in ("punto_decimal", "punto", "us", "en")
+
+
+def detectar_convencion(serie: pd.Series):
+    """
+    Mira la columna y dice que convencion parece tener, o None si no hay señal.
+    Solo cuenta los valores INEQUIVOCOS (los que tienen grupos de tres digitos
+    repetidos, como 1.250.000 o 1,250,000). Sirve para avisar cuando la
+    convencion declarada contradice a los datos.
+    """
+    t = serie.astype(str)
+    punto = int(t.str.match(_MILES_PUNTO).sum())
+    coma  = int(t.str.match(_MILES_COMA).sum())
+    if punto > coma and punto > 0:
+        return "coma_decimal"       # 1.250.000 -> punto es miles
+    if coma > punto and coma > 0:
+        return "punto_decimal"      # 1,250,000 -> coma es miles
+    return None
+
+
+def inferir_tipos(df: pd.DataFrame, alertas: list = None, contexto: str = "",
+                  dia_primero: bool = True, coma_decimal: bool = True) -> pd.DataFrame:
     """
     Convierte columnas de texto a numero o fecha cuando >=80% de los valores
     lo permiten. Quita separadores de miles y simbolos de moneda (₡, $).
@@ -176,13 +248,20 @@ def inferir_tipos(df: pd.DataFrame, alertas: list = None,
         no_vacios = serie.astype(str).str.strip().ne("").sum()
         umbral = max(1, int(UMBRAL_INFERENCIA * len(serie)))
 
-        limpio = (
-            serie.astype(str)
-            .str.replace(r"[,\s₡$]", "", regex=True)
-            .str.replace(r"^$", "nan", regex=True)
-        )
+        limpio = _limpiar_numero(serie, coma_decimal=coma_decimal)
         num = pd.to_numeric(limpio, errors="coerce")
         if num.notna().sum() >= umbral:
+            detectada = detectar_convencion(serie)
+            declarada = "coma_decimal" if coma_decimal else "punto_decimal"
+            if detectada and detectada != declarada:
+                msg = (f"[{contexto or 'fuente'}] la columna '{col}' parece usar la "
+                       f"convencion numerica '{detectada}' pero la fuente declara "
+                       f"'{declarada}'. Los montos pueden quedar mil veces mas "
+                       "grandes o mas chicos. Revisa 'formato_numero' en la config "
+                       "de la fuente.")
+                logger.warning(msg)
+                if alertas is not None:
+                    alertas.append(msg)
             df[col] = num
             _avisar_descartes(alertas, contexto, col, "numero",
                               int(no_vacios - num.notna().sum()), int(no_vacios))

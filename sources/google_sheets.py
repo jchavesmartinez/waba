@@ -19,6 +19,7 @@ from gclient import abrir_libro
 from .base import (
     Source,
     Fragmento,
+    coma_decimal_de,
     dia_primero_de,
     inferir_tipos,
     registrar_df,
@@ -73,6 +74,7 @@ class GoogleSheetsSource(Source):
         # de morir se recorta y se avisa fuerte. 0 = sin tope.
         max_filas = int(self.config.get("max_filas", 0) or 0)
         dia_primero = dia_primero_de(self.config)
+        coma_dec = coma_decimal_de(self.config)
 
         libro = abrir_libro(spreadsheet_id)
         schema_parts = []
@@ -120,7 +122,8 @@ class GoogleSheetsSource(Source):
             df.columns = normalizar_columnas(df.columns)
             df = inferir_tipos(df, alertas=alertas,
                                contexto=f"{self.fuente_id}/{titulo}",
-                               dia_primero=dia_primero)
+                               dia_primero=dia_primero,
+                           coma_decimal=coma_dec)
 
             tabla = registrar_df(con, df, titulo, self.fuente_id)
             tablas.append(tabla)
