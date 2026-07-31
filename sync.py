@@ -60,25 +60,18 @@ def _sincronizar_google_calendar(
     """
     Ruta especial de Calendar.
 
-    A diferencia de las fuentes snapshot, no reemplaza la tabla. Fusiona los
-    cambios por (calendar_id, evento_id), versiona solo cuando cambia el hash y
-    persiste el nextSyncToken unicamente despues de escribir Neon con exito.
+    Lee una ventana movil, pero NO reemplaza la tabla: inserta citas nuevas y
+    actualiza en la misma fila las que cambiaron. Lo que ya quedo fuera de la
+    ventana permanece en Neon como historial acumulado.
     """
     cid = cliente["cliente_id"]
     fid = fuente["fuente_id"]
     esquema = nombre_esquema(cid)
     actual = nombre_tabla(fid, "citas")
-    historial = nombre_tabla(fid, "citas_historial")
-
-    # Una corrida OK de la version snapshot anterior puede ser reciente, pero
-    # todavia no existe estado incremental. En ese caso no se debe omitir la
-    # primera migracion aunque la politica de frescura diga que si.
-    if fresca and not destino.leer_estado_calendar(esquema, fid):
-        fresca = False
 
     if fresca:
-        corrida.tablas = [f"{esquema}.{actual}", f"{esquema}.{historial}"]
-        corrida.tablas_logicas = {"citas", "citas_historial"}
+        corrida.tablas = [f"{esquema}.{actual}"]
+        corrida.tablas_logicas = {"citas"}
         corrida.estado = "omitido"
         corrida.detalle = destino.ultimo_detalle(cid, fid)
         corrida.fin = ahora_utc()
@@ -88,11 +81,6 @@ def _sincronizar_google_calendar(
     tmp = duckdb.connect(database=":memory:")
     try:
         conf = dict(fuente.get("config", {}))
-        # En --probar no se lee ni escribe estado persistente: la prueba hace
-        # una carga inicial completa sin mutar el warehouse.
-        conf["_sync_tokens"] = (
-            {} if probar else destino.leer_estado_calendar(esquema, fid)
-        )
         obj = crear_fuente("google_calendar", fid, conf)
         frag = obj.cargar(tmp)
         corrida.alertas += list(getattr(frag, "alertas", []))
@@ -106,44 +94,23 @@ def _sincronizar_google_calendar(
             "_ingestado_en",
             "visto_por_ultima_vez",
         ]
-        cols_historial = list(CAMPOS_EVENTO) + [
-            "version_hash",
-            "vigente_desde",
-            "vigente_hasta",
-            "es_version_actual",
-            "_corrida_id",
-            "_fuente_id",
-            "_ingestado_en",
-        ]
 
         if probar:
             logger.info(
-                "[PRUEBA] %s.%s: %d eventos en carga inicial; no se escribe "
-                "data ni syncTokens",
+                "[PRUEBA] %s.%s: %d eventos en la ventana; no se escribe data",
                 esquema,
                 actual,
                 len(df),
             )
             stats = {
                 "actual_total": len(df),
-                "historial_total": len(df),
                 "nuevos": len(df),
-                "cambiados": 0,
+                "actualizados": 0,
                 "sin_cambios": 0,
             }
         else:
-            stats = destino.fusionar_eventos_calendar(
-                esquema,
-                actual,
-                historial,
-                df,
-                corrida,
-                getattr(obj, "calendarios_reiniciados", ()),
-            )
-            # Si esto falla, la corrida queda en error y el token anterior se
-            # conserva. Repetir el mismo delta es seguro gracias al hash.
-            destino.guardar_estado_calendar(
-                esquema, fid, getattr(obj, "sync_tokens_siguientes", {})
+            stats = destino.actualizar_eventos_calendar(
+                esquema, actual, df, corrida
             )
 
         corrida.detalle = {
@@ -151,22 +118,21 @@ def _sincronizar_google_calendar(
                 "columnas": cols_actual,
                 "filas": int(stats["actual_total"]),
             },
-            historial: {
-                "columnas": cols_historial,
-                "filas": int(stats["historial_total"]),
-            },
         }
-        corrida.tablas = [f"{esquema}.{actual}", f"{esquema}.{historial}"]
-        corrida.tablas_logicas = {"citas", "citas_historial"}
+        corrida.tablas = [f"{esquema}.{actual}"]
+        corrida.tablas_logicas = {"citas"}
         corrida.estado = "ok_con_alertas" if corrida.alertas else "ok"
         logger.info(
-            "[%s/%s] %s: %d cambios recibidos; %d actuales, %d versiones",
+            "[%s/%s] %s: %d eventos leidos; %d nuevos, %d actualizados, "
+            "%d sin cambios; %d acumulados",
             cid,
             fid,
             corrida.estado.upper(),
             len(df),
+            stats["nuevos"],
+            stats["actualizados"],
+            stats["sin_cambios"],
             stats["actual_total"],
-            stats["historial_total"],
         )
     except Exception as e:  # noqa: BLE001
         corrida.estado = "error"
