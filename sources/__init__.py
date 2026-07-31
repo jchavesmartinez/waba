@@ -42,10 +42,12 @@ def tipos_disponibles() -> list:
 
 # --- Registro de fuentes incluidas ---------------------------------------
 from .google_sheets import GoogleSheetsSource  # noqa: E402
+from .google_calendar import GoogleCalendarSource  # noqa: E402
 from .csv_url import CSVURLSource               # noqa: E402
 from .api_rest import ApiRestSource             # noqa: E402
 
 registrar(GoogleSheetsSource)
+registrar(GoogleCalendarSource)
 registrar(CSVURLSource)
 registrar(ApiRestSource)
 

@@ -103,9 +103,16 @@ class GoogleCalendarSource(Source):
                 "ni 'calendarios' en config."
             )
 
-        dias_atras = int(self.config.get("dias_atras", DIAS_ATRAS_DEFECTO) or 0)
-        dias_adelante = int(self.config.get("dias_adelante", DIAS_ADELANTE_DEFECTO) or 0)
-        incluir_cancelados = bool(self.config.get("incluir_cancelados", False))
+        dias_atras = _entero_no_negativo(
+            self.config.get("dias_atras", DIAS_ATRAS_DEFECTO), "dias_atras"
+        )
+        dias_adelante = _entero_no_negativo(
+            self.config.get("dias_adelante", DIAS_ADELANTE_DEFECTO),
+            "dias_adelante",
+        )
+        incluir_cancelados = _es_verdadero(
+            self.config.get("incluir_cancelados", False)
+        )
 
         ahora = datetime.now(timezone.utc)
         desde = ahora - timedelta(days=dias_atras)
@@ -170,7 +177,23 @@ class GoogleCalendarSource(Source):
         vacia en toda la tabla — no hace falta distinguir si solo hay uno.
         """
         if self.config.get("calendarios"):
-            return {str(k): str(v) for k, v in self.config["calendarios"].items()}
+            crudo = self.config["calendarios"]
+            if not isinstance(crudo, dict):
+                raise RuntimeError(
+                    f"Fuente '{self.fuente_id}': 'calendarios' debe ser un "
+                    "objeto JSON de nombre a calendar_id."
+                )
+            resultado = {
+                str(nombre).strip(): str(calendar_id).strip()
+                for nombre, calendar_id in crudo.items()
+                if str(calendar_id).strip()
+            }
+            if len(resultado) != len(crudo):
+                logger.warning(
+                    "[%s] se ignoraron calendarios con calendar_id vacio.",
+                    self.fuente_id,
+                )
+            return resultado
         cal_id = str(self.config.get("calendar_id", "")).strip()
         return {"": cal_id} if cal_id else {}
 
@@ -179,13 +202,10 @@ class GoogleCalendarSource(Source):
     def _token(self) -> str:
         """
         Token de acceso a partir de las credenciales del service account
-        compartido (gclient.py). google-auth refresca el token solo cuando
-        hace falta; Request() es el transporte HTTP que necesita para eso.
+        compartido. gclient.py crea y refresca un token exclusivo con scope
+        calendar.readonly.
         """
-        from google.auth.transport.requests import Request
         creds = credenciales_calendar()
-        if not creds.valid:
-            creds.refresh(Request())
         return creds.token
 
     def _listar_eventos(self, calendar_id: str, desde: datetime, hasta: datetime,
@@ -281,7 +301,41 @@ def _parsear_fecha(valor):
         return None
     try:
         # 'date' llega como "2026-08-03"; 'dateTime' como
-        # "2026-08-03T15:00:00-06:00". pandas.Timestamp entiende los dos.
-        return pd.Timestamp(valor)
+        # "2026-08-03T15:00:00-06:00". Se normaliza todo a UTC para evitar una
+        # columna object cuando un calendario mezcla eventos con offsets
+        # distintos o eventos de dia completo (sin zona).
+        ts = pd.Timestamp(valor)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.to_pydatetime()
     except (ValueError, TypeError):
         return None
+
+
+def _entero_no_negativo(valor, campo: str) -> int:
+    """Convierte opciones de rango y rechaza valores negativos o invalidos."""
+    try:
+        numero = int(valor)
+    except (TypeError, ValueError) as e:
+        raise RuntimeError(
+            f"Fuente google_calendar: '{campo}' debe ser un entero."
+        ) from e
+    if numero < 0:
+        raise RuntimeError(
+            f"Fuente google_calendar: '{campo}' no puede ser negativo."
+        )
+    return numero
+
+
+def _es_verdadero(valor) -> bool:
+    """
+    Interpreta booleanos del JSON sin caer en bool("false") == True.
+
+    El Sheet normalmente guarda false como booleano JSON real, pero aceptar
+    tambien strings evita incluir cancelados por un error de tipeo/formato.
+    """
+    if isinstance(valor, bool):
+        return valor
+    return str(valor).strip().lower() in {"1", "si", "sí", "true", "yes", "on"}
