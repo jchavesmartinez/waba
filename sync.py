@@ -111,11 +111,14 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
         inicio=ahora_utc(),
     )
 
-    if not forzar and not probar and _esta_fresca(destino, cid, fuente):
-        corrida.estado = "omitido"
-        corrida.fin = ahora_utc()
-        logger.info("[%s/%s] fresca todavia, se omite", cid, fuente["fuente_id"])
-        return corrida
+    # La frescura controla si se RE-ESCRIBEN las TABLAS DE DATOS (el costo real:
+    # full refresh atomico, tablas temporales, logs). Pero el catalogo y los KPIs
+    # se reescriben SIEMPRE: son 9 filas, cuestan nada, y son lo que el cliente
+    # ajusta con mas frecuencia. Antes, "fresca" hacia un return inmediato que
+    # salteaba todo — incluido el catalogo y los KPIs. El cliente editaba un KPI
+    # y no pasaba nada hasta que la frescura venciera.
+    fresca = (not forzar and not probar
+              and _esta_fresca(destino, cid, fuente))
 
     tmp = duckdb.connect(database=":memory:")
     try:
@@ -154,7 +157,11 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
 
             corrida.detalle[destino_tabla] = {"columnas": columnas, "filas": len(df)}
 
-            if probar:
+            if fresca:
+                # Datos frescos: no se reescribe la tabla, pero se registra que
+                # la vimos para que el detalle de la corrida quede completo.
+                pass
+            elif probar:
                 logger.info(
                     "[PRUEBA] %s.%s -> %d filas, columnas: %s",
                     esquema, destino_tabla, len(df), ", ".join(columnas),
@@ -171,7 +178,13 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
         # filtran por estado LIKE 'ok%', y la corrida SI fue exitosa (la tabla
         # vieja, buena, quedo intacta). El valor propio es para poder auditar:
         #   SELECT * FROM _meta.sync_corridas WHERE estado = 'ok_con_bloqueo';
-        if bloqueadas:
+        if fresca:
+            corrida.estado = "omitido"
+            logger.info(
+                "[%s/%s] datos frescos (se omite reescritura); catalogo y KPIs "
+                "actualizados", cid, fuente["fuente_id"],
+            )
+        elif bloqueadas:
             corrida.estado = "ok_con_bloqueo"
             logger.error(
                 "[%s/%s] BLOQUEO de escritura en %d tabla(s): %s. Se conservaron "
