@@ -75,6 +75,13 @@ SYNC_RETENCION_DIAS = int(os.environ.get("SYNC_RETENCION_DIAS", "180"))
 # con {"formato_fecha": "mes_primero"} en su columna config.
 FORMATO_FECHA = os.environ.get("FORMATO_FECHA", "dia_primero").strip().lower()
 
+# --- Convencion numerica por defecto de las fuentes ---
+# "coma_decimal" (convencion tica: ₡5.000 son cinco mil, el punto es separador
+# de miles) o "punto_decimal" (anglosajona: 5.000 son cinco). Cada fuente lo
+# puede pisar con {"formato_numero": "punto_decimal"} en su columna config.
+# Equivocarse aca multiplica o divide TODOS los montos por mil, en silencio.
+FORMATO_NUMERO = os.environ.get("FORMATO_NUMERO", "coma_decimal").strip().lower()
+
 
 def dsn_de_cliente(cliente: dict) -> str:
     """
