@@ -101,20 +101,19 @@ def _revisar_calidad(previo: dict, tabla: str, columnas: list, filas: int):
     return alertas, bloquear
 
 
-def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, probar=False,
-                       catalogo_cliente_filas=None, kpis_cliente_filas=None) -> Corrida:
+def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, probar=False) -> Corrida:
     """
     Sincroniza UNA fuente de UN cliente hacia el warehouse.
 
-    catalogo_cliente_filas / kpis_cliente_filas: el catalogo y los KPIs del
-    CLIENTE completo (no de esta fuente), leidos UNA VEZ por sincronizar_todo()
-    y pasados a cada una de sus fuentes. Cada fuente se queda solo con las
-    filas que le corresponden (ver catalogo_cliente.filtrar_para_fuente) antes
-    de escribirlas — asi la ultima fuente en correr no pisa el catalogo de las
-    demas.
+    Ya NO escribe catalogo ni KPIs (ver B-40 mas abajo, y sincronizar_todo).
+    Un catalogo o un KPI pueden cruzar tablas de VARIAS fuentes del mismo
+    cliente (p.ej. runway_inventario junta 'ventas' e 'inventario', que
+    podrian venir de fuentes distintas). Escribirlos aca, fuente por fuente,
+    hacia imposible que esa fila alguna vez encontrara sus dos tablas juntas
+    -- cada fuente solo ve SUS propias tablas en 'frag.tablas'. Por eso el
+    catalogo/KPIs se escriben una sola vez por CLIENTE, en sincronizar_todo(),
+    despues de que todas sus fuentes activas ya cargaron.
     """
-    catalogo_cliente_filas = catalogo_cliente_filas or []
-    kpis_cliente_filas = kpis_cliente_filas or []
     cid = cliente["cliente_id"]
     corrida = Corrida(
         corrida_id=uuid.uuid4().hex[:12],
@@ -184,6 +183,7 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
                     esquema, destino_tabla, agregar_trazabilidad(df, corrida)
                 )
             corrida.tablas.append(f"{esquema}.{destino_tabla}")
+            corrida.tablas_logicas.add(tabla)
             corrida.filas += len(df)
 
         # Estado propio cuando la guarda bloqueo alguna escritura. Sigue
@@ -207,55 +207,6 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
             )
         else:
             corrida.estado = "ok_con_alertas" if corrida.alertas else "ok"
-
-        # Persistir el catalogo (governance) como TABLA en el warehouse.
-        # Es lo que permite que el bot responda preguntas de governance sin
-        # abrir Google Sheets en tiempo de request.
-        #
-        # El catalogo y los KPIs vienen del Sheet CENTRAL del cliente (leido
-        # una sola vez en sincronizar_todo, no por cada fuente). Aca se filtran
-        # a las filas que le corresponden a ESTA fuente y a las tablas que
-        # ELLA cargo — sin ese filtro, la ultima fuente en correr pisaria en
-        # el warehouse el catalogo completo del cliente.
-        catalogo_filas = catalogo_cliente.filtrar_para_fuente(
-            catalogo_cliente_filas, fuente["fuente_id"], set(frag.tablas)
-        )
-        kpis_filas = catalogo_cliente.filtrar_para_fuente(
-            kpis_cliente_filas, fuente["fuente_id"], set(frag.tablas)
-        ) if kpis_cliente_filas and any(f.get("fuente_id") for f in kpis_cliente_filas) else kpis_cliente_filas
-
-        # Condicion clave: solo si la fuente CARGO tablas. Una fuente que no
-        # cargo nada no tiene nada que documentar, y dejarla escribir catalogo
-        # significaria pisar el de otra fuente con filas que no le corresponden.
-        if catalogo_filas and corrida.tablas and not probar:
-            try:
-                destino.escribir_catalogo(esquema, fuente["fuente_id"], catalogo_filas)
-                aplicar = getattr(destino, "aplicar_comentarios", None)
-                if aplicar:
-                    # mapa: nombre logico de la tabla en el catalogo -> tabla real
-                    mapa = {t.lower(): nombre_tabla(fuente["fuente_id"], t)
-                            for t in frag.tablas}
-                    aplicar(esquema, mapa, catalogo_filas)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[%s/%s] no se pudo guardar el catalogo: %s",
-                               cid, fuente["fuente_id"], e)
-                corrida.alertas.append("no se pudo guardar el catalogo")
-        elif catalogo_filas and probar:
-            logger.info("[PRUEBA] catalogo de '%s': %d filas (no se escribe)",
-                        fuente["fuente_id"], len(catalogo_filas))
-
-        # Persistir los KPIs (capa semantica) en <esquema>._kpis. Misma condicion
-        # que el catalogo: solo si la fuente cargo tablas.
-        if kpis_filas and corrida.tablas and not probar:
-            try:
-                destino.escribir_kpis(esquema, fuente["fuente_id"], kpis_filas)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[%s/%s] no se pudieron guardar los KPIs: %s",
-                               cid, fuente["fuente_id"], e)
-                corrida.alertas.append("no se pudieron guardar los KPIs")
-        elif kpis_filas and probar:
-            logger.info("[PRUEBA] KPIs de '%s': %d filas (no se escribe)",
-                        fuente["fuente_id"], len(frag.kpis_filas))
 
         logger.info(
             "[%s/%s] %s: %d tablas, %d filas",
@@ -310,6 +261,89 @@ def _oculta(dsn: str) -> str:
     return re.sub(r"//[^:]+:[^@]+@", "//***:***@", dsn)
 
 
+# Identificador reservado para el catalogo/KPIs CONSOLIDADOS de un cliente
+# (ya no pertenecen a una fuente individual). No puede colisionar con un
+# fuente_id real porque los fuente_id vienen de la pestania 'fuentes' del
+# Sheet maestro, y esta constante usa un caracter ('_') que ese registro no
+# deberia tener al inicio -- misma convencion que las pestanias reservadas.
+_FUENTE_ID_CATALOGO_CLIENTE = "_cliente"
+
+
+def _escribir_catalogo_del_cliente(destino, cliente_id: str, catalogo_filas: list,
+                                   kpis_filas: list, tablas_del_cliente: set,
+                                   probar: bool) -> None:
+    """
+    Escribe el catalogo y los KPIs consolidados de UN cliente, UNA vez, contra
+    la union de tablas de TODAS sus fuentes (ver B-40 en sincronizar_todo).
+
+    Filtra por tabla, no por fuente: una fila de catalogo/KPI se conserva si
+    CADA tabla que menciona (separadas por ';' en la columna 'tabla', como ya
+    hace 'runway_inventario' en este mismo proyecto) fue cargada por ALGUNA
+    fuente del cliente. Asi un KPI que cruza 'ventas' e 'inventario' se
+    escribe si las dos existen, sin importar si vinieron de la misma fuente o
+    de dos distintas.
+
+    El 'fuente_id' opcional de una fila (retrocompatible) ya NO se usa para
+    filtrar que fuente la escribe -- eso dejo de existir, el catalogo es del
+    cliente -- pero se conserva en la fila tal cual viene, por si sirve como
+    dato informativo de donde salio originalmente esa documentacion.
+    """
+    if not tablas_del_cliente:
+        return
+    cargadas = {t.strip().lower() for t in tablas_del_cliente}
+
+    def tabla_disponible(valor_tabla: str) -> bool:
+        nombres = [n.lower() for n in catalogo_cliente.tablas_de(valor_tabla)]
+        if not nombres:
+            return True  # fila sin tabla especifica (rara) no se descarta por esto
+        return all(n in cargadas for n in nombres)
+
+    catalogo_ok = [f for f in (catalogo_filas or []) if tabla_disponible(f.get("tabla"))]
+    kpis_ok = [f for f in (kpis_filas or []) if tabla_disponible(f.get("tabla"))]
+
+    esquema = nombre_esquema(cliente_id)
+
+    if catalogo_ok and not probar:
+        try:
+            destino.escribir_catalogo(esquema, _FUENTE_ID_CATALOGO_CLIENTE, catalogo_ok)
+            aplicar = getattr(destino, "aplicar_comentarios", None)
+            if aplicar:
+                # mapa: nombre logico de la tabla en el catalogo -> tabla real
+                # en el warehouse. Con varias fuentes por cliente, el nombre
+                # real de cada tabla ya viene con su prefijo fuente__tabla en
+                # 'tablas_del_cliente'; se busca cual empieza con el nombre
+                # logico de cada fila del catalogo.
+                mapa = {}
+                for f in catalogo_ok:
+                    logica = str(f.get("tabla", "")).strip().lower()
+                    for real in tablas_del_cliente:
+                        if real.lower() == logica or real.lower().endswith(f"__{logica}"):
+                            mapa[logica] = real
+                            break
+                if mapa:
+                    aplicar(esquema, mapa, catalogo_ok)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[%s] no se pudo guardar el catalogo consolidado: %s",
+                           cliente_id, e)
+    elif catalogo_ok and probar:
+        logger.info("[PRUEBA] catalogo consolidado de '%s': %d filas (no se escribe)",
+                    cliente_id, len(catalogo_ok))
+
+    if kpis_ok and not probar:
+        try:
+            destino.escribir_kpis(esquema, _FUENTE_ID_CATALOGO_CLIENTE, kpis_ok)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[%s] no se pudieron guardar los KPIs consolidados: %s",
+                           cliente_id, e)
+    elif kpis_ok and probar:
+        logger.info("[PRUEBA] KPIs consolidados de '%s': %d filas (no se escribe)",
+                    cliente_id, len(kpis_ok))
+
+    logger.info("[%s] catalogo/KPIs consolidados: %d/%d filas escritas (de %d/%d totales)",
+               cliente_id, len(catalogo_ok), len(kpis_ok),
+               len(catalogo_filas or []), len(kpis_filas or []))
+
+
 def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
     """Recorre el registro completo y sincroniza lo que corresponda."""
     destinos = _Destinos(config.WAREHOUSE_TIPO)
@@ -334,13 +368,11 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
                 continue
 
             # Catalogo y KPIs del cliente, leidos UNA VEZ (no una vez por
-            # fuente). Antes cada fuente traia su propio catalogo desde
-            # adentro de si misma; ahora es un Sheet central por cliente que
-            # documenta todas sus fuentes juntas, asi que se lee aca y se
-            # reparte. Un fallo al leerlo NO frena la sincronizacion de datos:
-            # las tablas se cargan igual, simplemente quedan sin catalogo (y
-            # por lo tanto bloqueadas para el bot, fail-closed) hasta la
-            # proxima corrida.
+            # fuente). Un Sheet central por cliente documenta todas sus
+            # fuentes juntas. Un fallo al leerlo NO frena la sincronizacion de
+            # datos: las tablas se cargan igual, simplemente quedan sin
+            # catalogo (y por lo tanto bloqueadas para el bot, fail-closed)
+            # hasta la proxima corrida.
             try:
                 catalogo_filas, kpis_filas = catalogo_cliente.leer(cliente)
             except Exception as e:  # noqa: BLE001
@@ -348,17 +380,59 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
                                  cid, e)
                 catalogo_filas, kpis_filas = [], []
 
+            # B-40 — POR QUE EL CATALOGO SE ESCRIBE DESPUES DE TODAS LAS
+            # FUENTES, Y NO POR FUENTE COMO ANTES.
+            #
+            # Un KPI o una fila de catalogo pueden cruzar tablas de VARIAS
+            # fuentes del mismo cliente. El propio 'runway_inventario' de este
+            # proyecto es el ejemplo real: su formula_sql hace JOIN entre
+            # 'ventas' e 'inventario', que perfectamente pueden venir de dos
+            # fuentes distintas (un ERP y un Excel de bodega, por ejemplo).
+            #
+            # Filtrar el catalogo DENTRO de sincronizar_fuente() -- fuente por
+            # fuente -- hacia estructuralmente IMPOSIBLE que esa fila
+            # encontrara sus dos tablas juntas: cada fuente solo conoce SUS
+            # propias tablas en el momento en que corre. El resultado no era
+            # un bug esporadico, era garantizado: CUALQUIER catalogo o KPI que
+            # mencionara mas de una tabla se descartaba siempre, sin
+            # excepcion, sin importar que tan bien estuviera escrito el Sheet.
+            #
+            # La solucion es acumular las tablas que TODAS las fuentes de este
+            # cliente cargaron en esta corrida, y recien con esa union
+            # completa filtrar y escribir el catalogo, UNA vez, al final.
+            tablas_del_cliente = set()
+
             for fuente in activas:
-                corrida = sincronizar_fuente(
-                    destino, cliente, fuente, forzar=forzar, probar=probar,
-                    catalogo_cliente_filas=catalogo_filas,
-                    kpis_cliente_filas=kpis_filas,
-                )
+                corrida = sincronizar_fuente(destino, cliente, fuente,
+                                             forzar=forzar, probar=probar)
                 if not probar:
                     destino.registrar_corrida(corrida)
                 resumen["alertas"] += corrida.alertas
                 resumen[corrida.estado] = resumen.get(corrida.estado, 0) + 1
                 resumen["filas"] += corrida.filas
+                # tablas_logicas trae el nombre TAL COMO lo declara el
+                # catalogo (sin el prefijo fuente_id__ que usa el warehouse
+                # fisicamente) -- ver Corrida.tablas_logicas y B-40.
+                tablas_del_cliente.update(corrida.tablas_logicas)
+                # Si la fuente estaba fresca (se omitio, no volvio a cargar),
+                # sus tablas de la corrida anterior siguen existiendo en el
+                # warehouse y el catalogo las tiene que seguir cubriendo. El
+                # detalle previo usa CLAVES FISICAS (fuente__tabla); se les
+                # quita el prefijo de esta fuente para recuperar el nombre
+                # logico y que la comparacion sea consistente.
+                if corrida.estado == "omitido":
+                    try:
+                        previo = destino.ultimo_detalle(cid, fuente["fuente_id"])
+                        prefijo = f'{limpiar_fuente_id(fuente["fuente_id"])}__'
+                        for clave_fisica in previo:
+                            if clave_fisica.startswith(prefijo):
+                                tablas_del_cliente.add(clave_fisica[len(prefijo):])
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            _escribir_catalogo_del_cliente(
+                destino, cid, catalogo_filas, kpis_filas, tablas_del_cliente, probar
+            )
         # A-04: la bitacora crecia sin limite. Se purga al final de la corrida
         # completa (barato: una sola sentencia, y solo si hay retencion puesta).
         if not probar:
