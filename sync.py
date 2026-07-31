@@ -29,6 +29,7 @@ from datetime import timedelta
 
 import duckdb
 
+import catalogo_cliente
 import config
 import registry
 from sources import crear_fuente
@@ -100,8 +101,20 @@ def _revisar_calidad(previo: dict, tabla: str, columnas: list, filas: int):
     return alertas, bloquear
 
 
-def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, probar=False) -> Corrida:
-    """Sincroniza UNA fuente de UN cliente hacia el warehouse."""
+def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, probar=False,
+                       catalogo_cliente_filas=None, kpis_cliente_filas=None) -> Corrida:
+    """
+    Sincroniza UNA fuente de UN cliente hacia el warehouse.
+
+    catalogo_cliente_filas / kpis_cliente_filas: el catalogo y los KPIs del
+    CLIENTE completo (no de esta fuente), leidos UNA VEZ por sincronizar_todo()
+    y pasados a cada una de sus fuentes. Cada fuente se queda solo con las
+    filas que le corresponden (ver catalogo_cliente.filtrar_para_fuente) antes
+    de escribirlas — asi la ultima fuente en correr no pisa el catalogo de las
+    demas.
+    """
+    catalogo_cliente_filas = catalogo_cliente_filas or []
+    kpis_cliente_filas = kpis_cliente_filas or []
     cid = cliente["cliente_id"]
     corrida = Corrida(
         corrida_id=uuid.uuid4().hex[:12],
@@ -199,36 +212,48 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
         # Es lo que permite que el bot responda preguntas de governance sin
         # abrir Google Sheets en tiempo de request.
         #
+        # El catalogo y los KPIs vienen del Sheet CENTRAL del cliente (leido
+        # una sola vez en sincronizar_todo, no por cada fuente). Aca se filtran
+        # a las filas que le corresponden a ESTA fuente y a las tablas que
+        # ELLA cargo — sin ese filtro, la ultima fuente en correr pisaria en
+        # el warehouse el catalogo completo del cliente.
+        catalogo_filas = catalogo_cliente.filtrar_para_fuente(
+            catalogo_cliente_filas, fuente["fuente_id"], set(frag.tablas)
+        )
+        kpis_filas = catalogo_cliente.filtrar_para_fuente(
+            kpis_cliente_filas, fuente["fuente_id"], set(frag.tablas)
+        ) if kpis_cliente_filas and any(f.get("fuente_id") for f in kpis_cliente_filas) else kpis_cliente_filas
+
         # Condicion clave: solo si la fuente CARGO tablas. Una fuente que no
         # cargo nada no tiene nada que documentar, y dejarla escribir catalogo
         # significaria pisar el de otra fuente con filas que no le corresponden.
-        if frag.catalogo_filas and corrida.tablas and not probar:
+        if catalogo_filas and corrida.tablas and not probar:
             try:
-                destino.escribir_catalogo(esquema, fuente["fuente_id"], frag.catalogo_filas)
+                destino.escribir_catalogo(esquema, fuente["fuente_id"], catalogo_filas)
                 aplicar = getattr(destino, "aplicar_comentarios", None)
                 if aplicar:
                     # mapa: nombre logico de la tabla en el catalogo -> tabla real
                     mapa = {t.lower(): nombre_tabla(fuente["fuente_id"], t)
                             for t in frag.tablas}
-                    aplicar(esquema, mapa, frag.catalogo_filas)
+                    aplicar(esquema, mapa, catalogo_filas)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[%s/%s] no se pudo guardar el catalogo: %s",
                                cid, fuente["fuente_id"], e)
                 corrida.alertas.append("no se pudo guardar el catalogo")
-        elif frag.catalogo_filas and probar:
+        elif catalogo_filas and probar:
             logger.info("[PRUEBA] catalogo de '%s': %d filas (no se escribe)",
-                        fuente["fuente_id"], len(frag.catalogo_filas))
+                        fuente["fuente_id"], len(catalogo_filas))
 
         # Persistir los KPIs (capa semantica) en <esquema>._kpis. Misma condicion
         # que el catalogo: solo si la fuente cargo tablas.
-        if frag.kpis_filas and corrida.tablas and not probar:
+        if kpis_filas and corrida.tablas and not probar:
             try:
-                destino.escribir_kpis(esquema, fuente["fuente_id"], frag.kpis_filas)
+                destino.escribir_kpis(esquema, fuente["fuente_id"], kpis_filas)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[%s/%s] no se pudieron guardar los KPIs: %s",
                                cid, fuente["fuente_id"], e)
                 corrida.alertas.append("no se pudieron guardar los KPIs")
-        elif frag.kpis_filas and probar:
+        elif kpis_filas and probar:
             logger.info("[PRUEBA] KPIs de '%s': %d filas (no se escribe)",
                         fuente["fuente_id"], len(frag.kpis_filas))
 
@@ -308,9 +333,27 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
                 resumen["error"] += 1
                 continue
 
+            # Catalogo y KPIs del cliente, leidos UNA VEZ (no una vez por
+            # fuente). Antes cada fuente traia su propio catalogo desde
+            # adentro de si misma; ahora es un Sheet central por cliente que
+            # documenta todas sus fuentes juntas, asi que se lee aca y se
+            # reparte. Un fallo al leerlo NO frena la sincronizacion de datos:
+            # las tablas se cargan igual, simplemente quedan sin catalogo (y
+            # por lo tanto bloqueadas para el bot, fail-closed) hasta la
+            # proxima corrida.
+            try:
+                catalogo_filas, kpis_filas = catalogo_cliente.leer(cliente)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("[%s] no se pudo leer su catalogo/KPIs centrales: %s",
+                                 cid, e)
+                catalogo_filas, kpis_filas = [], []
+
             for fuente in activas:
-                corrida = sincronizar_fuente(destino, cliente, fuente,
-                                             forzar=forzar, probar=probar)
+                corrida = sincronizar_fuente(
+                    destino, cliente, fuente, forzar=forzar, probar=probar,
+                    catalogo_cliente_filas=catalogo_filas,
+                    kpis_cliente_filas=kpis_filas,
+                )
                 if not probar:
                     destino.registrar_corrida(corrida)
                 resumen["alertas"] += corrida.alertas

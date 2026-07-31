@@ -3,9 +3,15 @@ Registro de clientes, usuarios y FUENTES, leido del SHEET MAESTRO.
 
 Pestanias del Sheet maestro:
 
-  'clientes':  cliente_id | nombre | [spreadsheet_id]
-      (spreadsheet_id es OPCIONAL y solo por retrocompatibilidad: si esta y el
-       cliente no tiene filas en 'fuentes', se toma como una fuente Google Sheets.)
+  'clientes':  cliente_id | nombre | catalogo_spreadsheet_id | [spreadsheet_id]
+      - catalogo_spreadsheet_id: SIEMPRE presente. Es el ID del Google Sheet
+        con las pestanias '_catalogo' y '_kpis' de ESE cliente, que documentan
+        TODAS sus fuentes juntas (Sheets, SharePoint, Calendar, lo que sea).
+        Antes cada fuente traia su propio catalogo desde adentro de si misma
+        (una pestania '_catalogo' en cada Sheet de datos); ahora el catalogo
+        vive en un solo lugar por cliente, separado de los datos.
+      - spreadsheet_id es OPCIONAL y solo por retrocompatibilidad: si esta y el
+        cliente no tiene filas en 'fuentes', se toma como una fuente Google Sheets.
 
   'usuarios':  numero | cliente_id
       (varios numeros pueden apuntar al mismo cliente_id)
@@ -115,6 +121,11 @@ def _cargar():
             # Opcional: nombre de la VARIABLE DE ENTORNO que guarda el DSN de
             # este cliente. Nunca el DSN en si (llevaria la clave en el Sheet).
             "dsn_env": str(f.get("dsn_env", "")).strip(),
+            # ID del Sheet de catalogo/KPIs de este cliente. Se espera SIEMPRE
+            # presente; si falta, el cliente queda sin gobernanza y ninguna
+            # tabla suya va a ser consultable por el bot (fail-closed, ver
+            # catalogo_cliente.py).
+            "catalogo_spreadsheet_id": str(f.get("catalogo_spreadsheet_id", "")).strip(),
             # legado: spreadsheet_id directo en la fila de cliente (opcional)
             "_spreadsheet_id_legado": str(f.get("spreadsheet_id", "")).strip(),
             "fuentes": [],
@@ -196,6 +207,16 @@ def _cargar():
             })
             logger.info("[%s] retrocompat: spreadsheet_id -> fuente google_sheets", cid)
         c.pop("_spreadsheet_id_legado", None)
+
+    sin_catalogo = [cid for cid, c in clientes.items()
+                    if not c.get("catalogo_spreadsheet_id")]
+    if sin_catalogo:
+        logger.error(
+            "Estos clientes NO tienen 'catalogo_spreadsheet_id' en la pestania "
+            "'clientes': %s. Sin ese Sheet, ninguna de sus tablas va a ser "
+            "consultable por el bot (fail-closed).",
+            ", ".join(sorted(sin_catalogo)),
+        )
 
     total_fuentes = sum(len(c["fuentes"]) for c in clientes.values())
     logger.info(
