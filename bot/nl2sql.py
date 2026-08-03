@@ -18,6 +18,7 @@ La ejecucion en si vive en bot/warehouse_ro.py (transaccion READ ONLY).
 
 import logging
 import re
+from datetime import date
 
 import sqlglot
 from sqlglot import exp
@@ -97,11 +98,46 @@ def _historial_a_messages(historial) -> list:
     return msgs
 
 
+def _contexto_temporal() -> str:
+    """
+    La fecha de HOY, para el prompt de SQL.
+
+    POR QUE. Sin esto el modelo no tiene forma de saber en que año vive, y una
+    pregunta tan comun como "cuanto se vendio el 2 de enero" lo obliga a
+    inventar el año. Inventa el de su entrenamiento, la consulta sale con
+    '2025-01-02', devuelve cero filas y el bot informa —con toda honestidad—
+    que no hay datos. El usuario ve un bot que le niega ventas que existen y a
+    los dos mensajes se contradice, porque la pregunta siguiente no llevaba año
+    y esa si funciono.
+
+    No es un problema de capacidad del modelo: adivinar el año sin referencia
+    temporal es imposible por definicion, y un modelo mas caro adivina igual.
+    """
+    hoy = date.today()
+    dias = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+    return (
+        f"Fecha de hoy: {hoy.isoformat()} ({dias[hoy.weekday()]}). "
+        f"Año en curso: {hoy.year}.\n"
+        "- Para fechas relativas ('hoy', 'ayer', 'este mes', 'el trimestre "
+        "pasado') usa CURRENT_DATE y aritmetica de intervalos, no fechas fijas.\n"
+        "- Si el usuario da un dia y un mes SIN año ('el 2 de enero'), NO asumas "
+        "el año en curso a ciegas: los datos pueden ser de otro periodo. Resolve "
+        "el año contra la propia tabla, p.ej. filtrando por mes y dia y dejando "
+        "que el año salga del dato:\n"
+        "    WHERE EXTRACT(MONTH FROM fecha) = 1 AND EXTRACT(DAY FROM fecha) = 2\n"
+        "  e inclui la fecha completa en el SELECT para que la respuesta pueda "
+        "decir de que año es.\n"
+        "- Las columnas de fecha pueden ser timestamp. Para comparar contra un "
+        "dia usa fecha::date, no igualdad directa contra un texto."
+    )
+
+
 def generar_sql(pregunta: str, schema_text: str,
                 correccion: str = "", sql_previo: str = "",
                 historial=None) -> str:
     """Le pide a Claude el SELECT. `correccion` se usa en el reintento."""
     partes = [
+        f"{_contexto_temporal()}\n",
         f"Esquema disponible (unicas tablas que existen para vos):\n\n{schema_text}\n",
     ]
     # El historial ayuda a resolver referencias ("y de proveedores?", "y ayer?").
@@ -249,7 +285,18 @@ _SISTEMA_RESP = (
     "'graficame eso', 'pasamelo en Excel', 'mandame el reporte en PDF'.\n"
     "- No inventes la MONEDA ni la unidad. Si el resultado trae numeros pelados, "
     "presentalos sin simbolo o con el que aparezca en los datos; no asumas pesos, "
-    "dolares ni colones."
+    "dolares ni colones.\n"
+    "\n"
+    "CUANDO EL RESULTADO VIENE VACIO — importa mucho:\n"
+    "- Cero filas significa que NADA COINCIDIO CON ESE FILTRO, no que el dato no "
+    "exista. Casi siempre el filtro es el que esta mal (un año que el usuario no "
+    "dijo, un nombre escrito distinto, un periodo fuera del rango cargado).\n"
+    "- Deci 'no encontre registros para <lo que se filtro>', nunca 'no hay ventas "
+    "ese dia' ni 'no aparece en el sistema'. La diferencia no es de tono: la "
+    "segunda afirma algo sobre la realidad del negocio que el resultado no "
+    "respalda, y el usuario le cree.\n"
+    "- Si la pregunta traia una fecha sin año o un nombre parcial, decilo: es la "
+    "causa mas probable y le da al usuario algo concreto que corregir."
 )
 
 
