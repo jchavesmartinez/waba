@@ -233,8 +233,96 @@ _SISTEMA_RESP = (
     "si la consulta ordeno ascendente para traer el MENOR, no digas 'el mayor'. "
     "La pregunta de este turno manda, no el formato del turno pasado.\n"
     "- Nunca muestres el SQL ni hables de tablas/columnas tecnicas; hablale al "
-    "usuario en terminos de negocio."
+    "usuario en terminos de negocio.\n"
+    "\n"
+    "FORMATO DE LA RESPUESTA — reglas duras:\n"
+    "- PROHIBIDO dibujar graficos en texto: nada de barras con caracteres, ejes "
+    "con | y _, puntos, bloques ▇, ni 'arte ASCII' de ningun tipo. En el celular "
+    "se desalinea y queda ilegible. Si el dato pide una visual, NO la dibujes: "
+    "deci en una linea que se lo podes mandar como grafico si lo pide.\n"
+    "- PROHIBIDO volcar tablas largas en el mensaje. Hasta 8 filas se pueden "
+    "listar en texto simple; de ahi en adelante, resumi (el total, el maximo, el "
+    "minimo, la tendencia) e invitalo a pedir el archivo.\n"
+    "- SI PODES mandar archivos: grafico (imagen), Excel y PDF. NUNCA digas que "
+    "no podes generarlos, ni que los copie a mano, ni que los pida 'por otro "
+    "medio'. Si los quiere, solo tiene que pedirlos en este mismo chat: "
+    "'graficame eso', 'pasamelo en Excel', 'mandame el reporte en PDF'.\n"
+    "- No inventes la MONEDA ni la unidad. Si el resultado trae numeros pelados, "
+    "presentalos sin simbolo o con el que aparezca en los datos; no asumas pesos, "
+    "dolares ni colones."
 )
+
+
+# Caracteres con los que un modelo dibuja un grafico en texto. Una linea de un
+# eje ("2M |  |  |  |") es casi pura simbologia; una linea de prosa o una fila de
+# tabla ("| 2026-01-01 | 944600 |") tiene letras y digitos.
+_CHARS_ARTE = set("|_-─│┤├┼╎▇█▄▁▂▃▅▆•·*+^ \t")
+
+
+def _es_linea_de_arte(linea: str) -> bool:
+    l = linea.rstrip()
+    if len(l) < 8:
+        return False
+    simbolos = sum(1 for c in l if c in _CHARS_ARTE)
+    return simbolos / len(l) >= 0.8
+
+
+def _densidad_alfabetica(linea: str) -> float:
+    l = linea.strip()
+    if not l:
+        return 1.0
+    return sum(1 for c in l if c.isalpha()) / len(l)
+
+
+def limpiar_arte_ascii(texto: str) -> tuple[str, bool]:
+    """
+    Saca los graficos dibujados en texto que el modelo improvisa.
+    Devuelve (texto_limpio, hubo_arte).
+
+    POR QUE ESTA CAPA. El prompt ya lo prohibe, pero un prompt no es una
+    garantia: el mismo modelo que respeta la regla diez veces la rompe a la
+    once, y el sintoma es un mensaje que en el celular del cliente se ve como un
+    borron de barras desalineadas. Detectarlo es barato y determinista, asi que
+    no hay razon para confiar solo en el prompt.
+
+    El booleano es lo mas util que devuelve: que el modelo HAYA intentado
+    dibujar un grafico es la mejor señal de que este resultado pide una visual.
+    bot/responder.py lo usa para mandar el grafico DE VERDAD (ver ahi).
+
+    Se exige un BLOQUE (3 lineas o mas): una linea suelta con muchos guiones es
+    un separador legitimo, tres seguidas ya son un eje.
+    """
+    if not texto:
+        return texto, False
+    lineas = texto.split("\n")
+    marcas = [_es_linea_de_arte(l) for l in lineas]
+
+    salida, i, hubo = [], 0, False
+    while i < len(lineas):
+        if marcas[i]:
+            j = i
+            while j < len(lineas) and marcas[j]:
+                j += 1
+            if j - i >= 3:                 # bloque: es un grafico
+                hubo = True
+                i = j
+                continue
+        salida.append(lineas[i])
+        i += 1
+
+    if not hubo:
+        return texto, False
+
+    # Segunda pasada: las etiquetas del eje ("Ene 1 5 10 15 20 25 30 Feb...")
+    # quedan huerfanas despues de sacar el bloque, separadas por una linea en
+    # blanco, y sueltas no dicen nada. Se van las lineas casi sin letras. Solo
+    # se hace cuando YA se detecto arte, para no tocar mensajes normales.
+    salida = [l for l in salida
+              if not (len(l.strip()) >= 8 and _densidad_alfabetica(l) < 0.25)]
+
+    limpio = re.sub(r"\n{3,}", "\n\n", "\n".join(salida)).strip()
+    logger.info("Se quito un grafico ASCII de la respuesta redactada.")
+    return limpio, True
 
 
 def tabla_texto(columnas, filas, tope=30) -> str:
@@ -276,7 +364,11 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="") -
         system=_SISTEMA_RESP,
         messages=messages,
     )
-    return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    texto = "".join(b.text for b in resp.content
+                    if getattr(b, "type", "") == "text").strip()
+    # OJO: aca NO se limpia el arte ASCII. Lo hace bot/responder.py, que ademas
+    # necesita SABER si lo hubo para mandar el grafico de verdad en su lugar.
+    return texto
 
 
 # B-20: bot/responder.py usaba _tabla_texto (privada de este modulo) en su modo

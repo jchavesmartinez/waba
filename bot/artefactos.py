@@ -149,12 +149,16 @@ def grafico_png(columnas, filas, titulo: str = "", caption: str = ""):
     series = [i for i in series
               if 1 / _TOLERANCIA_ESCALA <= _escala(i) / base <= _TOLERANCIA_ESCALA]
 
-    # Tope de barras: 60 categorias en una imagen de WhatsApp no se leen. Se
-    # recortan por el valor de la PRIMERA serie, que es la que el usuario pidio.
+    # Tope de categorias. Una barra menos de ~15 px de alto no se lee, asi que
+    # las barras se recortan agresivo; una LINEA con 90 puntos, en cambio, se lee
+    # perfecto y recortarla a 25 mutila justo la tendencia que se pidio ver
+    # ("ventas por dia" de un mes son 30 puntos, no 25).
     tope = int(getattr(config, "BOT_ADJUNTO_MAX_BARRAS", 25))
+    temporal = _es_temporal(columnas, filas, i_x)
+    if temporal:
+        tope = int(getattr(config, "BOT_ADJUNTO_MAX_PUNTOS", 90))
     datos = list(filas)
     recortado = False
-    temporal = _es_temporal(columnas, filas, i_x)
     if len(datos) > tope:
         recortado = True
         if temporal:
@@ -183,8 +187,20 @@ def grafico_png(columnas, filas, titulo: str = "", caption: str = ""):
     if temporal:
         for i in series:
             ax.plot(etiquetas, valores[i], marker="o", linewidth=2,
+                    markersize=4 if len(datos) > 20 else 6,
                     label=str(columnas[i]))
-        ax.tick_params(axis="x", rotation=45)
+        # Con 30 fechas de 10 caracteres cada una, las etiquetas se encinman
+        # hasta volverse una mancha. Se muestra una de cada N: la linea ya
+        # comunica la forma, las fechas solo dan la referencia. El presupuesto
+        # depende del LARGO: caben 12 etiquetas de '2026-01' pero solo 8 de
+        # '2026-01-15'.
+        largo = max(len(e) for e in etiquetas)
+        presupuesto = 12 if largo <= 7 else 8
+        paso = max(1, -(-len(datos) // presupuesto))    # division hacia arriba
+        marcas = range(0, len(datos), paso)
+        ax.set_xticks(list(marcas))
+        ax.set_xticklabels([etiquetas[k] for k in marcas],
+                           rotation=45, ha="right")
         ax.grid(axis="y", alpha=0.25)
     elif horizontal:
         pos = range(len(datos))

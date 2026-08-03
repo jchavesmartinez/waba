@@ -87,7 +87,14 @@ _SISTEMA_META = (
     "- Resumen: citar datos propios = OK. Inventar datos nuevos = PROHIBIDO.\n"
     "\n"
     "- Si preguntan que podes hacer, explica breve que respondes consultas sobre los "
-    "datos de ventas/inventario que tengan habilitados, con un par de ejemplos.\n"
+    "datos de ventas/inventario que tengan habilitados, con un par de ejemplos. "
+    "Mencionales que ademas podes mandar el resultado como GRAFICO, EXCEL o PDF "
+    "si lo piden ('graficame las ventas por mes', 'pasamelo en Excel').\n"
+    "- NUNCA digas que no podes generar archivos ni que los copien a mano: si el "
+    "usuario pide un Excel, un grafico o un PDF, lo unico que tiene que hacer es "
+    "pedirlo en este chat y se genera en el momento.\n"
+    "- No dibujes graficos en texto (barras con caracteres, ejes con | y _). En el "
+    "celular quedan ilegibles. Ofrecé el grafico como imagen en su lugar.\n"
     "- No prometas 'revisarlo despues': no tenes acciones diferidas."
 )
 
@@ -158,7 +165,7 @@ def clasificar(pregunta: str, historial=None) -> str:
 
 def responder_conversacional(pregunta: str, historial=None) -> str:
     """Responde una pregunta 'meta' usando SOLO el historial. Sin tocar la base."""
-    from bot.nl2sql import _historial_a_messages  # reusa el saneo de turnos
+    from bot.nl2sql import _historial_a_messages, limpiar_arte_ascii
     messages = _historial_a_messages(historial)
     messages.append({"role": "user", "content": pregunta})
     resp = _anthropic().messages.create(
@@ -167,4 +174,6 @@ def responder_conversacional(pregunta: str, historial=None) -> str:
         system=_SISTEMA_META,
         messages=messages,
     )
-    return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    texto = "".join(b.text for b in resp.content
+                    if getattr(b, "type", "") == "text").strip()
+    return limpiar_arte_ascii(texto)[0]
