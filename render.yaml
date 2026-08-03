@@ -129,6 +129,32 @@ services:
         value: "si"
       - key: BOT_KPIS
         value: "si"
+      # --- Adjuntos (grafico / Excel / PDF que el bot manda por WhatsApp) ---
+      # "no" apaga la funcion entera y todo vuelve a responderse en texto.
+      - key: BOT_ADJUNTOS
+        value: "si"
+      # Filas maximas de un export. Ojo: es un tope APARTE de BOT_MAX_FILAS.
+      - key: BOT_ADJUNTO_MAX_FILAS
+        value: "5000"
+      - key: BOT_ADJUNTO_MAX_BARRAS
+        value: "25"
+      - key: BOT_ADJUNTO_PDF_MAX_FILAS
+        value: "60"
+      # Peso maximo del archivo. Meta permite mas; el tope propio es mas bajo
+      # porque un adjunto pesado en red movil no se termina de descargar.
+      - key: BOT_ADJUNTO_MAX_MB
+        value: "4.5"
+      - key: BOT_ADJUNTO_PDF
+        value: "si"
+      # text/csv no esta en los MIME de documento que lista Meta: en "no", un
+      # pedido de CSV se sirve como .xlsx.
+      - key: BOT_ADJUNTO_CSV
+        value: "no"
+      # Usa el pie de una foto/archivo entrante como pregunta.
+      - key: BOT_MEDIA_ENTRANTE
+        value: "si"
+      - key: WHATSAPP_MAX_CAPTION
+        value: "1024"
       # --- WhatsApp Cloud API (Meta) ---
       # WHATSAPP_TOKEN: usa el permanente de System User. El del panel de Meta
       # vence en 24 h y el sintoma es que el bot deja de contestar al dia

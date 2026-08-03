@@ -8,6 +8,13 @@ httpx==0.28.1                # llamada saliente al Graph API de Meta (enviar msg
 anthropic==0.40.0            # text-to-SQL + redaccion de la respuesta
 sqlglot==30.14.0             # valida el SQL generado antes de ejecutarlo
 
+# --- Adjuntos: graficos, Excel y PDF que el bot manda por WhatsApp ---
+# matplotlib pesa ~50 MB instalado y es la unica dependencia grande del bot.
+# Si no vas a usar graficos, pone BOT_ADJUNTOS=no y comenta estas tres.
+matplotlib==3.10.0           # grafico PNG (backend Agg, sin pantalla)
+xlsxwriter==3.2.9            # .xlsx en memoria, sin pasar por pandas
+reportlab==4.2.5             # PDF de una pagina (BOT_ADJUNTO_PDF=no lo evita)
+
 # Lectura del warehouse Neon/Postgres (mismas libs que la ingesta)
 sqlalchemy==2.0.51
 psycopg2-binary==2.9.12
