@@ -2,7 +2,7 @@
 Orquestador del bot: clasifica la intencion y encadena registro, memoria,
 catalogo, text-to-SQL y ejecucion.
 
-    responder(numero, pregunta) -> str  (texto listo para mandar por WhatsApp)
+    responder(numero, pregunta) -> Respuesta(texto, adjuntos)
 
 Flujo:
     1. Resolver numero -> cliente (registry).
@@ -17,16 +17,29 @@ Flujo:
 La gobernanza (que tablas se pueden leer) sigue en bot/catalogo.py y se
 re-evalua en cada consulta de datos. El clasificador NO afecta la seguridad:
 solo decide si hace falta ir a la base o no.
+
+ADJUNTOS. Si el usuario pide grafico / Excel / PDF (bot/formato.py lo detecta
+con reglas, sin gastar una llamada al modelo), el MISMO resultado del SELECT se
+usa dos veces: para redactar el texto y para armar el archivo. No hay una
+segunda consulta ni un camino de datos aparte — o sea, el archivo no puede
+contener nada que el texto no pudiera contener, y toda la gobernanza que ya
+existia lo cubre sin cambios.
+
+El tipo de retorno cambio de str a Respuesta. Es lo unico que rompe hacia
+atras: quien llame a responder() tiene que usar .texto y .adjuntos.
 """
 
 import logging
+import re
 import threading
 from collections import defaultdict
 from datetime import date
 
 import config
 import registry
-from bot import catalogo, intencion, kpis, memoria, nl2sql, warehouse_ro
+from bot import (artefactos, catalogo, formato, intencion, kpis, memoria,
+                 nl2sql, warehouse_ro)
+from bot.salida import Respuesta
 
 logger = logging.getLogger("fachavi.bot.responder")
 
@@ -55,6 +68,17 @@ _NO_SEGURO = (
     "«¿cuánto vendimos ayer?» o «¿qué productos tienen bajo inventario?»."
 )
 _ERROR = "Tuve un problema consultando los datos. Intentá de nuevo en un momento."
+# El archivo se genera DESPUES de tener los datos. Si falla el armado (o la
+# subida a Meta), el usuario igual se queda con la respuesta en texto: perder el
+# grafico es un inconveniente, perder el dato es una consulta desperdiciada.
+_SIN_GRAFICO = (
+    "\n\n(No pude armar el gráfico con este resultado —necesito al menos una "
+    "columna de texto y una numérica, con varias filas. Te dejo el dato arriba.)"
+)
+_ADJUNTO_FALLO = (
+    "\n\n(Tuve un problema generando el archivo. El dato de arriba es correcto; "
+    "probá pidiéndomelo de nuevo.)"
+)
 _OLVIDADO = "Listo, borré lo que veníamos hablando. Empezamos de cero. 🙂"
 _SALUDO = (
     "¡Hola! 👋 Soy tu asistente de datos. Preguntame sobre tus ventas o "
@@ -119,23 +143,23 @@ def _pasa_tope_diario(cliente_id: str) -> bool:
     return True
 
 
-def responder(numero: str, pregunta: str) -> str:
+def responder(numero: str, pregunta: str) -> Respuesta:
     cliente = registry.resolver(numero)
     if not cliente:
         logger.info("numero no registrado: %s", numero)
-        return _NO_REGISTRADO
+        return Respuesta(_NO_REGISTRADO)
 
     cid = cliente["cliente_id"]
 
     # Comando explicito para olvidar el historial de este numero.
     if _es_comando_olvidar(pregunta):
         memoria.olvidar(cliente, numero)
-        return _OLVIDADO
+        return Respuesta(_OLVIDADO)
 
     if not _pasa_tope_diario(cid):
         logger.warning("[%s] tope diario de mensajes alcanzado (%s)",
                        cid, config.BOT_MAX_MSJ_POR_DIA)
-        return _TOPE_DIARIO
+        return Respuesta(_TOPE_DIARIO)
 
     # La memoria es best-effort: si falla, seguimos sin historial.
     historial = memoria.cargar_historial(cliente, numero)
@@ -145,34 +169,53 @@ def responder(numero: str, pregunta: str) -> str:
     logger.info("[%s] intencion=%s", cid, intent)
 
     if intent == "saludo":
-        respuesta = _SALUDO
+        respuesta = Respuesta(_SALUDO)
     elif intent == "meta":
         # Pregunta sobre la conversacion: se responde con el historial, sin base.
         try:
-            respuesta = intencion.responder_conversacional(pregunta, historial)
+            respuesta = Respuesta(
+                intencion.responder_conversacional(pregunta, historial)
+            )
         except Exception as e:  # noqa: BLE001
             logger.exception("[%s] error respondiendo meta: %s", cid, e)
-            respuesta = ("No pude procesar eso. Preguntame algo sobre tus datos de "
-                         "ventas o inventario.")
+            respuesta = Respuesta("No pude procesar eso. Preguntame algo sobre "
+                                  "tus datos de ventas o inventario.")
     else:  # "datos"
         respuesta = _responder_datos(cliente, numero, pregunta, historial)
 
     # Guardar el intercambio para dar continuidad a los proximos mensajes.
-    memoria.guardar_intercambio(cliente, numero, pregunta, respuesta)
+    #
+    # En la memoria va SOLO el texto: guardar bytes de un PNG en la tabla de
+    # turnos la haria crecer sin control y el modelo no puede hacer nada con
+    # ellos. Pero si se mandaron adjuntos se deja una nota, para que el turno
+    # siguiente ("mandame ese mismo en Excel") tenga contexto de que se envio.
+    texto_memoria = respuesta.texto
+    if respuesta.adjuntos:
+        nombres = ", ".join(a.nombre for a in respuesta.adjuntos)
+        texto_memoria = f"{texto_memoria}\n[Se envió el archivo adjunto: {nombres}]"
+    memoria.guardar_intercambio(cliente, numero, pregunta, texto_memoria)
     return respuesta
 
 
 def _responder_datos(cliente: dict, numero: str, pregunta: str,
-                     historial: list) -> str:
+                     historial: list) -> Respuesta:
     cid = cliente["cliente_id"]
 
     ctx = catalogo.construir_contexto(cliente)
     if ctx.error_lectura:
         logger.error("[%s] no se pudo leer el catalogo; no se responde con datos", cid)
-        return _SIN_CATALOGO
+        return Respuesta(_SIN_CATALOGO)
     if not ctx.tablas_reales:
         logger.info("[%s] sin tablas habilitadas por catalogo", cid)
-        return _SIN_TABLAS
+        return Respuesta(_SIN_TABLAS)
+
+    # ¿Pidio un archivo? Reglas, no modelo (ver bot/formato.py). Se resuelve
+    # ANTES de ejecutar porque cambia cuantas filas hay que traer: para responder
+    # en texto alcanza con BOT_MAX_FILAS (200), pero un Excel de 200 filas cuando
+    # el cliente pidio "el detalle completo" es un archivo mutilado y no se nota.
+    fmt = formato.detectar(pregunta)
+    if fmt != formato.TEXTO:
+        logger.info("[%s] formato de salida pedido: %s", cid, fmt)
 
     # Capa semantica: ¿un KPI predefinido calza? ¿hay que pedir contexto o retar?
     kpis_def = kpis.cargar_kpis(cliente)
@@ -193,7 +236,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
 
     # El bot pregunta o advierte ANTES de responder: no improvisa un numero.
     if plan["accion"] in ("pedir_contexto", "retar") and plan.get("mensaje"):
-        return plan["mensaje"]
+        return Respuesta(plan["mensaje"])
 
     # 1) Conseguir el SQL: del KPI (definicion canonica) o del text-to-SQL libre.
     sql = ""
@@ -225,22 +268,116 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
             if not ok:
                 logger.warning("[%s] SQL invalido tras reintento (%s): %s", cid, motivo, sql)
-                return _NO_SEGURO
+                return Respuesta(_NO_SEGURO)
 
     # 2) Ejecutar en solo-lectura.
+    #
+    # Para un archivo se levanta el tope de filas. El limite de 200 existe para
+    # proteger la memoria del proceso y el tamaño del prompt de redaccion (A-18);
+    # ninguna de las dos cosas aplica al Excel, que no pasa por el modelo. El
+    # freno real del warehouse sigue siendo el statement_timeout, que no se toca.
+    limite = (int(config.BOT_ADJUNTO_MAX_FILAS)
+              if fmt in (formato.EXCEL, formato.CSV) else None)
     try:
-        columnas, filas = warehouse_ro.ejecutar(cliente, sql)
+        columnas, filas = warehouse_ro.ejecutar(cliente, sql, limite=limite)
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error ejecutando SQL: %s", cid, e)
-        return _ERROR
+        return Respuesta(_ERROR)
 
     # 3) Redactar la respuesta en lenguaje natural (con continuidad).
+    #
+    # Al redactor NUNCA se le pasan las miles de filas del export: se le da la
+    # muestra de siempre. Un prompt con 5.000 filas cuesta plata, tarda y no
+    # mejora la frase "te mando el detalle en Excel".
+    muestra = filas[:config.BOT_MAX_FILAS]
     try:
-        return nl2sql.redactar_respuesta(pregunta, columnas, filas,
-                                         historial=historial, sql=sql)
+        texto = nl2sql.redactar_respuesta(pregunta, columnas, muestra,
+                                          historial=historial, sql=sql)
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error redactando respuesta: %s", cid, e)
         # Fallback sin LLM: al menos devolver el dato crudo.
         if not filas:
-            return "No encontré datos para eso."
-        return nl2sql.tabla_texto(columnas, filas, tope=10)
+            texto = "No encontré datos para eso."
+        else:
+            texto = nl2sql.tabla_texto(columnas, muestra, tope=10)
+
+    # 4) Si pidio archivo, armarlo con el MISMO resultado. Nunca se vuelve a
+    #    consultar la base: el adjunto es otra presentacion de lo ya autorizado.
+    if fmt == formato.TEXTO or not filas:
+        return Respuesta(texto)
+    return _armar_adjunto(cid, fmt, pregunta, texto, columnas, filas, historial)
+
+
+def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,
+                   columnas, filas, historial=None) -> Respuesta:
+    """
+    Genera el archivo pedido. Si algo falla, devuelve el TEXTO igual: la
+    consulta ya se pago y el dato ya esta; quedarse sin nada seria peor.
+    """
+    titulo = _titulo(pregunta)
+    if titulo == "Consulta" and historial:
+        # "pasame ESO en Excel" no tiene contenido propio: el tema esta en el
+        # turno anterior. Se busca ahi antes de resignarse a 'consulta.xlsx'.
+        for turno in reversed(historial):
+            if turno.get("rol") == "user":
+                previo = _titulo(turno.get("contenido", ""))
+                if previo != "Consulta":
+                    titulo = previo
+                break
+    try:
+        if fmt == formato.GRAFICO:
+            adj = artefactos.grafico_png(columnas, filas, titulo=titulo)
+            if adj is None:
+                # Datos que no se pueden graficar (una sola celda, sin columna
+                # numerica). Se avisa; no se manda una imagen vacia.
+                logger.info("[%s] resultado no graficable (%d filas, %d cols)",
+                            cid, len(filas), len(columnas))
+                return Respuesta(texto + _SIN_GRAFICO)
+        elif fmt == formato.EXCEL:
+            adj = artefactos.excel_xlsx(columnas, filas, titulo=titulo)
+        elif fmt == formato.CSV:
+            adj = artefactos.csv_texto(columnas, filas, titulo=titulo)
+        elif fmt == formato.PDF:
+            adj = artefactos.pdf_reporte(columnas, filas, titulo=titulo,
+                                         resumen=texto)
+        else:
+            return Respuesta(texto)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[%s] error generando adjunto (%s): %s", cid, fmt, e)
+        return Respuesta(texto + _ADJUNTO_FALLO)
+
+    if adj.tamano_mb > float(config.BOT_ADJUNTO_MAX_MB):
+        logger.warning("[%s] adjunto '%s' pesa %.1f MB; se responde solo texto",
+                       cid, adj.nombre, adj.tamano_mb)
+        return Respuesta(
+            texto + "\n\n(El archivo salió muy pesado para WhatsApp. Pedime un "
+                    "período más corto o menos filas y te lo mando.)"
+        )
+
+    logger.info("[%s] adjunto listo: %s (%.0f KB, %d filas)",
+                cid, adj.nombre, len(adj.contenido) / 1024, len(filas))
+    return Respuesta(texto, adjuntos=[adj])
+
+
+# Muletillas del pedido que no aportan al titulo del archivo. Sin esto, "pasame
+# eso en Excel" produce un archivo llamado 'eso_en_excel_2026-08-03.xlsx', que
+# en el celular del cliente no dice absolutamente nada tres semanas despues.
+_RUIDO_TITULO = re.compile(
+    r"\b(por favor|porfa|mandame|mandámelo|manda|pasame|pásame|pasa|dame|"
+    r"envia(me)?|enviá(me)?|quiero|necesito|podes|podés|puedes|me das|"
+    r"graficame|graficá|grafica|gráfica|graficar|un gr[aá]fico( de)?|"
+    r"el gr[aá]fico( de)?|export[aá](r)?|descarga(r|me)?|gener[aá](r|me)?|"
+    r"el reporte( de)?|un reporte( de)?|el informe( de)?|el archivo( de)?|"
+    r"en excel|a excel|en pdf|a pdf|en csv|en un archivo|eso|esto|lo anterior|"
+    r"lo mismo)\b",
+    re.IGNORECASE,
+)
+
+
+def _titulo(pregunta: str) -> str:
+    """Titulo del grafico/archivo a partir de la pregunta, sin gastar el modelo."""
+    t = _RUIDO_TITULO.sub(" ", pregunta or "")
+    t = " ".join(t.split()).strip(" ¿?¡!.,:;-")
+    if len(t) < 4:                       # quedo vacio o casi ("de", "las")
+        return "Consulta"
+    return t[:60].capitalize()

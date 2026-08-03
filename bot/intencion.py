@@ -98,6 +98,13 @@ _VERBOS_DATOS = (
     "mostrá", "mostrame", "dame", "dime", "decime", "cuanto", "cuánto",
     "cuantos", "cuántos", "cuantas", "cuántas", "cuales", "cuáles",
     "compara", "compará", "desglosá", "desglose", "lista", "listá",
+    # Pedidos de archivo: "graficame las ventas" o "exportá el inventario" son
+    # consultas de datos con otro envoltorio. Sin esto el clasificador los podia
+    # mandar a 'meta' (suenan a pedido sobre el bot) y el usuario recibia una
+    # explicacion en vez de su grafico.
+    "grafica", "graficá", "graficame", "graficar", "grafique", "grafiquem",
+    "exporta", "exportá", "exportar", "pasame", "mandame", "mandá", "enviame",
+    "envia", "enviá", "genera", "generá", "generar", "descarga", "descargá",
 )
 
 

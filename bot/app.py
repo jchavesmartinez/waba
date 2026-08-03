@@ -37,6 +37,7 @@ from fastapi import BackgroundTasks, FastAPI, Request, Response
 import config
 from bot import whatsapp
 from bot.responder import responder
+from bot.salida import Respuesta
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -51,7 +52,11 @@ app = FastAPI(title="FACHAVI — WhatsApp bot (Meta Cloud API)")
 _AVISOS_ARRANQUE = config.revisar_arranque_bot()
 
 _SALUDO = "Hola 👋 Mandame tu consulta sobre los datos (ventas, inventario…)."
-_SOLO_TEXTO = "Por ahora solo entiendo mensajes de texto. Escribime tu consulta 🙂"
+_SOLO_TEXTO = (
+    "Por ahora solo entiendo mensajes de texto (todavía no leo archivos que me "
+    "mandés). Escribime tu consulta 🙂 — y si la querés como gráfico, Excel o "
+    "PDF, solo pedímelo."
+)
 _MUY_RAPIDO = (
     "Estás mandando mensajes muy seguido y tengo que espaciarlos un toque. "
     "Probá de nuevo en un minuto 🙂"
@@ -136,11 +141,28 @@ def _firma_valida(cuerpo: bytes, firma_header: str) -> bool:
 def _atender(numero: str, texto: str) -> None:
     """Corre en background: arma la respuesta y la manda por la Cloud API."""
     try:
-        respuesta = responder(numero, texto) if texto else _SALUDO
+        respuesta = responder(numero, texto) if texto else Respuesta(_SALUDO)
     except Exception as e:  # noqa: BLE001
         logger.exception("Error generando respuesta para %s: %s", numero, e)
-        respuesta = "Tuve un problema procesando tu consulta. Probá de nuevo."
-    whatsapp.enviar_texto(numero, respuesta)
+        respuesta = Respuesta("Tuve un problema procesando tu consulta. "
+                              "Probá de nuevo.")
+
+    # Primero el texto y despues el archivo, en ese orden y en mensajes
+    # separados. WhatsApp permite un caption en la imagen, pero son 1024 chars
+    # contra 4096 y el celular lo muestra colapsado bajo un "ver mas": la
+    # respuesta se leeria peor por ahorrarse un mensaje.
+    if respuesta.texto:
+        whatsapp.enviar_texto(numero, respuesta.texto)
+
+    for adj in respuesta.adjuntos:
+        if not whatsapp.enviar_adjunto(numero, adj):
+            # Subir o mandar el archivo fallo, pero el texto ya salio. Se avisa
+            # para que el usuario no quede esperando un archivo que no llega.
+            whatsapp.enviar_texto(
+                numero,
+                "No pude enviarte el archivo (problema con WhatsApp, no con los "
+                "datos). Pedímelo de nuevo en un momento.",
+            )
 
 
 @app.get("/salud")
@@ -207,10 +229,25 @@ async def webhook(request: Request, tareas: BackgroundTasks):
                 if tipo == "text":
                     texto = (msg.get("text", {}).get("body") or "").strip()
                     tareas.add_task(_atender, numero, texto)
-                else:
-                    # Imagen, audio, ubicacion, etc.: avisamos que solo texto.
-                    logger.info("Mensaje tipo '%s' de %s; no es texto.", tipo, numero)
-                    tareas.add_task(whatsapp.enviar_texto, numero, _SOLO_TEXTO)
+                    continue
+
+                # El usuario mando una foto o un archivo CON pie de mensaje
+                # ("mirá esto, ¿cuánto suma?"). El archivo no se procesa —eso es
+                # otro proyecto: parsear un Excel que llega por chat necesita
+                # validacion de esquema, deteccion de tipos y una decision de
+                # gobernanza sobre donde aterriza. Pero el caption SI es una
+                # pregunta de verdad, y tratarla como "solo entiendo texto" es
+                # perder una consulta que el bot podia contestar perfectamente.
+                caption = ((msg.get(tipo) or {}).get("caption") or "").strip()
+                if caption and config.BOT_MEDIA_ENTRANTE:
+                    logger.info("Mensaje tipo '%s' de %s con caption; se usa el "
+                                "caption como pregunta.", tipo, numero)
+                    tareas.add_task(_atender, numero, caption)
+                    continue
+
+                # Imagen, audio, ubicacion, etc.: avisamos que solo texto.
+                logger.info("Mensaje tipo '%s' de %s; no es texto.", tipo, numero)
+                tareas.add_task(whatsapp.enviar_texto, numero, _SOLO_TEXTO)
 
     # Meta solo quiere un 200 rapido; el envio real va por BackgroundTask.
     return Response(status_code=200)
