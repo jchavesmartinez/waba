@@ -124,6 +124,19 @@ def normalizar_columnas(nombres) -> list:
     return limpios
 
 
+# ISO 8601 anclado al inicio: 2026-01-07, 2026-01-07 00:00:00, 2026-01-07T14:30Z.
+# El año de 4 digitos adelante es lo que la vuelve inequivoca.
+_RX_ISO = re.compile(r"^\s*\d{4}-\d{1,2}-\d{1,2}([ T].*)?$")
+
+
+def _parsear(serie: pd.Series, dia_primero: bool) -> pd.Series:
+    try:
+        return pd.to_datetime(serie, errors="coerce", format="mixed",
+                              dayfirst=dia_primero)
+    except (ValueError, TypeError):
+        return pd.to_datetime(serie, errors="coerce", dayfirst=dia_primero)
+
+
 def _a_fecha(serie: pd.Series, dia_primero: bool = True) -> pd.Series:
     """
     Convierte a fecha tolerando los formatos que aparecen en la practica:
@@ -139,12 +152,41 @@ def _a_fecha(serie: pd.Series, dia_primero: bool = True) -> pd.Series:
     se entera: los dias del 13 en adelante se salvan solos, los del 1 al 12 no.
     Se controla por fuente con {"formato_fecha": "mes_primero"} en su config, o
     global con la variable FORMATO_FECHA.
+
+    B-XX: `dayfirst` NO SE APLICA A ISO. Esta es la parte contraintuitiva y
+    costo un dia/mes invertido en produccion. pandas le hace caso a dayfirst
+    incluso sobre '2026-01-02':
+
+        guess_datetime_format('2026-01-02', dayfirst=True)  -> '%Y-%d-%m'
+
+    o sea que con dayfirst=True lee el 2 de enero como 1 de febrero. Y no falla
+    ni avisa, porque '%Y-%d-%m' produce una fecha perfectamente valida; solo se
+    salvan los valores donde el dia pasa de 12, que no caben como mes.
+
+    Es un problema del REPO, no de la configuracion del cliente, y golpea a toda
+    fuente que entregue fechas reales en vez de texto: sharepoint_excel y
+    sharepoint_link (pandas convierte una celda de fecha a '2026-01-02
+    00:00:00'), api_rest (los JSON traen ISO), postgres (columnas date).
+
+    ISO 8601 es inequivoca por definicion: el año va adelante y el mes en el
+    medio. Aplicarle una convencion regional no tiene sentido en ningun caso, ni
+    siquiera cuando el cliente es de un pais mes-primero. Por eso los valores
+    ISO se parsean SIEMPRE con dayfirst=False y solo el resto de la serie usa la
+    convencion declarada.
     """
-    try:
-        return pd.to_datetime(serie, errors="coerce", format="mixed",
-                              dayfirst=dia_primero)
-    except (ValueError, TypeError):
-        return pd.to_datetime(serie, errors="coerce", dayfirst=dia_primero)
+    txt = serie.astype(str).str.strip()
+    es_iso = txt.str.match(_RX_ISO).fillna(False)
+
+    if es_iso.all():
+        return _parsear(serie, False)
+    if not es_iso.any():
+        return _parsear(serie, dia_primero)
+
+    # Serie mezclada (pasa cuando una columna trae ISO y d/m/a a la vez).
+    # Cada mitad se parsea con su regla y despues se recombinan.
+    iso = _parsear(serie.where(es_iso), False)
+    resto = _parsear(serie.where(~es_iso), dia_primero)
+    return iso.combine_first(resto)
 
 
 # A-03: si al convertir una columna a numero/fecha se pierde mas de este
@@ -227,6 +269,68 @@ def detectar_convencion(serie: pd.Series):
     return None
 
 
+# --------------------------------------------------------------------------
+# Convencion de fecha: el otro error silencioso caro de este archivo.
+#
+# Una fecha con el dia y el mes invertidos NO falla al parsear: '01/02/2026'
+# es una fecha valida leida de las dos maneras. Por eso _avisar_descartes()
+# nunca se entera —no se descarta nada— y el dato entra al warehouse mal, con
+# las ventas del 1 de febrero contadas el 2 de enero. El cliente lo descubre
+# semanas despues mirando un total que no le cuadra.
+#
+# Pero los datos traen la prueba adentro. En una serie de fechas reales de
+# varias semanas, tarde o temprano aparece un componente MAYOR A 12: ese solo
+# puede ser el dia. Un '16' en la primera posicion prueba dia-primero; un '16'
+# en la segunda prueba mes-primero. No es heuristica, es deduccion.
+# --------------------------------------------------------------------------
+
+_RX_FECHA_NUMERICA = re.compile(r"^\s*(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{2,4})")
+
+
+def _autocorregir_fecha() -> bool:
+    """Si la evidencia contradice lo declarado, ¿le hacemos caso a la evidencia?"""
+    import config as _cfg
+    return bool(getattr(_cfg, "FECHA_AUTOCORREGIR", True))
+
+
+def detectar_convencion_fecha(serie: pd.Series) -> tuple:
+    """
+    Deduce la convencion de una columna de fechas numericas.
+
+    Devuelve (veredicto, evidencia) donde veredicto es uno de:
+      "dia_primero"    -> hay valores con el primer componente > 12
+      "mes_primero"    -> hay valores con el segundo componente > 12
+      "contradictorio" -> hay de los dos (la columna mezcla formatos)
+      "ambiguo"        -> todos los valores tienen ambos componentes <= 12
+      ""               -> no son fechas numericas d/m/a (ISO, texto, vacio)
+    """
+    primero, segundo, ambiguos, total = 0, 0, 0, 0
+    for v in serie.astype(str):
+        m = _RX_FECHA_NUMERICA.match(v)
+        if not m:
+            continue
+        total += 1
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > 12 and b <= 12:
+            primero += 1
+        elif b > 12 and a <= 12:
+            segundo += 1
+        elif a <= 12 and b <= 12:
+            ambiguos += 1
+
+    evidencia = {"total": total, "prueban_dia_primero": primero,
+                 "prueban_mes_primero": segundo, "ambiguos": ambiguos}
+    if not total:
+        return "", evidencia
+    if primero and segundo:
+        return "contradictorio", evidencia
+    if primero:
+        return "dia_primero", evidencia
+    if segundo:
+        return "mes_primero", evidencia
+    return "ambiguo", evidencia
+
+
 def inferir_tipos(df: pd.DataFrame, alertas: list = None, contexto: str = "",
                   dia_primero: bool = True, coma_decimal: bool = True) -> pd.DataFrame:
     """
@@ -267,7 +371,55 @@ def inferir_tipos(df: pd.DataFrame, alertas: list = None, contexto: str = "",
                               int(no_vacios - num.notna().sum()), int(no_vacios))
             continue
 
-        fecha = _a_fecha(serie, dia_primero=dia_primero)
+        # Antes de convertir, preguntarle a los DATOS que convencion usan. Si
+        # contradicen lo declarado, la declaracion esta mal: un '16' en la
+        # primera posicion no admite otra lectura que "dia 16".
+        veredicto, ev = detectar_convencion_fecha(serie)
+        dia_col = dia_primero
+        declarado = "dia_primero" if dia_primero else "mes_primero"
+
+        if veredicto in ("dia_primero", "mes_primero") and veredicto != declarado:
+            dia_col = (veredicto == "dia_primero")
+            msg = (
+                f"[{contexto or 'fuente'}] la columna '{col}' declara "
+                f"'{declarado}' pero los datos PRUEBAN '{veredicto}': "
+                f"{ev['prueban_dia_primero'] or ev['prueban_mes_primero']} de "
+                f"{ev['total']} valores solo se pueden leer asi. Se usa la "
+                "evidencia. Corregi 'formato_fecha' en la config de la fuente "
+                "para que deje de aparecer esta alerta."
+            )
+            if not _autocorregir_fecha():
+                dia_col = dia_primero
+                msg += " (FECHA_AUTOCORREGIR=no: se respeta lo declarado y el "
+                msg += "dia/mes van a quedar INVERTIDOS.)"
+            logger.warning(msg)
+            if alertas is not None:
+                alertas.append(msg)
+
+        elif veredicto == "contradictorio":
+            msg = (f"[{contexto or 'fuente'}] la columna '{col}' MEZCLA los dos "
+                   f"formatos de fecha ({ev['prueban_dia_primero']} valores solo "
+                   f"legibles como dia/mes y {ev['prueban_mes_primero']} solo "
+                   "como mes/dia). Parte de la columna va a quedar mal se elija "
+                   "lo que se elija: hay que normalizar el origen.")
+            logger.error(msg)
+            if alertas is not None:
+                alertas.append(msg)
+
+        elif veredicto == "ambiguo" and ev["total"] >= 5:
+            # Ningun valor pasa de 12: puede ser una columna de pocos dias, o
+            # puede ser toda la serie invertida sin que se note. No hay forma de
+            # saberlo desde aca, pero el cliente si puede mirarlo.
+            msg = (f"[{contexto or 'fuente'}] la columna '{col}' tiene "
+                   f"{ev['total']} fechas y NINGUNA supera el 12 en dia ni mes, "
+                   f"asi que no hay como verificar el formato. Se asume lo "
+                   f"declarado ('{declarado}'). Si el dia y el mes salen "
+                   "invertidos, este es el lugar.")
+            logger.warning(msg)
+            if alertas is not None:
+                alertas.append(msg)
+
+        fecha = _a_fecha(serie, dia_primero=dia_col)
         if fecha.notna().sum() >= umbral:
             df[col] = fecha
             _avisar_descartes(alertas, contexto, col, "fecha",
@@ -297,6 +449,23 @@ def _avisar_descartes(alertas, contexto: str, columna: str, tipo: str,
         alertas.append(msg)
 
 
+# Grafías que un usuario escribe de verdad en la pestaña 'fuentes' cuando le
+# pedís la convención de fecha. La lista corta original ("mes_primero", "mdy",
+# "us", "en") ignoraba EN SILENCIO cualquier otra cosa y devolvia dia_primero:
+# quien escribia "MM/DD/YYYY" —lo mas natural del mundo— creia haber
+# configurado mes-primero y obtenia lo contrario, sin una sola linea de log.
+_MES_PRIMERO = {
+    "mes_primero", "mes primero", "mesprimero", "mdy", "us", "usa", "en",
+    "en_us", "ingles", "inglés", "americano", "month_first", "monthfirst",
+    "mm/dd/yyyy", "mm/dd/aaaa", "mm-dd-yyyy", "m/d/y", "mm/dd",
+}
+_DIA_PRIMERO = {
+    "dia_primero", "dia primero", "diaprimero", "día_primero", "dmy", "cr",
+    "es", "es_cr", "latino", "espanol", "español", "day_first", "dayfirst",
+    "dd/mm/yyyy", "dd/mm/aaaa", "dd-mm-yyyy", "d/m/y", "dd/mm",
+}
+
+
 def dia_primero_de(config_fuente: dict) -> bool:
     """
     Resuelve la convencion de fecha de una fuente (A-07):
@@ -304,9 +473,25 @@ def dia_primero_de(config_fuente: dict) -> bool:
     """
     import config as _cfg
     valor = str((config_fuente or {}).get("formato_fecha", "")).strip().lower()
+    origen = "la config de la fuente"
     if not valor:
-        valor = getattr(_cfg, "FORMATO_FECHA", "dia_primero")
-    return valor not in ("mes_primero", "mdy", "us", "en")
+        valor = str(getattr(_cfg, "FORMATO_FECHA", "dia_primero")).strip().lower()
+        origen = "la variable global FORMATO_FECHA"
+    if not valor:
+        return True
+
+    if valor in _MES_PRIMERO:
+        return False
+    if valor in _DIA_PRIMERO:
+        return True
+
+    # Ni una cosa ni la otra. Antes esto caia en dia_primero sin decir nada.
+    logger.warning(
+        "No entiendo el formato de fecha '%s' declarado en %s. Se asume "
+        "dia_primero (convencion tica). Valores validos: 'dia_primero' o "
+        "'mes_primero'.", valor, origen,
+    )
+    return True
 
 
 def _tablas_existentes(con: duckdb.DuckDBPyConnection) -> set:
