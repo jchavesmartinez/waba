@@ -224,6 +224,58 @@ GRAPH_API_VERSION = os.environ.get("GRAPH_API_VERSION", "v21.0")
 # Meta = 4096). Si la respuesta se pasa, se recorta antes de enviar.
 WHATSAPP_MAX_CHARS = int(os.environ.get("WHATSAPP_MAX_CHARS", "4096"))
 
+# El PIE de una imagen o un documento NO son 4096: son 1024. Mandar mas hace que
+# Meta rechace el mensaje entero, no que lo recorte.
+WHATSAPP_MAX_CAPTION = int(os.environ.get("WHATSAPP_MAX_CAPTION", "1024"))
+
+
+# --------------------------------------------------------------------------
+# ADJUNTOS: el bot responde con graficos (PNG), Excel, CSV o PDF cuando el
+# usuario los pide ("graficame las ventas", "pasame eso en Excel").
+#
+# El archivo se arma con el MISMO resultado del SELECT que ya se ejecuto y ya
+# paso por el catalogo: no hay una segunda consulta ni una via alterna a los
+# datos. La gobernanza no cambia — cambia el envoltorio.
+# --------------------------------------------------------------------------
+
+# Interruptor general. En "no", todo se responde en texto como antes.
+BOT_ADJUNTOS = _es_si(os.environ.get("BOT_ADJUNTOS", "si"))
+
+# Tope de filas para un export (Excel/CSV). Es DISTINTO de BOT_MAX_FILAS: ese
+# protege la memoria del proceso y el tamaño del prompt de redaccion, y ninguna
+# de las dos cosas aplica a un archivo, que no pasa por el modelo. 5.000 filas
+# son ~250 KB de xlsx. El freno real del warehouse sigue siendo BOT_TIMEOUT_MS.
+BOT_ADJUNTO_MAX_FILAS = int(os.environ.get("BOT_ADJUNTO_MAX_FILAS", "5000"))
+
+# Cuantas barras/puntos entran en un grafico antes de que deje de leerse en un
+# celular. Si el resultado trae mas, se recorta al top N (o a los N periodos mas
+# recientes si el eje es temporal) y el titulo lo dice.
+BOT_ADJUNTO_MAX_BARRAS = int(os.environ.get("BOT_ADJUNTO_MAX_BARRAS", "25"))
+
+# Filas que entran en la tabla del PDF (un reporte de 3.000 filas no es un
+# reporte). Si hay mas, el PDF lo aclara e invita a pedir el Excel.
+BOT_ADJUNTO_PDF_MAX_FILAS = int(os.environ.get("BOT_ADJUNTO_PDF_MAX_FILAS", "60"))
+
+# Peso maximo del adjunto. Meta acepta 5 MB de imagen y 100 MB de documento;
+# el tope propio es mas bajo a proposito: un archivo de 20 MB por WhatsApp en
+# una red movil tica es una descarga que el cliente no va a completar.
+BOT_ADJUNTO_MAX_MB = float(os.environ.get("BOT_ADJUNTO_MAX_MB", "4.5"))
+
+# PDF: agrega reportlab al build. Ponelo en "no" si no lo vas a usar y preferis
+# un contenedor mas liviano; los pedidos de PDF se sirven como Excel.
+BOT_ADJUNTO_PDF = _es_si(os.environ.get("BOT_ADJUNTO_PDF", "si"))
+
+# CSV: la lista de MIME de documento que acepta la Cloud API no incluye
+# text/csv, asi que el envio puede volver con un 400. Por defecto un pedido de
+# CSV se sirve como .xlsx, que si esta soportado y ademas se abre mejor en el
+# celular. Ponelo en "si" solo si probaste que tu numero lo acepta.
+BOT_ADJUNTO_CSV = _es_si(os.environ.get("BOT_ADJUNTO_CSV", "no"))
+
+# Adjuntos ENTRANTES: si el usuario manda una foto o un archivo CON pie de
+# mensaje, se usa ese pie como pregunta en vez de contestar "solo entiendo
+# texto". El archivo NO se procesa (ver la nota en bot/app.py).
+BOT_MEDIA_ENTRANTE = _es_si(os.environ.get("BOT_MEDIA_ENTRANTE", "si"))
+
 
 # --------------------------------------------------------------------------
 # Verificacion de arranque del BOT (C-05, C-08, B-37).
@@ -259,6 +311,26 @@ def revisar_arranque_bot() -> list:
 
     if not ANTHROPIC_API_KEY:
         avisos.append("FALTA ANTHROPIC_API_KEY: el bot no va a poder responder.")
+
+    # Los adjuntos dependen de librerias que estan en requirements-bot.txt. Si
+    # el build quedo viejo, el import falla RECIEN cuando alguien pide un
+    # grafico —o sea, en produccion, frente al cliente, con un mensaje generico.
+    # Mejor gritarlo al arrancar, que es donde se mira.
+    if BOT_ADJUNTOS:
+        faltan = []
+        for lib, para in (("matplotlib", "gráficos"),
+                          ("xlsxwriter", "Excel"),
+                          *((("reportlab", "PDF"),) if BOT_ADJUNTO_PDF else ())):
+            try:
+                __import__(lib)
+            except ImportError:
+                faltan.append(f"{lib} ({para})")
+        if faltan:
+            avisos.append(
+                "BOT_ADJUNTOS=si pero faltan librerias: " + ", ".join(faltan) +
+                ". Los pedidos de archivo van a fallar. Reinstala "
+                "requirements-bot.txt o pone BOT_ADJUNTOS=no."
+            )
 
     if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID):
         avisos.append(
