@@ -60,8 +60,11 @@ _SISTEMA_CLASIF = (
     "- meta: es SOLO sobre la CONVERSACION o el BOT en si, SIN pedir datos nuevos "
     "ni calculos. Ej: que dijiste antes, por que lo dijiste, que te pregunte, que "
     "me mencionaste, resumime lo que hablamos, como lo calculaste, que podes hacer, "
-    "no entendi, repetilo.\n"
-    "- saludo: saludo o cortesia sin ningun pedido (hola, buenas, gracias, ok).\n"
+    "no entendi, repetilo. TAMBIEN va aca cualquier pregunta sobre la FECHA U HORA "
+    "ACTUAL ('que dia es hoy', 'en que año estamos', 'que hora es'): no sale de la "
+    "base del negocio, pero es una pregunta real y se responde.\n"
+    "- saludo: saludo o cortesia sin ningun pedido (hola, buenas, gracias, ok). "
+    "Solo esto: si el mensaje pregunta ALGO, no es saludo.\n"
     "Ante la duda entre 'datos' y 'meta', SIEMPRE 'datos'. Solo usa 'meta' cuando "
     "el usuario NO pide ningun dato nuevo ni calculo."
 )
@@ -165,13 +168,16 @@ def clasificar(pregunta: str, historial=None) -> str:
 
 def responder_conversacional(pregunta: str, historial=None) -> str:
     """Responde una pregunta 'meta' usando SOLO el historial. Sin tocar la base."""
-    from bot.nl2sql import _historial_a_messages, limpiar_arte_ascii
+    from bot.nl2sql import (_historial_a_messages, contexto_temporal,
+                            limpiar_arte_ascii)
     messages = _historial_a_messages(historial)
     messages.append({"role": "user", "content": pregunta})
     resp = _anthropic().messages.create(
         model=config.BOT_MODELO_RESPUESTA,
         max_tokens=400,
-        system=_SISTEMA_META,
+        # La fecha va en el system para que "¿qué día es hoy?" tenga respuesta.
+        # Antes esa pregunta caia en 'saludo' y devolvia el mensaje de bienvenida.
+        system=_SISTEMA_META + "\n\n" + contexto_temporal(),
         messages=messages,
     )
     texto = "".join(b.text for b in resp.content
