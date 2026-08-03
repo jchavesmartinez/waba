@@ -75,6 +75,15 @@ SYNC_RETENCION_DIAS = int(os.environ.get("SYNC_RETENCION_DIAS", "180"))
 # con {"formato_fecha": "mes_primero"} en su columna config.
 FORMATO_FECHA = os.environ.get("FORMATO_FECHA", "dia_primero").strip().lower()
 
+# Cuando los DATOS contradicen a FORMATO_FECHA, ¿a quien se le hace caso?
+#
+# Un valor con el dia mayor a 12 ('16/01/2026') solo admite una lectura, asi que
+# no es una heuristica: es prueba de que la declaracion esta mal. En "si" (por
+# defecto) la ingesta usa la evidencia y deja una alerta. En "no" respeta lo
+# declarado igual — util solo si sabes que tu fuente tiene basura y preferis
+# controlarla a mano. Cualquiera de las dos avisa; el silencio no es opcion.
+FECHA_AUTOCORREGIR = _es_si(os.environ.get("FECHA_AUTOCORREGIR", "si"))
+
 # --- Convencion numerica por defecto de las fuentes ---
 # "coma_decimal" (convencion tica: ₡5.000 son cinco mil, el punto es separador
 # de miles) o "punto_decimal" (anglosajona: 5.000 son cinco). Cada fuente lo
