@@ -252,6 +252,11 @@ BOT_ADJUNTO_MAX_FILAS = int(os.environ.get("BOT_ADJUNTO_MAX_FILAS", "5000"))
 # recientes si el eje es temporal) y el titulo lo dice.
 BOT_ADJUNTO_MAX_BARRAS = int(os.environ.get("BOT_ADJUNTO_MAX_BARRAS", "25"))
 
+# El tope equivalente para SERIES DE TIEMPO, que se dibujan como linea. Una
+# linea con 90 puntos se lee perfecto; recortarla a 25 mutila justo la tendencia
+# que el usuario queria ver ("ventas por dia" de un mes son 30 puntos).
+BOT_ADJUNTO_MAX_PUNTOS = int(os.environ.get("BOT_ADJUNTO_MAX_PUNTOS", "90"))
+
 # Filas que entran en la tabla del PDF (un reporte de 3.000 filas no es un
 # reporte). Si hay mas, el PDF lo aclara e invita a pedir el Excel.
 BOT_ADJUNTO_PDF_MAX_FILAS = int(os.environ.get("BOT_ADJUNTO_PDF_MAX_FILAS", "60"))
