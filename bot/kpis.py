@@ -28,6 +28,7 @@ import logging
 import re
 
 import config
+from bot.nl2sql import contexto_temporal
 from bot import catalogo, warehouse_ro
 
 logger = logging.getLogger("fachavi.bot.kpis")
@@ -133,6 +134,10 @@ _SISTEMA = (
     "usar_kpi y sql_libre, preferí usar_kpi.\n"
     "\n"
     "REGLAS PARA NO SER PESADO (criticas):\n"
+    "0. NUNCA le preguntes al usuario que dia es hoy, en que año estamos ni cual "
+    "es la fecha actual: la tenes arriba. Preguntar eso hace que el bot parezca "
+    "roto —el usuario sabe que el sistema conoce la fecha— y ademas no era lo que "
+    "faltaba. 'Cuantas ventas hubo hoy' esta COMPLETA: ejecutala.\n"
     "1. Preguntá UNA sola vez como maximo. Si en la conversacion reciente YA "
     "preguntaste por contexto (o ya se ofrecieron opciones), NO vuelvas a "
     "preguntar: elegí un default sensato y EJECUTA (usar_kpi/sql_libre).\n"
@@ -184,6 +189,7 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
         ) + "\n\n"
 
     contenido = (
+        f"{contexto_temporal()}\n\n"
         f"{hist}"
         f"KPIS disponibles:\n{_kpis_texto(kpis)}\n\n"
         f"ESQUEMA real (tablas y columnas que existen):\n{ctx.schema_text}\n\n"

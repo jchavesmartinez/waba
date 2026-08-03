@@ -98,7 +98,7 @@ def _historial_a_messages(historial) -> list:
     return msgs
 
 
-def _contexto_temporal() -> str:
+def contexto_temporal() -> str:
     """
     La fecha de HOY, para el prompt de SQL.
 
@@ -137,7 +137,7 @@ def generar_sql(pregunta: str, schema_text: str,
                 historial=None) -> str:
     """Le pide a Claude el SELECT. `correccion` se usa en el reintento."""
     partes = [
-        f"{_contexto_temporal()}\n",
+        f"{contexto_temporal()}\n",
         f"Esquema disponible (unicas tablas que existen para vos):\n\n{schema_text}\n",
     ]
     # El historial ayuda a resolver referencias ("y de proveedores?", "y ayer?").
