@@ -301,15 +301,30 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         else:
             texto = nl2sql.tabla_texto(columnas, muestra, tope=10)
 
+    # El redactor a veces dibuja un grafico con caracteres (barras de |, ejes de
+    # _). En el celular eso se desalinea y queda ilegible. Se saca SIEMPRE, pero
+    # el intento es informacion util: significa que este resultado pide una
+    # visual y el usuario simplemente no sabia que podia pedirla. En vez de
+    # devolver el texto pelado, se le manda el grafico de verdad.
+    texto, hubo_arte = nl2sql.limpiar_arte_ascii(texto)
+    if hubo_arte and fmt == formato.TEXTO:
+        logger.info("[%s] el redactor intentó un gráfico ASCII; se manda el "
+                    "gráfico real en su lugar", cid)
+        fmt = formato.GRAFICO
+
     # 4) Si pidio archivo, armarlo con el MISMO resultado. Nunca se vuelve a
     #    consultar la base: el adjunto es otra presentacion de lo ya autorizado.
     if fmt == formato.TEXTO or not filas:
         return Respuesta(texto)
-    return _armar_adjunto(cid, fmt, pregunta, texto, columnas, filas, historial)
+    # Si el gráfico salió de nuestra propia inferencia (no lo pidió el usuario),
+    # un aviso de "no pude armarlo" es ruido sobre algo que nunca prometimos.
+    return _armar_adjunto(cid, fmt, pregunta, texto, columnas, filas, historial,
+                          avisar_si_falla=not hubo_arte)
 
 
 def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,
-                   columnas, filas, historial=None) -> Respuesta:
+                   columnas, filas, historial=None,
+                   avisar_si_falla: bool = True) -> Respuesta:
     """
     Genera el archivo pedido. Si algo falla, devuelve el TEXTO igual: la
     consulta ya se pago y el dato ya esta; quedarse sin nada seria peor.
@@ -332,7 +347,7 @@ def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,
                 # numerica). Se avisa; no se manda una imagen vacia.
                 logger.info("[%s] resultado no graficable (%d filas, %d cols)",
                             cid, len(filas), len(columnas))
-                return Respuesta(texto + _SIN_GRAFICO)
+                return Respuesta(texto + _SIN_GRAFICO if avisar_si_falla else texto)
         elif fmt == formato.EXCEL:
             adj = artefactos.excel_xlsx(columnas, filas, titulo=titulo)
         elif fmt == formato.CSV:
@@ -344,7 +359,7 @@ def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,
             return Respuesta(texto)
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error generando adjunto (%s): %s", cid, fmt, e)
-        return Respuesta(texto + _ADJUNTO_FALLO)
+        return Respuesta(texto + _ADJUNTO_FALLO if avisar_si_falla else texto)
 
     if adj.tamano_mb > float(config.BOT_ADJUNTO_MAX_MB):
         logger.warning("[%s] adjunto '%s' pesa %.1f MB; se responde solo texto",
