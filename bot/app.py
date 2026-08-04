@@ -138,8 +138,14 @@ def _firma_valida(cuerpo: bytes, firma_header: str) -> bool:
     return hmac.compare_digest(esperado, recibido)
 
 
-def _atender(numero: str, texto: str) -> None:
-    """Corre en background: arma la respuesta y la manda por la Cloud API."""
+def _atender(numero: str, texto: str, numero_origen: str = "") -> None:
+    """
+    Corre en background: arma la respuesta y la manda por la Cloud API.
+
+    `numero_origen` es el phone_number_id por el que ENTRO el mensaje. Se
+    responde por ese mismo numero: si alguien le escribe al numero de prueba,
+    le contesta el de prueba, no el de produccion.
+    """
     try:
         respuesta = responder(numero, texto) if texto else Respuesta(_SALUDO)
     except Exception as e:  # noqa: BLE001
@@ -152,16 +158,17 @@ def _atender(numero: str, texto: str) -> None:
     # contra 4096 y el celular lo muestra colapsado bajo un "ver mas": la
     # respuesta se leeria peor por ahorrarse un mensaje.
     if respuesta.texto:
-        whatsapp.enviar_texto(numero, respuesta.texto)
+        whatsapp.enviar_texto(numero, respuesta.texto, numero_origen)
 
     for adj in respuesta.adjuntos:
-        if not whatsapp.enviar_adjunto(numero, adj):
+        if not whatsapp.enviar_adjunto(numero, adj, numero_origen):
             # Subir o mandar el archivo fallo, pero el texto ya salio. Se avisa
             # para que el usuario no quede esperando un archivo que no llega.
             whatsapp.enviar_texto(
                 numero,
                 "No pude enviarte el archivo (problema con WhatsApp, no con los "
                 "datos). Pedímelo de nuevo en un momento.",
+                numero_origen,
             )
 
 
@@ -207,6 +214,9 @@ async def webhook(request: Request, tareas: BackgroundTasks):
     for entry in data.get("entry", []):
         for cambio in entry.get("changes", []):
             valor = cambio.get("value", {})
+            # De que numero NUESTRO llego el mensaje. Se usa para responder por
+            # el mismo, en vez de por el de la variable de entorno.
+            origen = (valor.get("metadata") or {}).get("phone_number_id", "")
             for msg in valor.get("messages", []) or []:
                 msg_id = msg.get("id", "")
                 if _ya_procesado(msg_id):
@@ -222,13 +232,14 @@ async def webhook(request: Request, tareas: BackgroundTasks):
                         "Limite de frecuencia alcanzado para %s (%d msj/min); "
                         "no se procesa.", numero, config.BOT_MAX_MSJ_POR_MINUTO,
                     )
-                    tareas.add_task(whatsapp.enviar_texto, numero, _MUY_RAPIDO)
+                    tareas.add_task(whatsapp.enviar_texto, numero, _MUY_RAPIDO,
+                                    origen)
                     continue
 
                 tipo = msg.get("type")
                 if tipo == "text":
                     texto = (msg.get("text", {}).get("body") or "").strip()
-                    tareas.add_task(_atender, numero, texto)
+                    tareas.add_task(_atender, numero, texto, origen)
                     continue
 
                 # El usuario mando una foto o un archivo CON pie de mensaje
@@ -242,12 +253,12 @@ async def webhook(request: Request, tareas: BackgroundTasks):
                 if caption and config.BOT_MEDIA_ENTRANTE:
                     logger.info("Mensaje tipo '%s' de %s con caption; se usa el "
                                 "caption como pregunta.", tipo, numero)
-                    tareas.add_task(_atender, numero, caption)
+                    tareas.add_task(_atender, numero, caption, origen)
                     continue
 
                 # Imagen, audio, ubicacion, etc.: avisamos que solo texto.
                 logger.info("Mensaje tipo '%s' de %s; no es texto.", tipo, numero)
-                tareas.add_task(whatsapp.enviar_texto, numero, _SOLO_TEXTO)
+                tareas.add_task(whatsapp.enviar_texto, numero, _SOLO_TEXTO, origen)
 
     # Meta solo quiere un 200 rapido; el envio real va por BackgroundTask.
     return Response(status_code=200)

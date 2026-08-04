@@ -56,10 +56,25 @@ _REINTENTOS = 3
 _ESPERA_BASE_SEG = 1.5
 
 
-def _url(recurso: str = "messages") -> str:
+def _url(recurso: str = "messages", numero_origen: str = "") -> str:
+    """
+    URL del endpoint para el numero DESDE el que se responde.
+
+    `numero_origen` es el phone_number_id que Meta manda en el webhook
+    (value.metadata.phone_number_id): el numero por el que ENTRO el mensaje.
+    Sin este parametro, el bot respondia siempre por el numero de la variable
+    de entorno, sin importar por cual le hubieran escrito — asi que un mensaje
+    al numero de prueba salia contestado por el de produccion. Ademas de ser
+    confuso, eso deja sin sandbox: cada prueba toca la reputacion del numero
+    que ve el cliente.
+
+    Cae a la variable de entorno cuando no viene, para no romper las llamadas
+    que no nacen de un webhook.
+    """
+    pnid = numero_origen or config.WHATSAPP_PHONE_NUMBER_ID
     return (
         f"https://graph.facebook.com/{config.GRAPH_API_VERSION}"
-        f"/{config.WHATSAPP_PHONE_NUMBER_ID}/{recurso}"
+        f"/{pnid}/{recurso}"
     )
 
 
@@ -88,7 +103,8 @@ def _recortar(texto: str, tope: int | None = None) -> str:
     return texto[:corte].rstrip() + "…"
 
 
-def _post_mensaje(payload: dict, descripcion: str) -> bool:
+def _post_mensaje(payload: dict, descripcion: str,
+                  numero_origen: str = "") -> bool:
     """
     Manda un payload a /messages con la politica de reintentos de arriba.
 
@@ -101,7 +117,8 @@ def _post_mensaje(payload: dict, descripcion: str) -> bool:
 
     for intento in range(1, _REINTENTOS + 1):
         try:
-            r = httpx.post(_url(), json=payload, headers=headers, timeout=_TIMEOUT)
+            r = httpx.post(_url("messages", numero_origen), json=payload,
+                           headers=headers, timeout=_TIMEOUT)
         except httpx.HTTPError as e:
             logger.warning("Error de red enviando %s a WhatsApp (%s), intento %d/%d: %s",
                            descripcion, destino, intento, _REINTENTOS, e)
@@ -133,7 +150,8 @@ def _post_mensaje(payload: dict, descripcion: str) -> bool:
     return False
 
 
-def enviar_texto(numero_destino: str, texto: str) -> bool:
+def enviar_texto(numero_destino: str, texto: str,
+                 numero_origen: str = "") -> bool:
     """
     Manda un mensaje de texto por la Cloud API. Devuelve True si Meta lo acepto.
 
@@ -151,12 +169,13 @@ def enviar_texto(numero_destino: str, texto: str) -> bool:
         "type": "text",
         "text": {"preview_url": False, "body": _recortar(texto)},
     }
-    return _post_mensaje(payload, "texto")
+    return _post_mensaje(payload, "texto", numero_origen)
 
 
 # --- Adjuntos: subir y mandar --------------------------------------------
 
-def subir_media(contenido: bytes, nombre: str, mime: str) -> str:
+def subir_media(contenido: bytes, nombre: str, mime: str,
+                numero_origen: str = "") -> str:
     """
     Sube un archivo a /{phone_number_id}/media y devuelve el media_id ("" si falla).
 
@@ -183,8 +202,8 @@ def subir_media(contenido: bytes, nombre: str, mime: str) -> str:
 
     for intento in range(1, _REINTENTOS + 1):
         try:
-            r = httpx.post(_url("media"), files=files, headers=_headers(),
-                           timeout=_TIMEOUT_MEDIA)
+            r = httpx.post(_url("media", numero_origen), files=files,
+                           headers=_headers(), timeout=_TIMEOUT_MEDIA)
         except httpx.HTTPError as e:
             logger.warning("Error de red subiendo '%s', intento %d/%d: %s",
                            nombre, intento, _REINTENTOS, e)
@@ -213,7 +232,8 @@ def subir_media(contenido: bytes, nombre: str, mime: str) -> str:
     return ""
 
 
-def enviar_imagen(numero_destino: str, media_id: str, caption: str = "") -> bool:
+def enviar_imagen(numero_destino: str, media_id: str, caption: str = "",
+                  numero_origen: str = "") -> bool:
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -223,11 +243,11 @@ def enviar_imagen(numero_destino: str, media_id: str, caption: str = "") -> bool
     }
     if caption:
         payload["image"]["caption"] = _recortar(caption, _tope_caption())
-    return _post_mensaje(payload, "imagen")
+    return _post_mensaje(payload, "imagen", numero_origen)
 
 
 def enviar_documento(numero_destino: str, media_id: str, nombre: str,
-                     caption: str = "") -> bool:
+                     caption: str = "", numero_origen: str = "") -> bool:
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -240,23 +260,26 @@ def enviar_documento(numero_destino: str, media_id: str, nombre: str,
     }
     if caption:
         payload["document"]["caption"] = _recortar(caption, _tope_caption())
-    return _post_mensaje(payload, "documento")
+    return _post_mensaje(payload, "documento", numero_origen)
 
 
-def enviar_adjunto(numero_destino: str, adjunto) -> bool:
+def enviar_adjunto(numero_destino: str, adjunto,
+                   numero_origen: str = "") -> bool:
     """
     Sube y manda un bot.salida.Adjunto de una. Devuelve True si llego.
 
     Si la subida falla no se intenta mandar el mensaje: sin media_id no hay nada
     que enviar y el POST devolveria un 400 que no explica la causa real.
     """
-    media_id = subir_media(adjunto.contenido, adjunto.nombre, adjunto.mime)
+    media_id = subir_media(adjunto.contenido, adjunto.nombre, adjunto.mime,
+                           numero_origen)
     if not media_id:
         return False
     if adjunto.tipo == "image":
-        return enviar_imagen(numero_destino, media_id, adjunto.caption)
+        return enviar_imagen(numero_destino, media_id, adjunto.caption,
+                             numero_origen)
     return enviar_documento(numero_destino, media_id, adjunto.nombre,
-                            adjunto.caption)
+                            adjunto.caption, numero_origen)
 
 
 def descargar_media(media_id: str) -> tuple[bytes, str]:
