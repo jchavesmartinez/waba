@@ -24,6 +24,8 @@ from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+import imaplib
+
 import duckdb
 import pytest
 
@@ -73,9 +75,29 @@ class IMAPFalso:
     def login(self, u, p):
         return "OK", [b""]
 
+    # Carpetas que el servidor falso "tiene". Como Zoho: la subcarpeta vive
+    # bajo INBOX y el nombre lleva espacio.
+    CARPETAS = {"INBOX", "INBOX/Jose Chaves"}
+
     def select(self, carpeta, readonly=False):
+        # Un servidor IMAP de verdad parte por espacios: sin comillas, un
+        # nombre con espacio llega partido y es error de sintaxis.
+        if not (carpeta.startswith('"') and carpeta.endswith('"')):
+            if " " in carpeta:
+                raise imaplib.IMAP4.error(
+                    b"[CLIENTBUG] syntax: expecting '(', found 'c'")
+            nombre = carpeta
+        else:
+            nombre = carpeta[1:-1]
+        if nombre not in self.CARPETAS:
+            return "NO", [b"folder does not exist"]
         self.readonly = readonly
+        self.seleccionada = nombre
         return "OK", [b"2"]
+
+    def list(self, *a, **k):
+        return "OK", [f'(\\HasNoChildren) "/" "{c}"'.encode()
+                      for c in sorted(self.CARPETAS)]
 
     def search(self, charset, criterio):
         self.criterio = criterio
@@ -226,3 +248,38 @@ def test_partir_remitente_sin_nombre():
 def test_cuerpo_vacio_no_revienta():
     msg = email.message_from_bytes(b"From: a@b.cr\r\nSubject: x\r\n\r\n")
     assert _cuerpo_y_adjuntos(msg) == ("", [])
+
+
+# --- Nombres de carpeta: espacios y anidamiento --------------------------
+#
+# Zoho muestra las subcarpetas anidadas bajo Inbox, pero en IMAP se llaman
+# "INBOX/Nombre". Y imaplib no entrecomilla el nombre, asi que una carpeta con
+# espacio produce un error de sintaxis cuyo texto no menciona ni el espacio ni
+# la carpeta. Las dos cosas juntas son la trampa mas comun de este conector.
+
+def test_carpeta_con_espacio_y_anidada(monkeypatch):
+    monkeypatch.setattr("sources.zoho_imap.imaplib.IMAP4_SSL", IMAPFalso)
+    monkeypatch.setenv("P", "x")
+    f = ZohoIMAPSource("f", {"usuario": "a@b.cr", "password_env": "P",
+                             "carpeta": "Jose Chaves"})
+    f.cargar(duckdb.connect())
+    assert IMAPFalso.ultimo.seleccionada == "INBOX/Jose Chaves"
+
+
+def test_ruta_completa_tambien_funciona(monkeypatch):
+    monkeypatch.setattr("sources.zoho_imap.imaplib.IMAP4_SSL", IMAPFalso)
+    monkeypatch.setenv("P", "x")
+    f = ZohoIMAPSource("f", {"usuario": "a@b.cr", "password_env": "P",
+                             "carpeta": "INBOX/Jose Chaves"})
+    f.cargar(duckdb.connect())
+    assert IMAPFalso.ultimo.seleccionada == "INBOX/Jose Chaves"
+
+
+def test_carpeta_inexistente_lista_las_reales(monkeypatch):
+    """El error debe traer los nombres, no dejarte adivinando contra el servidor."""
+    monkeypatch.setattr("sources.zoho_imap.imaplib.IMAP4_SSL", IMAPFalso)
+    monkeypatch.setenv("P", "x")
+    f = ZohoIMAPSource("f", {"usuario": "a@b.cr", "password_env": "P",
+                             "carpeta": "Ferreteria"})
+    with pytest.raises(RuntimeError, match="INBOX/Jose Chaves"):
+        f.cargar(duckdb.connect())
