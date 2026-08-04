@@ -138,6 +138,63 @@ def _partir_remitente(valor: str):
     return nombre.strip(), (correo or "").strip().lower()
 
 
+def _seleccionar(con, carpeta: str):
+    """
+    Abre la carpeta en solo lectura.
+
+    DOS TRAMPAS DE IMAP QUE ESTO RESUELVE:
+
+    1. imaplib NO entrecomilla el nombre. Una carpeta con espacio ("Jose
+       Chaves") se manda como `EXAMINE Jose Chaves` y el servidor lee "Chaves"
+       como un segundo argumento:
+           BAD [CLIENTBUG] syntax: expecting '(', found 'c'
+       El error no menciona el espacio ni la carpeta, asi que no se parece en
+       nada a su causa. Se entrecomilla siempre.
+
+    2. Las subcarpetas van con ruta completa. Una carpeta que en la interfaz
+       aparece anidada bajo Inbox se llama "Inbox/Jose Chaves" en IMAP, no
+       "Jose Chaves". Por eso, si el primer intento falla, se prueba con el
+       prefijo antes de darse por vencido.
+
+    Y si igual no abre, se listan las carpetas REALES en el error. Adivinar
+    nombres de carpeta contra un servidor remoto es de las cosas mas tediosas
+    de depurar; que el mensaje traiga la lista ahorra la ronda de tanteo.
+    """
+    candidatas = [carpeta]
+    if "/" not in carpeta and carpeta.upper() != "INBOX":
+        candidatas.append(f"INBOX/{carpeta}")
+
+    ultimo = None
+    for nombre in candidatas:
+        try:
+            ok, datos = con.select(f'"{nombre}"', readonly=True)
+            if ok == "OK":
+                if nombre != carpeta:
+                    logger.info("Carpeta '%s' encontrada como '%s'.", carpeta, nombre)
+                return
+            ultimo = datos
+        except Exception as e:  # noqa: BLE001
+            ultimo = e
+
+    disponibles = []
+    try:
+        ok, filas = con.list()
+        if ok == "OK":
+            for f in filas or []:
+                texto = f.decode(errors="replace") if isinstance(f, bytes) else str(f)
+                # Formato: (\HasNoChildren) "/" "Nombre De La Carpeta"
+                partes = texto.split(' "')
+                disponibles.append(partes[-1].rstrip('"') if partes else texto)
+    except Exception:  # noqa: BLE001
+        pass
+
+    raise RuntimeError(
+        f"No se pudo abrir la carpeta '{carpeta}' ({ultimo}). "
+        + (f"Carpetas disponibles: {', '.join(disponibles)}"
+           if disponibles else "No se pudo listar las carpetas del buzon.")
+    )
+
+
 # --- La fuente -----------------------------------------------------------
 
 class ZohoIMAPSource(Source):
@@ -237,7 +294,7 @@ class ZohoIMAPSource(Source):
             # readonly=True: leer la bandeja para ingesta NO debe marcar los
             # correos como leidos. Sin esto, la primera corrida del cron le
             # vacia la cola de pendientes al cliente y nadie entiende por que.
-            con.select(carpeta, readonly=True)
+            _seleccionar(con, carpeta)
 
             ok, datos = con.search(None, criterio)
             if ok != "OK":
