@@ -45,11 +45,15 @@ from .google_sheets import GoogleSheetsSource  # noqa: E402
 from .google_calendar import GoogleCalendarSource  # noqa: E402
 from .csv_url import CSVURLSource               # noqa: E402
 from .api_rest import ApiRestSource             # noqa: E402
+from .zoho_imap import ZohoIMAPSource           # noqa: E402
 
 registrar(GoogleSheetsSource)
 registrar(GoogleCalendarSource)
 registrar(CSVURLSource)
 registrar(ApiRestSource)
+# Zoho por IMAP: solo stdlib (imaplib + email), asi que no va en un try/except
+# como las opcionales — no hay dependencia que pueda faltar.
+registrar(ZohoIMAPSource)
 
 # SharePoint/Excel es opcional: necesita openpyxl para leer .xlsx. Si no esta
 # instalado, los tipos simplemente no se registran y las demas fuentes siguen
