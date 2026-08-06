@@ -207,6 +207,23 @@ class Destino(ABC):
             f"El destino '{self.tipo}' no soporta UPSERT de Google Calendar."
         )
 
+    def actualizar_correos_zoho(
+        self,
+        esquema: str,
+        tabla_actual: str,
+        df: "pd.DataFrame",
+        corrida: Corrida,
+    ) -> dict:
+        """
+        Crea la tabla de correos si falta y luego hace UPSERT acumulativo.
+
+        La ventana IMAP solo limita lo que se relee; nunca autoriza a borrar
+        del warehouse los correos que ya quedaron fuera de esa ventana.
+        """
+        raise NotImplementedError(
+            f"El destino '{self.tipo}' no soporta UPSERT de Zoho IMAP."
+        )
+
     def __repr__(self):
         return f"<{self.__class__.__name__} tipo={self.tipo}>"
 
