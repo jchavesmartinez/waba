@@ -29,13 +29,15 @@ import imaplib
 import duckdb
 import pytest
 
-from sources.zoho_imap import (ZohoIMAPSource, _cuerpo_y_adjuntos,
+from sources.zoho_imap import (ZohoIMAPSource, _correo_id, _cuerpo_y_adjuntos,
                                _partir_remitente, _texto_encabezado)
 
 
 def _correo_completo():
     m = MIMEMultipart("mixed")
     m["From"] = str(Header("Ferretería Solano <Ventas@Solano.CO.CR>", "utf-8"))
+    m["To"] = "compras.uno@gmail.com"
+    m["Message-ID"] = "<factura-1053@solano.co.cr>"
     m["Subject"] = str(Header("Factura de julio — pedido N° 1053", "utf-8"))
     m["Date"] = "Mon, 03 Aug 2026 14:22:11 -0600"
     alt = MIMEMultipart("alternative")
@@ -53,6 +55,8 @@ def _correo_solo_html():
     m = MIMEText("<html><script>x=1</script><p>Pedido <b>listo</b></p></html>",
                  "html", "utf-8")
     m["From"] = "ERP <noreply@erp.cr>"
+    m["To"] = "compras.dos@gmail.com"
+    m["Message-ID"] = "<pedido-listo@erp.cr>"
     m["Subject"] = "Notificación"
     m["Date"] = "Tue, 04 Aug 2026 09:00:00 -0600"
     return m.as_bytes()
@@ -105,6 +109,13 @@ class IMAPFalso:
 
     def fetch(self, i, spec):
         return "OK", [(b"1 (RFC822 {n}", self.mensajes[i]), b")"]
+
+    def uid(self, comando, *args):
+        if comando.lower() == "search":
+            return self.search(*args)
+        if comando.lower() == "fetch":
+            return self.fetch(*args)
+        raise AssertionError(f"comando UID inesperado: {comando}")
 
     def logout(self):
         self.deslogueado = True
@@ -167,6 +178,38 @@ def test_la_fecha_queda_como_timestamp(fuente):
     tipo = con.execute(
         f"SELECT typeof(fecha) FROM {frag.tablas[0]} LIMIT 1").fetchone()[0]
     assert "TIMESTAMP" in tipo.upper()
+
+
+def test_guarda_identidad_buzon_y_gmail_destinatario(fuente):
+    con = duckdb.connect()
+    frag = fuente.cargar(con)
+    filas = con.execute(
+        f"SELECT correo_id, message_id, buzon, carpeta, destinatarios "
+        f"FROM {frag.tablas[0]} ORDER BY uid"
+    ).fetchall()
+
+    assert len(filas[0][0]) == 64
+    assert filas[0][1] == "<factura-1053@solano.co.cr>"
+    assert filas[0][2:5] == (
+        "jose@fachavi.com", "INBOX", "compras.uno@gmail.com"
+    )
+    assert filas[1][4] == "compras.dos@gmail.com"
+
+
+def test_identidad_distingue_dos_gmail_y_no_depende_del_uid():
+    uno = MIMEText("mismo contenido", "plain", "utf-8")
+    uno["Message-ID"] = "<mensaje-compartido@proveedor.com>"
+    uno["To"] = "compras.uno@gmail.com"
+    dos = MIMEText("mismo contenido", "plain", "utf-8")
+    dos["Message-ID"] = "<mensaje-compartido@proveedor.com>"
+    dos["To"] = "compras.dos@gmail.com"
+
+    id_uno = _correo_id(uno, "central@fachavi.com", "INBOX", "10")
+    id_uno_releido = _correo_id(uno, "central@fachavi.com", "INBOX", "999")
+    id_dos = _correo_id(dos, "central@fachavi.com", "INBOX", "11")
+
+    assert id_uno == id_uno_releido
+    assert id_uno != id_dos
 
 
 # --- No romper la bandeja del cliente ------------------------------------
