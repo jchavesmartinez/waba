@@ -5,6 +5,11 @@ Convierte los correos de una carpeta en una tabla consultable, para que el bot
 pueda responder cosas como "cuantos correos me mando el proveedor X este mes" o
 "buscame el correo del pedido 1053".
 
+La ventana configurada con ``dias`` es solamente la ventana de LECTURA. El
+warehouse conserva el historial acumulado: crea la tabla en la primera corrida
+y, en las siguientes, inserta correos nuevos o actualiza el mismo correo si ya
+existia. Que un correo deje de aparecer en la ventana IMAP no lo elimina.
+
 Config esperada (JSON en la columna 'config' del registro):
 
   {"usuario": "jose@fachavi.com",
@@ -42,7 +47,9 @@ lineas; leer un correo de verdad no:
 """
 
 import email
+import hashlib
 import imaplib
+import json
 import logging
 import os
 import re
@@ -66,6 +73,26 @@ HOST_DEFECTO = "imap.zoho.com"
 PUERTO_DEFECTO = 993
 TOPE_DEFECTO = 500
 MAX_CHARS_CUERPO = 2000
+
+# Contrato estable entre el conector y los destinos acumulativos. Mantenerlo
+# aca evita que Postgres y DuckDB adivinen columnas a partir de una ventana que
+# puede venir vacia.
+CAMPOS_CORREO = (
+    "correo_id",
+    "message_id",
+    "buzon",
+    "carpeta",
+    "uid",
+    "fecha",
+    "remitente_nombre",
+    "remitente_correo",
+    "destinatarios",
+    "cc",
+    "asunto",
+    "cuerpo",
+    "n_adjuntos",
+    "adjuntos",
+)
 
 _MESES_IMAP = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -136,6 +163,83 @@ def _partir_remitente(valor: str):
         return "", ""
     nombre, correo = pares[0]
     return nombre.strip(), (correo or "").strip().lower()
+
+
+def _direcciones(*valores) -> str:
+    """Normaliza una o varias cabeceras de direcciones, sin duplicados."""
+    pares = getaddresses([_texto_encabezado(v) for v in valores if v])
+    correos = []
+    for _nombre, correo in pares:
+        correo = (correo or "").strip().lower()
+        if correo and correo not in correos:
+            correos.append(correo)
+    return ", ".join(correos)
+
+
+def _destinatarios(msg) -> str:
+    """Incluye cabeceras que Gmail suele conservar durante el reenvio."""
+    valores = []
+    for encabezado in ("To", "Delivered-To", "X-Original-To", "X-Forwarded-To"):
+        valores.extend(msg.get_all(encabezado, []))
+    return _direcciones(*valores)
+
+
+def _correo_id(msg, buzon: str, carpeta: str, uid: str) -> str:
+    """
+    Identidad estable para UPSERT.
+
+    Message-ID identifica el mensaje aunque se vuelva a leer en otra corrida.
+    Se incluye To porque un mismo mensaje puede llegar por dos cuentas Gmail
+    distintas que reenvian al mismo Zoho. Si el emisor omitio Message-ID, se
+    cae al UID IMAP real, acotado por buzon y carpeta.
+    """
+    message_id = _texto_encabezado(msg.get("Message-ID")).strip().lower()
+    destinatarios = _destinatarios(msg)
+    if message_id:
+        base = f"message-id\0{message_id}\0{destinatarios}"
+    else:
+        base = f"imap-uid\0{buzon.strip().lower()}\0{carpeta}\0{uid}"
+    return hashlib.sha256(base.encode("utf-8", errors="replace")).hexdigest()
+
+
+def limpiar_valor_correo(valor):
+    """Convierte valores pandas/numpy a tipos aceptados por los drivers SQL."""
+    if valor is None:
+        return None
+    try:
+        vacio = pd.isna(valor)
+        if isinstance(vacio, bool) and vacio:
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(valor, "to_pydatetime"):
+        return valor.to_pydatetime()
+    if hasattr(valor, "item"):
+        try:
+            return valor.item()
+        except (ValueError, TypeError):
+            pass
+    return valor
+
+
+def fila_correo(serie) -> dict:
+    """Proyecta una fila entrante al contrato de correo acumulativo."""
+    return {c: limpiar_valor_correo(serie.get(c)) for c in CAMPOS_CORREO}
+
+
+def hash_correo(fila: dict) -> str:
+    """Huella de contenido para no reescribir correos que no cambiaron."""
+    normalizado = {}
+    for campo in CAMPOS_CORREO:
+        valor = limpiar_valor_correo(fila.get(campo))
+        if isinstance(valor, (datetime, date)):
+            valor = valor.isoformat()
+        normalizado[campo] = valor
+    crudo = json.dumps(
+        normalizado, ensure_ascii=False, sort_keys=True, default=str,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(crudo.encode("utf-8")).hexdigest()
 
 
 def _seleccionar(con, carpeta: str):
@@ -225,10 +329,7 @@ class ZohoIMAPSource(Source):
         alertas = []
         correos, truncado = self._bajar(usuario, password, alertas)
 
-        df = pd.DataFrame(correos, columns=[
-            "uid", "fecha", "remitente_nombre", "remitente_correo",
-            "asunto", "cuerpo", "n_adjuntos", "adjuntos",
-        ])
+        df = pd.DataFrame(correos, columns=list(CAMPOS_CORREO))
         # inferir_tipos NO se usa aca a proposito: los tipos ya salen correctos
         # del parseo (fecha es datetime real, n_adjuntos es int) y pasar el
         # cuerpo de un correo por el detector de numeros y fechas solo puede
@@ -296,7 +397,10 @@ class ZohoIMAPSource(Source):
             # vacia la cola de pendientes al cliente y nadie entiende por que.
             _seleccionar(con, carpeta)
 
-            ok, datos = con.search(None, criterio)
+            # SEARCH/FETCH sin el prefijo UID usan numeros de secuencia, que
+            # cambian cuando se borra o mueve un correo. Para deduplicar entre
+            # corridas necesitamos el UID persistente de IMAP.
+            ok, datos = con.uid("search", None, criterio)
             if ok != "OK":
                 raise RuntimeError(
                     f"Busqueda IMAP rechazada ({criterio}): {datos}"
@@ -311,7 +415,7 @@ class ZohoIMAPSource(Source):
                         self.fuente_id, total, criterio, len(ids))
 
             for i in ids:
-                ok, cruda = con.fetch(i, "(RFC822)")
+                ok, cruda = con.uid("fetch", i, "(RFC822)")
                 if ok != "OK" or not cruda or not isinstance(cruda[0], tuple):
                     continue
                 msg = email.message_from_bytes(cruda[0][1])
@@ -323,11 +427,18 @@ class ZohoIMAPSource(Source):
 
                 cuerpo, adj = _cuerpo_y_adjuntos(msg)
                 nombre, correo = _partir_remitente(msg.get("From"))
+                uid = i.decode()
                 filas.append({
-                    "uid": i.decode(),
+                    "correo_id": _correo_id(msg, usuario, carpeta, uid),
+                    "message_id": _texto_encabezado(msg.get("Message-ID")).strip(),
+                    "buzon": usuario.strip().lower(),
+                    "carpeta": carpeta,
+                    "uid": uid,
                     "fecha": fecha,
                     "remitente_nombre": nombre,
                     "remitente_correo": correo,
+                    "destinatarios": _destinatarios(msg),
+                    "cc": _direcciones(msg.get("Cc")),
                     "asunto": _texto_encabezado(msg.get("Subject")),
                     # El cuerpo se recorta: una cadena de respuestas de 40 KB
                     # infla el warehouse y, peor, entra al prompt de redaccion.
@@ -353,6 +464,9 @@ class ZohoIMAPSource(Source):
                       f"de {self.config.get('usuario','')}. El cuerpo esta "
                       f"recortado y NO incluye el contenido de los adjuntos."),
             fila("fecha", "Fecha de envio del correo, sin zona horaria."),
+            fila("destinatarios", "Direcciones del encabezado To. Permite "
+                                  "distinguir cual Gmail recibio el correo "
+                                  "antes de reenviarlo a Zoho."),
             fila("remitente_correo", "Direccion del remitente, en minusculas. "
                                      "Usar esta y no remitente_nombre para agrupar."),
             fila("asunto", "Asunto ya decodificado."),
