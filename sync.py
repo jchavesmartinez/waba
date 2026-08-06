@@ -30,6 +30,7 @@ from datetime import timedelta
 import duckdb
 
 from sources.google_calendar import CAMPOS_EVENTO
+from sources.zoho_imap import CAMPOS_CORREO
 import catalogo_cliente
 import config
 import registry
@@ -144,6 +145,106 @@ def _sincronizar_google_calendar(
     return corrida
 
 
+def _sincronizar_zoho_imap(
+    destino,
+    cliente: dict,
+    fuente: dict,
+    corrida: Corrida,
+    fresca: bool,
+    probar: bool,
+) -> Corrida:
+    """
+    Ruta acumulativa de correo.
+
+    ``dias`` limita la ventana que se vuelve a leer desde Zoho, no el historial
+    guardado. La tabla se crea si falta; si existe, los correos nuevos se
+    agregan y los ya vistos se actualizan en su misma identidad.
+    """
+    cid = cliente["cliente_id"]
+    fid = fuente["fuente_id"]
+    esquema = nombre_esquema(cid)
+    tabla_logica = fuente.get("config", {}).get("tabla") or "correos"
+    actual = nombre_tabla(fid, tabla_logica)
+
+    if fresca:
+        corrida.tablas = [f"{esquema}.{actual}"]
+        corrida.tablas_logicas = {tabla_logica}
+        corrida.estado = "omitido"
+        corrida.detalle = destino.ultimo_detalle(cid, fid)
+        corrida.fin = ahora_utc()
+        logger.info("[%s/%s] OMITIDO: Zoho IMAP sigue fresco", cid, fid)
+        return corrida
+
+    tmp = duckdb.connect(database=":memory:")
+    try:
+        obj = crear_fuente("zoho_imap", fid, dict(fuente.get("config", {})))
+        frag = obj.cargar(tmp)
+        if len(frag.tablas) != 1:
+            raise RuntimeError(
+                f"Zoho IMAP debe producir una tabla; produjo {len(frag.tablas)}"
+            )
+        corrida.alertas += list(getattr(frag, "alertas", []))
+        tabla_logica = frag.tablas[0]
+        actual = nombre_tabla(fid, tabla_logica)
+        df = tmp.execute(f'SELECT * FROM "{tabla_logica}"').df()
+        corrida.filas = len(df)
+
+        cols_actual = list(CAMPOS_CORREO) + [
+            "version_hash",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+            "visto_por_ultima_vez",
+        ]
+        if probar:
+            logger.info(
+                "[PRUEBA] %s.%s: %d correos en la ventana; no se escribe data",
+                esquema,
+                actual,
+                len(df),
+            )
+            stats = {
+                "actual_total": len(df),
+                "nuevos": len(df),
+                "actualizados": 0,
+                "sin_cambios": 0,
+            }
+        else:
+            stats = destino.actualizar_correos_zoho(
+                esquema, actual, df, corrida
+            )
+
+        corrida.detalle = {
+            actual: {
+                "columnas": cols_actual,
+                "filas": int(stats["actual_total"]),
+            },
+        }
+        corrida.tablas = [f"{esquema}.{actual}"]
+        corrida.tablas_logicas = {tabla_logica}
+        corrida.estado = "ok_con_alertas" if corrida.alertas else "ok"
+        logger.info(
+            "[%s/%s] %s: %d correos leidos; %d nuevos, %d actualizados, "
+            "%d sin cambios; %d acumulados",
+            cid,
+            fid,
+            corrida.estado.upper(),
+            len(df),
+            stats["nuevos"],
+            stats["actualizados"],
+            stats["sin_cambios"],
+            stats["actual_total"],
+        )
+    except Exception as e:  # noqa: BLE001
+        corrida.estado = "error"
+        corrida.error = f"{type(e).__name__}: {e}"
+        logger.exception("[%s/%s] FALLO: %s", cid, fid, e)
+    finally:
+        tmp.close()
+        corrida.fin = ahora_utc()
+    return corrida
+
+
 def _esta_fresca(destino, cliente_id, fuente) -> bool:
     """True si la fuente se sincronizo hace menos de 'frescura_minutos'."""
     minutos = int(fuente.get("frescura_minutos", 0) or 0)
@@ -230,6 +331,11 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
 
     if fuente.get("tipo") == "google_calendar":
         return _sincronizar_google_calendar(
+            destino, cliente, fuente, corrida, fresca, probar
+        )
+
+    if fuente.get("tipo") == "zoho_imap":
+        return _sincronizar_zoho_imap(
             destino, cliente, fuente, corrida, fresca, probar
         )
 
