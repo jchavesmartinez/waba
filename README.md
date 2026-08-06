@@ -88,6 +88,15 @@ Una pestaña `usuarios` puede existir para el futuro bot; la ingesta la ignora.
   Trae una copia de solo lectura; la base del cliente no se toca. Acepta
   `{"where":{"ventas":"fecha >= current_date - 90"}}` para no copiar la tabla
   entera en cada corrida.
+- **`zoho_imap`** →
+  `{"usuario":"central@fachavi.com","password_env":"ZOHO_PASSWORD_CLIENTE_A","carpeta":"INBOX/Cliente A","dias":30,"tabla":"correos"}`
+  Lee el buzon en modo solo lectura. `dias` es una ventana de consulta, **no de
+  retencion**: la primera corrida crea la tabla y las siguientes hacen UPSERT,
+  agregando correos nuevos sin borrar los que ya superaron los 30 dias. Releer
+  la misma ventana no duplica mensajes. Si dos cuentas Gmail reenvian a esa
+  carpeta de Zoho, ambas quedan acumuladas en la misma tabla y la columna
+  `destinatarios` permite distinguir el Gmail original cuando viene en `To`.
+  El secreto vive en la variable indicada por `password_env`.
 
 > **Los secretos de los conectores tampoco van en el Sheet.** La regla es la
 > misma que para el warehouse: la celda `config` lleva el **nombre de la
@@ -212,7 +221,7 @@ Para darle a `cliente_a` su propio proyecto basta con agregar
 | `config.py` | Config desde variables de entorno + resolución de DSN por cliente |
 | `sources/base.py` | Contrato `Source` + helpers compartidos |
 | `sources/__init__.py` | Registro de tipos de fuente + factory |
-| `sources/google_sheets.py`, `csv_url.py`, `api_rest.py`, `postgres.py` | Connectors |
+| `sources/google_sheets.py`, `csv_url.py`, `api_rest.py`, `postgres.py`, `zoho_imap.py` | Connectors |
 | `warehouse/base.py` | Contrato `Destino` |
 | `warehouse/duckdb_dest.py` | DuckDB local / MotherDuck |
 | `warehouse/postgres_dest.py` | Neon / Supabase / Postgres |
