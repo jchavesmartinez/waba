@@ -28,6 +28,12 @@ from sources.google_calendar import (
     hash_evento,
     limpiar_valor,
 )
+from sources.zoho_imap import (
+    CAMPOS_CORREO,
+    fila_correo,
+    hash_correo,
+    limpiar_valor_correo,
+)
 import config
 from .base import Destino, Corrida, ESQUEMA_META, TABLA_CORRIDAS
 
@@ -63,6 +69,23 @@ _TIPOS_EVENTO = {
     "invitados": "TEXT",
     "propiedades": "TEXT",
     "raw_evento": "TEXT",
+}
+
+_TIPOS_CORREO = {
+    "correo_id": "TEXT",
+    "message_id": "TEXT",
+    "buzon": "TEXT",
+    "carpeta": "TEXT",
+    "uid": "TEXT",
+    "fecha": "TIMESTAMP",
+    "remitente_nombre": "TEXT",
+    "remitente_correo": "TEXT",
+    "destinatarios": "TEXT",
+    "cc": "TEXT",
+    "asunto": "TEXT",
+    "cuerpo": "TEXT",
+    "n_adjuntos": "BIGINT",
+    "adjuntos": "TEXT",
 }
 
 
@@ -308,6 +331,182 @@ class PostgresDestino(Destino):
 
         logger.info(
             "Calendar %s.%s: %d nuevos, %d actualizados, %d sin cambios; "
+            "%d acumulados",
+            esquema,
+            tabla,
+            stats["nuevos"],
+            stats["actualizados"],
+            stats["sin_cambios"],
+            stats["actual_total"],
+        )
+        return stats
+
+    # --- Zoho IMAP: create inicial + UPSERT acumulativo -----------------
+
+    def _asegurar_tabla_correos(
+        self, esquema: str, tabla: str
+    ) -> tuple[str, str]:
+        """Crea la tabla una vez o amplia el snapshot legado en el mismo lugar."""
+        esquema = _ident(esquema)
+        tabla = _ident(tabla)
+        self.asegurar_esquema(esquema)
+        definiciones = {
+            **_TIPOS_CORREO,
+            "version_hash": "TEXT",
+            "_corrida_id": "TEXT",
+            "_fuente_id": "TEXT",
+            "_ingestado_en": "TIMESTAMPTZ",
+            "visto_por_ultima_vez": "TIMESTAMPTZ",
+        }
+
+        with self.conectar().begin() as cx:
+            existe = cx.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema=:e AND table_name=:t)"
+                ),
+                {"e": esquema, "t": tabla},
+            ).scalar()
+            if not existe:
+                columnas = ", ".join(
+                    f'"{nombre}" {tipo}' for nombre, tipo in definiciones.items()
+                )
+                cx.execute(text(
+                    f'CREATE TABLE "{esquema}"."{tabla}" ({columnas})'
+                ))
+            else:
+                # Migracion sin DROP/RENAME: conserva toda fila historica que
+                # dejo la implementacion anterior de full refresh.
+                for nombre, tipo in definiciones.items():
+                    cx.execute(text(
+                        f'ALTER TABLE "{esquema}"."{tabla}" '
+                        f'ADD COLUMN IF NOT EXISTS "{nombre}" {tipo}'
+                    ))
+        return esquema, tabla
+
+    def actualizar_correos_zoho(
+        self,
+        esquema: str,
+        tabla: str,
+        df: pd.DataFrame,
+        corrida: Corrida,
+    ) -> dict:
+        """Inserta/actualiza la ventana IMAP sin borrar correos mas antiguos."""
+        esquema, tabla = self._asegurar_tabla_correos(esquema, tabla)
+        ahora = datetime.now(timezone.utc)
+        campos_lectura = list(CAMPOS_CORREO) + ["version_hash"]
+        columnas = list(CAMPOS_CORREO) + [
+            "version_hash",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+            "visto_por_ultima_vez",
+        ]
+        seleccion = ", ".join(f'"{c}"' for c in campos_lectura)
+
+        entrantes = {}
+        for _, serie in df.iterrows():
+            fila = fila_correo(serie)
+            clave = fila.get("correo_id")
+            if not clave:
+                raise RuntimeError("Zoho IMAP devolvio un correo sin correo_id")
+            entrantes[clave] = fila
+
+        stats = {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+        with self.conectar().begin() as cx:
+            # Dos cron concurrentes no pueden decidir al mismo tiempo que el
+            # mismo correo es nuevo.
+            cx.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:nombre))"),
+                {"nombre": f"{esquema}.{tabla}:zoho_imap"},
+            )
+            por_id, por_uid, legado_por_uid = {}, {}, {}
+            for existente in cx.execute(
+                text(f'SELECT {seleccion} FROM "{esquema}"."{tabla}"')
+            ).mappings():
+                fila = dict(existente)
+                if fila.get("correo_id"):
+                    por_id[fila["correo_id"]] = fila
+                if fila.get("buzon") and fila.get("carpeta") and fila.get("uid"):
+                    por_uid[(fila["buzon"], fila["carpeta"], fila["uid"])] = fila
+                elif fila.get("uid"):
+                    # Snapshot creado por la version anterior: solo tenia uid.
+                    legado_por_uid[fila["uid"]] = fila
+
+            nombres = ", ".join(f'"{c}"' for c in columnas)
+            binds = ", ".join(f":{c}" for c in columnas)
+
+            for clave, entrante in entrantes.items():
+                clave_uid = (
+                    entrante.get("buzon"),
+                    entrante.get("carpeta"),
+                    entrante.get("uid"),
+                )
+                anterior = (
+                    por_id.get(clave)
+                    or por_uid.get(clave_uid)
+                    or legado_por_uid.get(entrante.get("uid"))
+                )
+                version = hash_correo(entrante)
+                identidad = {
+                    "correo_id": clave,
+                    "buzon": entrante.get("buzon"),
+                    "carpeta": entrante.get("carpeta"),
+                    "uid": entrante.get("uid"),
+                }
+                donde = (
+                    "correo_id=:correo_id OR "
+                    "(buzon=:buzon AND carpeta=:carpeta AND uid=:uid) OR "
+                    "(correo_id IS NULL AND uid=:uid)"
+                )
+
+                if anterior and anterior.get("version_hash") == version:
+                    cx.execute(
+                        text(
+                            f'UPDATE "{esquema}"."{tabla}" SET '
+                            "visto_por_ultima_vez=:ahora, "
+                            "_corrida_id=:corrida, _fuente_id=:fuente, "
+                            f'_ingestado_en=:ahora WHERE {donde}'
+                        ),
+                        {
+                            **identidad,
+                            "ahora": ahora,
+                            "corrida": corrida.corrida_id,
+                            "fuente": corrida.fuente_id,
+                        },
+                    )
+                    stats["sin_cambios"] += 1
+                    continue
+
+                stats["actualizados" if anterior else "nuevos"] += 1
+                if anterior:
+                    cx.execute(
+                        text(f'DELETE FROM "{esquema}"."{tabla}" WHERE {donde}'),
+                        identidad,
+                    )
+
+                actual = {
+                    **{c: limpiar_valor_correo(entrante.get(c)) for c in CAMPOS_CORREO},
+                    "version_hash": version,
+                    "_corrida_id": corrida.corrida_id,
+                    "_fuente_id": corrida.fuente_id,
+                    "_ingestado_en": ahora,
+                    "visto_por_ultima_vez": ahora,
+                }
+                cx.execute(
+                    text(
+                        f'INSERT INTO "{esquema}"."{tabla}" '
+                        f"({nombres}) VALUES ({binds})"
+                    ),
+                    actual,
+                )
+
+            stats["actual_total"] = cx.execute(
+                text(f'SELECT COUNT(*) FROM "{esquema}"."{tabla}"')
+            ).scalar()
+
+        logger.info(
+            "Zoho %s.%s: %d nuevos, %d actualizados, %d sin cambios; "
             "%d acumulados",
             esquema,
             tabla,

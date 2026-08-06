@@ -35,6 +35,12 @@ from sources.google_calendar import (
     hash_evento,
     limpiar_valor,
 )
+from sources.zoho_imap import (
+    CAMPOS_CORREO,
+    fila_correo,
+    hash_correo,
+    limpiar_valor_correo,
+)
 from .base import Destino, Corrida, ESQUEMA_META, TABLA_CORRIDAS
 
 logger = logging.getLogger("fachavi.warehouse.duckdb")
@@ -69,6 +75,23 @@ _TIPOS_EVENTO = {
     "invitados": "VARCHAR",
     "propiedades": "VARCHAR",
     "raw_evento": "VARCHAR",
+}
+
+_TIPOS_CORREO = {
+    "correo_id": "VARCHAR",
+    "message_id": "VARCHAR",
+    "buzon": "VARCHAR",
+    "carpeta": "VARCHAR",
+    "uid": "VARCHAR",
+    "fecha": "TIMESTAMP",
+    "remitente_nombre": "VARCHAR",
+    "remitente_correo": "VARCHAR",
+    "destinatarios": "VARCHAR",
+    "cc": "VARCHAR",
+    "asunto": "VARCHAR",
+    "cuerpo": "VARCHAR",
+    "n_adjuntos": "BIGINT",
+    "adjuntos": "VARCHAR",
 }
 
 
@@ -243,6 +266,157 @@ class DuckDBDestino(Destino):
         ).fetchone()[0]
         logger.info(
             "Calendar %s.%s: %d nuevos, %d actualizados, %d sin cambios; "
+            "%d acumulados",
+            esquema,
+            tabla,
+            stats["nuevos"],
+            stats["actualizados"],
+            stats["sin_cambios"],
+            stats["actual_total"],
+        )
+        return stats
+
+    # --- Zoho IMAP: create inicial + UPSERT acumulativo -----------------
+
+    def _asegurar_tabla_correos(self, esquema: str, tabla: str) -> None:
+        con = self.conectar()
+        self.asegurar_esquema(esquema)
+        definiciones = {
+            **_TIPOS_CORREO,
+            "version_hash": "VARCHAR",
+            "_corrida_id": "VARCHAR",
+            "_fuente_id": "VARCHAR",
+            "_ingestado_en": "TIMESTAMPTZ",
+            "visto_por_ultima_vez": "TIMESTAMPTZ",
+        }
+        if not self._tabla_existe(esquema, tabla):
+            columnas = ", ".join(
+                f'"{nombre}" {tipo}' for nombre, tipo in definiciones.items()
+            )
+            con.execute(f'CREATE TABLE "{esquema}"."{tabla}" ({columnas})')
+            return
+
+        # La primera corrida con esta version migra el snapshot EN SU MISMA
+        # tabla y conserva todas las filas que ya existian.
+        for nombre, tipo in definiciones.items():
+            con.execute(
+                f'ALTER TABLE "{esquema}"."{tabla}" '
+                f'ADD COLUMN IF NOT EXISTS "{nombre}" {tipo}'
+            )
+
+    def actualizar_correos_zoho(
+        self,
+        esquema: str,
+        tabla: str,
+        df: pd.DataFrame,
+        corrida: Corrida,
+    ) -> dict:
+        """Inserta/actualiza la ventana IMAP sin borrar correos mas antiguos."""
+        con = self.conectar()
+        self._asegurar_tabla_correos(esquema, tabla)
+        ahora = datetime.now(timezone.utc)
+        campos_lectura = list(CAMPOS_CORREO) + ["version_hash"]
+        seleccion = ", ".join(f'"{c}"' for c in campos_lectura)
+        columnas = list(CAMPOS_CORREO) + [
+            "version_hash",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+            "visto_por_ultima_vez",
+        ]
+
+        por_id, por_uid, legado_por_uid = {}, {}, {}
+        for valores in con.execute(
+            f'SELECT {seleccion} FROM "{esquema}"."{tabla}"'
+        ).fetchall():
+            fila = dict(zip(campos_lectura, valores))
+            if fila.get("correo_id"):
+                por_id[fila["correo_id"]] = fila
+            if fila.get("buzon") and fila.get("carpeta") and fila.get("uid"):
+                por_uid[(fila["buzon"], fila["carpeta"], fila["uid"])] = fila
+            elif fila.get("uid"):
+                legado_por_uid[fila["uid"]] = fila
+
+        entrantes = {}
+        for _, serie in df.iterrows():
+            fila = fila_correo(serie)
+            clave = fila.get("correo_id")
+            if not clave:
+                raise RuntimeError("Zoho IMAP devolvio un correo sin correo_id")
+            entrantes[clave] = fila
+
+        stats = {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+        nombres = ", ".join(f'"{c}"' for c in columnas)
+        marcas = ", ".join("?" for _ in columnas)
+        donde = (
+            "correo_id=? OR (buzon=? AND carpeta=? AND uid=?) OR "
+            "(correo_id IS NULL AND uid=?)"
+        )
+
+        con.execute("BEGIN TRANSACTION")
+        try:
+            for clave, entrante in entrantes.items():
+                clave_uid = (
+                    entrante.get("buzon"),
+                    entrante.get("carpeta"),
+                    entrante.get("uid"),
+                )
+                anterior = (
+                    por_id.get(clave)
+                    or por_uid.get(clave_uid)
+                    or legado_por_uid.get(entrante.get("uid"))
+                )
+                version = hash_correo(entrante)
+                identidad = [
+                    clave,
+                    entrante.get("buzon"),
+                    entrante.get("carpeta"),
+                    entrante.get("uid"),
+                    entrante.get("uid"),
+                ]
+
+                if anterior and anterior.get("version_hash") == version:
+                    con.execute(
+                        f'UPDATE "{esquema}"."{tabla}" SET '
+                        "visto_por_ultima_vez=?, _corrida_id=?, _fuente_id=?, "
+                        f'_ingestado_en=? WHERE {donde}',
+                        [ahora, corrida.corrida_id, corrida.fuente_id, ahora,
+                         *identidad],
+                    )
+                    stats["sin_cambios"] += 1
+                    continue
+
+                stats["actualizados" if anterior else "nuevos"] += 1
+                if anterior:
+                    con.execute(
+                        f'DELETE FROM "{esquema}"."{tabla}" WHERE {donde}',
+                        identidad,
+                    )
+
+                valores = [
+                    limpiar_valor_correo(entrante.get(c)) for c in CAMPOS_CORREO
+                ]
+                con.execute(
+                    f'INSERT INTO "{esquema}"."{tabla}" '
+                    f"({nombres}) VALUES ({marcas})",
+                    valores + [
+                        version,
+                        corrida.corrida_id,
+                        corrida.fuente_id,
+                        ahora,
+                        ahora,
+                    ],
+                )
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+        stats["actual_total"] = con.execute(
+            f'SELECT COUNT(*) FROM "{esquema}"."{tabla}"'
+        ).fetchone()[0]
+        logger.info(
+            "Zoho %s.%s: %d nuevos, %d actualizados, %d sin cambios; "
             "%d acumulados",
             esquema,
             tabla,
