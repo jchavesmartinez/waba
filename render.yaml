@@ -66,8 +66,16 @@ services:
       # - key: ZOHO_PASSWORD_FERRETERIA_A
       #   sync: false
       # Token de System User del Business Manager, permiso ads_read, con la
-      # cuenta publicitaria asignada como activo. Uno por cliente.
-      # - key: META_ADS_TOKEN_FERRETERIA_A
+      # cuenta publicitaria asignada como activo.
+      # FORMA 1 (acceso de socio hacia tu BM): UNO solo para todos los
+      # clientes; el mismo nombre va en el "token_env" de cada fila.
+      # - key: META_ADS_TOKEN_FACHAVI
+      #   sync: false
+      # FORMA 2 (cada cliente emite el suyo): UN solo secreto con todos los
+      # tokens adentro, {"cliente_a":"EAAG...","cliente_b":"EAAH..."}, y en el
+      # registro cada fila declara {"token_ref":"cliente_a"}. Asi dar de alta
+      # un cliente no obliga a crear una variable nueva.
+      # - key: META_ADS_TOKENS
       #   sync: false
 
   # --- BOT de WhatsApp (capa de lectura) ---

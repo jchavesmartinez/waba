@@ -54,11 +54,28 @@ Opcionales:
   "max_paginas": 50                -> tope de paginacion
   "api_version": "v21.0"           -> por defecto GRAPH_API_VERSION de config
 
-EL TOKEN NO VA EN EL REGISTRO. 'token_env' es el NOMBRE de una variable de
-entorno, igual que 'password_env' en zoho_imap y 'dsn_env' en el warehouse. Un
-token de Meta con permiso ads_read escrito en una hoja de calculo compartida es
-una fuga esperando turno, y el historial de versiones de Google lo guarda para
-siempre aunque despues se borre la celda.
+EL TOKEN NO VA EN EL REGISTRO. Hay dos formas de declararlo, y ninguna escribe
+el secreto en la hoja:
+
+  {"token_env": "META_ADS_TOKEN_FACHAVI"}
+      Una variable de entorno dedicada. Es lo que corresponde cuando UN token
+      sirve para todos los clientes — el caso normal si los clientes le dan
+      acceso de socio a TU Business Manager. El mismo token_env se repite en
+      todas las filas.
+
+  {"token_ref": "cliente_a"}
+      Un SOLO secreto en el servidor con el token de cada cliente adentro:
+          META_ADS_TOKENS = {"cliente_a":"EAAG...","cliente_b":"EAAH..."}
+      Sirve cuando cada cliente emite su token desde SU propio Business
+      Manager. Dar de alta un cliente es agregar una clave al JSON, no crear
+      una variable nueva. El nombre del mapa se puede cambiar con "tokens_env".
+
+Por que no se acepta el token literal en la hoja, aunque sea comodo: el
+historial de versiones de Google lo conserva para siempre aunque despues se
+borre la celda, la hoja se comparte con mucha ligereza, y un token de System
+User con ads_read NO CADUCA. Ademas, en el modelo de acceso de socio ese unico
+token abre las cuentas de TODOS los clientes a la vez, asi que filtrarlo no es
+un incidente de un cliente sino de la cartera entera.
 
 Se recomienda un token de SYSTEM USER del Business Manager (no caduca) con
 permiso 'ads_read' y acceso asignado a esa cuenta publicitaria. Un token de
@@ -104,6 +121,10 @@ MAX_PAGINAS_DEFECTO = 50
 LIMITE_POR_PAGINA = 500
 
 NIVELES = ("account", "campaign", "adset", "ad")
+
+# Nombre por convencion del mapa JSON de tokens, para que una fila que solo
+# declara 'token_ref' funcione sin repetir 'tokens_env' en cada cliente.
+TOKENS_ENV_DEFECTO = "META_ADS_TOKENS"
 
 
 # --------------------------------------------------------------------------
@@ -661,15 +682,57 @@ class MetaAdsSource(Source):
         return crudo
 
     def _token(self) -> str:
+        """
+        Resuelve el token de Meta. Dos formas, ninguna con el secreto en el Sheet:
+
+          1. {"token_env": "META_ADS_TOKEN_FACHAVI"}
+             Una variable dedicada. Es lo mas simple cuando UN token sirve para
+             todos los clientes, que es el caso cuando los clientes le dan
+             acceso de socio a TU Business Manager: el mismo token_env se
+             repite en todas las filas del registro.
+
+          2. {"tokens_env": "META_ADS_TOKENS", "token_ref": "cliente_a"}
+             Un solo secreto JSON con el token de cada cliente adentro:
+                 {"cliente_a":"EAAG...","cliente_b":"EAAH..."}
+             Sirve cuando cada cliente emite su propio token desde SU Business
+             Manager. Dar de alta un cliente pasa a ser agregar una clave al
+             JSON en vez de crear una variable de entorno nueva.
+
+        'tokens_env' es opcional si se usa el nombre por convencion
+        META_ADS_TOKENS; basta con declarar 'token_ref'.
+        """
         var = str(self.config.get("token_env", "")).strip()
-        if not var:
-            raise RuntimeError(
-                f"Fuente '{self.fuente_id}': falta 'token_env' con el NOMBRE de "
-                "la variable de entorno que guarda el token de Meta. El token "
-                "no va escrito en el registro."
+        ref = str(self.config.get("token_ref", "")).strip()
+
+        if var and ref:
+            # Las dos a la vez es casi seguro un descuido al copiar la fila de
+            # otro cliente. Gana la explicita, pero no en silencio: si el
+            # token_ref era el bueno, la fuente leeria la cuenta con el token
+            # equivocado y el error (200) no diria nada de esto.
+            logger.warning(
+                "[%s] la config trae 'token_env' Y 'token_ref' a la vez. Se usa "
+                "'token_env' ('%s') y se IGNORA 'token_ref' ('%s'). Deja solo "
+                "una de las dos.", self.fuente_id, var, ref,
             )
-        return config.secreto_de_env(
-            var, para=f"La fuente '{self.fuente_id}' (meta_ads)"
+
+        if var:
+            return config.secreto_de_env(
+                var, para=f"La fuente '{self.fuente_id}' (meta_ads)"
+            )
+        if ref:
+            return config.secreto_de_mapa(
+                str(self.config.get("tokens_env", "")).strip() or TOKENS_ENV_DEFECTO,
+                ref,
+                para=f"La fuente '{self.fuente_id}' (meta_ads)",
+            )
+
+        raise RuntimeError(
+            f"Fuente '{self.fuente_id}': falta el token de Meta. Declara "
+            "'token_env' (nombre de una variable de entorno con el token) o "
+            "'token_ref' (clave dentro del mapa JSON de "
+            f"{TOKENS_ENV_DEFECTO}). El token NO va escrito en el registro: la "
+            "hoja se comparte y su historial de versiones lo guarda para "
+            "siempre aunque despues se borre la celda."
         )
 
     def _nivel(self) -> str:

@@ -10,6 +10,7 @@ Una sola superficie de configuracion: si algo se puede ajustar por variable de
 entorno, esta en este archivo. Ningun otro modulo lee os.environ directamente.
 """
 
+import json
 import logging
 import os
 import re
@@ -45,6 +46,76 @@ def secreto_de_env(nombre_variable: str, para: str = "") -> str:
             "en el servidor."
         )
     return valor
+
+
+def secreto_de_mapa(nombre_variable: str, clave: str, para: str = "") -> str:
+    """
+    Lee UN secreto de una variable de entorno que contiene un OBJETO JSON de
+    {clave: secreto}. Es la version "muchos en una" de secreto_de_env().
+
+        META_ADS_TOKENS = {"cliente_a":"EAAG...","cliente_b":"EAAH..."}
+
+    y en el registro cada fuente declara nada mas su clave:
+
+        {"tokens_env":"META_ADS_TOKENS","token_ref":"cliente_a"}
+
+    POR QUE EXISTE ESTO. La regla del proyecto (C-04) es que el Sheet lleva el
+    NOMBRE de la variable, nunca el secreto. Con una variable POR CLIENTE eso
+    significa entrar al panel de Render cada vez que se da de alta uno nuevo, y
+    esa friccion es exactamente lo que empuja a la tentacion de pegar el token
+    en la hoja "solo por esta vez". Un mapa deja el alta como una fila del
+    Sheet, sin tocar el servidor, y el secreto sigue viviendo donde debe.
+
+    QUE NO HACE. No cifra nada ni reemplaza a un gestor de secretos: sigue
+    siendo una variable de entorno del servidor. Lo que resuelve es la
+    FRICCION operativa, que es lo que en la practica termina rompiendo la
+    regla.
+
+    NUNCA se registra ni se devuelve el contenido en un mensaje de error. Las
+    claves disponibles SI se listan cuando la buscada no aparece, porque son
+    identificadores de cliente (no secretos) y sin ellas depurar un typo
+    obliga a ir a mirar la variable a mano.
+    """
+    nombre = str(nombre_variable).strip()
+    clave = str(clave).strip()
+    quien = para or "La configuracion"
+    if not nombre or not clave:
+        return ""
+
+    crudo = os.environ.get(nombre, "").strip()
+    if not crudo:
+        raise RuntimeError(
+            f"{quien} declara '{nombre}' como la variable de entorno con el "
+            "mapa de secretos, pero esa variable no existe o esta vacia en el "
+            "servidor."
+        )
+
+    try:
+        mapa = json.loads(crudo)
+    except json.JSONDecodeError as e:
+        # A proposito NO se incluye 'crudo' en el mensaje: el error terminaria
+        # en la bitacora del warehouse con todos los tokens adentro.
+        raise RuntimeError(
+            f"La variable '{nombre}' no contiene un JSON valido ({e}). Se "
+            'espera un objeto {"cliente_a":"secreto","cliente_b":"secreto"}. '
+            "Revisa que no haya comillas curvas ni una coma de mas al final."
+        ) from e
+
+    if not isinstance(mapa, dict):
+        raise RuntimeError(
+            f"La variable '{nombre}' debe contener un OBJETO JSON de "
+            f"clave->secreto, no un {type(mapa).__name__}."
+        )
+
+    valor = str(mapa.get(clave, "") or "").strip()
+    if not valor:
+        disponibles = ", ".join(sorted(str(k) for k in mapa)) or "(ninguna)"
+        raise RuntimeError(
+            f"{quien} busca la clave '{clave}' en la variable '{nombre}', pero "
+            f"esa clave no esta o esta vacia. Claves disponibles: {disponibles}."
+        )
+    return valor
+
 
 # --- Google (service account) ---
 # El mismo service account lee el Sheet MAESTRO (registro de clientes/fuentes)

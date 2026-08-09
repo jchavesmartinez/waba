@@ -224,6 +224,85 @@ def test_se_detecta_el_campo_que_meta_rechaza_para_reintentar_sin_el():
     assert _campos_culpables(mensaje, ["spend"]) == set()
 
 
+# --- resolucion del token -------------------------------------------------
+
+MAPA = '{"cliente_a":"EAAG-token-a","cliente_b":"EAAH-token-b"}'
+
+
+def test_token_desde_una_variable_dedicada(monkeypatch):
+    monkeypatch.setenv("META_ADS_TOKEN_FACHAVI", "EAAG-compartido")
+    fuente = _fuente(token_env="META_ADS_TOKEN_FACHAVI")
+    assert fuente._token() == "EAAG-compartido"
+
+
+def test_token_desde_el_mapa_json_compartido(monkeypatch):
+    monkeypatch.setenv("META_ADS_TOKENS", MAPA)
+    fuente = MetaAdsSource("pauta_meta", {
+        "account_id": "act_1", "token_ref": "cliente_b",
+    })
+    assert fuente._token() == "EAAH-token-b"
+
+
+def test_el_mapa_se_puede_renombrar(monkeypatch):
+    monkeypatch.setenv("TOKENS_META_FACHAVI", MAPA)
+    fuente = MetaAdsSource("pauta_meta", {
+        "account_id": "act_1", "token_ref": "cliente_a",
+        "tokens_env": "TOKENS_META_FACHAVI",
+    })
+    assert fuente._token() == "EAAG-token-a"
+
+
+def test_una_clave_mal_escrita_lista_las_disponibles(monkeypatch):
+    """Sin esto, un typo en token_ref obliga a ir a mirar la variable a mano."""
+    monkeypatch.setenv("META_ADS_TOKENS", MAPA)
+    fuente = MetaAdsSource("pauta_meta", {
+        "account_id": "act_1", "token_ref": "cliente_c",
+    })
+    with pytest.raises(RuntimeError) as e:
+        fuente._token()
+    assert "cliente_a, cliente_b" in str(e.value)
+
+
+def test_los_errores_del_mapa_nunca_filtran_los_tokens(monkeypatch):
+    """
+    Un error de la ingesta termina en _meta.sync_corridas y en el log de
+    Render. Si el mensaje llevara el contenido de la variable, los tokens de
+    todos los clientes quedarian escritos en la bitacora del warehouse.
+    """
+    monkeypatch.setenv("META_ADS_TOKENS", '{"cliente_a":"EAAG-secreto",,}')
+    fuente = MetaAdsSource("pauta_meta", {
+        "account_id": "act_1", "token_ref": "cliente_a",
+    })
+    with pytest.raises(RuntimeError) as e:
+        fuente._token()
+    assert "EAAG-secreto" not in str(e.value)
+
+    # y tampoco cuando la clave existe pero el mapa no es un objeto
+    monkeypatch.setenv("META_ADS_TOKENS", '["EAAG-secreto"]')
+    with pytest.raises(RuntimeError) as e:
+        fuente._token()
+    assert "EAAG-secreto" not in str(e.value)
+
+
+def test_sin_ninguna_de_las_dos_formas_falla_explicito():
+    with pytest.raises(RuntimeError) as e:
+        MetaAdsSource("pauta_meta", {"account_id": "act_1"})._token()
+    assert "token_env" in str(e.value) and "token_ref" in str(e.value)
+
+
+def test_declarar_las_dos_gana_la_explicita_y_avisa(monkeypatch, caplog):
+    monkeypatch.setenv("META_ADS_TOKEN_FACHAVI", "EAAG-compartido")
+    monkeypatch.setenv("META_ADS_TOKENS", MAPA)
+    fuente = MetaAdsSource("pauta_meta", {
+        "account_id": "act_1",
+        "token_env": "META_ADS_TOKEN_FACHAVI",
+        "token_ref": "cliente_a",
+    })
+    with caplog.at_level("WARNING"):
+        assert fuente._token() == "EAAG-compartido"
+    assert "token_ref" in caplog.text
+
+
 # --- recorrido completo con el API simulado -------------------------------
 
 class _RespuestaFalsa:

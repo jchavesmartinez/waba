@@ -123,6 +123,22 @@ Una pestaña `usuarios` puede existir para el futuro bot; la ingesta la ignora.
   normal caduca a los 60 días y la ingesta se cae un martes cualquiera sin que
   nadie haya tocado nada.
 
+  **Dos formas de declararlo**, según de quién sea el Business Manager:
+
+  - Los clientes te dan **acceso de socio a tu BM** → un solo token para todos.
+    `{"token_env":"META_ADS_TOKEN_FACHAVI"}`, el mismo en todas las filas. Alta
+    de cliente = asignar el activo en el BM + agregar la fila. No se toca Render.
+  - Cada cliente emite el token desde **su propio BM** → un solo secreto JSON:
+    ```
+    META_ADS_TOKENS = {"cliente_a":"EAAG...","cliente_b":"EAAH..."}
+    ```
+    y en la fila solo `{"token_ref":"cliente_a"}`. Alta de cliente = agregar una
+    clave al JSON, sin crear una variable nueva por cliente. El nombre del mapa
+    se cambia con `tokens_env` si querés separarlo por entorno.
+
+  Se pueden mezclar entre clientes, y migrar de uno a otro después: la identidad
+  de las filas no depende del token, así que el historial acumulado no se toca.
+
   > **Ojo con la zona horaria.** Meta corta los días en la zona de la *cuenta
   > publicitaria*. Si quedó creada en `America/Los_Angeles` —el default de
   > muchos Business Manager— el "lunes" arranca a las 2 p.m. del domingo tico y
