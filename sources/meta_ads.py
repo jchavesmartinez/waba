@@ -811,19 +811,46 @@ class MetaAdsSource(Source):
         contra su POS. Se guarda en la tabla para que la discrepancia sea
         explicable en vez de misteriosa.
         """
+        campos = ["name", "currency", "timezone_name"]
+        # 'currency_offset' NO existe en el nodo AdAccount de todas las
+        # versiones del API (probado contra v21.0: error 100). Va aparte y en
+        # una lista de OPCIONALES porque un campo que puede no existir no debe
+        # poder tumbar a los que si existen: la version anterior pedia los
+        # cuatro juntos y, al rechazar uno, perdia tambien nombre, moneda y
+        # zona horaria — que es justo la informacion por la que se hace esta
+        # llamada. El divisor cae a 100 (correcto para colones, dolares y
+        # euros) y se puede fijar a mano con 'divisor_presupuesto'.
+        opcionales = ["currency_offset"]
         datos = {}
-        try:
-            datos = self._pedir(
-                f"{cuenta}",
-                token,
-                {"fields": "name,currency,timezone_name,currency_offset"},
-            )
-        except (RuntimeError, httpx.HTTPError) as e:
-            msg = (f"[{self.fuente_id}] no se pudo leer la informacion de la "
-                   f"cuenta {cuenta}: {e}. Se continua sin nombre ni moneda.")
-            logger.warning(msg)
-            alertas.append(msg)
-            return {}
+        for intento in range(2):
+            try:
+                datos = self._pedir(
+                    f"{cuenta}",
+                    token,
+                    {"fields": ",".join(campos + opcionales)},
+                )
+                break
+            except (RuntimeError, httpx.HTTPError) as e:
+                culpables = _campos_culpables(str(e), campos + opcionales)
+                # Solo se reintenta si lo rechazado es OPCIONAL. Si Meta
+                # rechaza 'currency' no hay nada que salvar quitandola.
+                descartables = culpables & set(opcionales)
+                if descartables and intento == 0:
+                    opcionales = [c for c in opcionales if c not in descartables]
+                    logger.info(
+                        "[%s] el campo opcional %s no existe en %s; se reintenta "
+                        "sin el.", self.fuente_id,
+                        ", ".join(sorted(descartables)), self._version(),
+                    )
+                    continue
+                msg = (f"[{self.fuente_id}] no se pudo leer la informacion de la "
+                       f"cuenta {cuenta}: {e}. Se continua sin nombre, moneda ni "
+                       "zona horaria: las columnas 'moneda' y 'zona_horaria' van "
+                       "a quedar vacias y NO se puede avisar si la cuenta corta "
+                       "los dias en otra zona.")
+                logger.warning(msg)
+                alertas.append(msg)
+                return {}
 
         # 'zona_esperada' vacia apaga la revision (cliente fuera de CR).
         esperada = str(

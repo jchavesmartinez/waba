@@ -393,6 +393,70 @@ def test_cargar_produce_las_dos_tablas_con_el_esquema_declarado(monkeypatch):
     assert any("act_1234567890/insights" in u for u in _ClienteFalso.llamadas)
 
 
+def test_un_campo_opcional_inexistente_no_se_lleva_puestos_los_demas():
+    """
+    Regresion real (v21.0): 'currency_offset' no existe en el nodo AdAccount y
+    pedirlo junto a los otros hacia fallar la llamada ENTERA con error 100, asi
+    que se perdian tambien nombre, moneda y zona horaria. La consecuencia no
+    era cosmetica: sin timezone_name la alerta de zona horaria NO se puede
+    disparar, que es justo el aviso que evita que los totales no cuadren.
+    """
+    intentos = []
+
+    class _Cli(_ClienteFalso):
+        def get(self, url, params=None):
+            campos = (params or {}).get("fields", "")
+            intentos.append(campos)
+            if "currency_offset" in campos:
+                return _RespuestaFalsa({"error": {
+                    "code": 100,
+                    "message": "(#100) Tried accessing nonexisting field "
+                               "(currency_offset) on node type (AdAccount)",
+                }}, status=400)
+            return _RespuestaFalsa({
+                "name": "PYME Demo", "currency": "CRC",
+                "timezone_name": "America/Los_Angeles",
+            })
+
+    import sources.meta_ads as modulo
+    fuente = _fuente()
+    original = modulo.httpx.Client
+    modulo.httpx.Client = _Cli
+    try:
+        alertas = []
+        datos = fuente._info_cuenta("act_1", "tok", alertas)
+    finally:
+        modulo.httpx.Client = original
+
+    # reintento: primero con el opcional, despues sin el
+    assert len(intentos) == 2 and "currency_offset" not in intentos[1]
+    assert datos["currency"] == "CRC"
+    assert datos["timezone_name"] == "America/Los_Angeles"
+    # y con la zona ya disponible, la alerta que importa SI se dispara
+    assert any("America/Los_Angeles" in a for a in alertas)
+
+
+def test_si_falla_un_campo_no_opcional_se_avisa_y_se_sigue():
+    class _Cli(_ClienteFalso):
+        def get(self, url, params=None):
+            return _RespuestaFalsa({"error": {
+                "code": 100, "message": "(#100) nonexisting field (currency)",
+            }}, status=400)
+
+    import sources.meta_ads as modulo
+    original = modulo.httpx.Client
+    modulo.httpx.Client = _Cli
+    try:
+        alertas = []
+        datos = _fuente()._info_cuenta("act_1", "tok", alertas)
+    finally:
+        modulo.httpx.Client = original
+
+    # No revienta la corrida: los insights son lo importante y se cargan igual.
+    assert datos == {}
+    assert len(alertas) == 1 and "zona horaria" in alertas[0]
+
+
 # --- persistencia acumulativa ---------------------------------------------
 
 def test_releer_la_ventana_corrige_el_dia_en_vez_de_duplicarlo():
