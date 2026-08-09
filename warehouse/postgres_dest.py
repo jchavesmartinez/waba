@@ -34,6 +34,13 @@ from sources.zoho_imap import (
     hash_correo,
     limpiar_valor_correo,
 )
+from sources.meta_ads import (
+    CAMPOS_INSIGHT,
+    TIPOS_INSIGHT,
+    fila_insight,
+    hash_insight,
+    limpiar_valor_meta,
+)
 import config
 from .base import Destino, Corrida, ESQUEMA_META, TABLA_CORRIDAS
 
@@ -86,6 +93,21 @@ _TIPOS_CORREO = {
     "cuerpo": "TEXT",
     "n_adjuntos": "BIGINT",
     "adjuntos": "TEXT",
+}
+
+# Ver la nota equivalente en duckdb_dest.py: los ~60 campos de Meta se derivan
+# del tipo LOGICO que declara el conector para que los dos warehouses no puedan
+# quedar con esquemas distintos.
+_SQL_META = {
+    "entero": "BIGINT",
+    "decimal": "DOUBLE PRECISION",
+    "texto": "TEXT",
+    "fecha": "DATE",
+    "fecha_hora": "TIMESTAMPTZ",
+}
+
+_TIPOS_INSIGHT = {
+    columna: _SQL_META[TIPOS_INSIGHT[columna]] for columna in CAMPOS_INSIGHT
 }
 
 
@@ -507,6 +529,169 @@ class PostgresDestino(Destino):
 
         logger.info(
             "Zoho %s.%s: %d nuevos, %d actualizados, %d sin cambios; "
+            "%d acumulados",
+            esquema,
+            tabla,
+            stats["nuevos"],
+            stats["actualizados"],
+            stats["sin_cambios"],
+            stats["actual_total"],
+        )
+        return stats
+
+    # --- Meta Ads: create inicial + UPSERT acumulativo ------------------
+
+    def _asegurar_tabla_insights(
+        self, esquema: str, tabla: str
+    ) -> tuple[str, str]:
+        esquema = _ident(esquema)
+        tabla = _ident(tabla)
+        self.asegurar_esquema(esquema)
+        definiciones = {
+            **_TIPOS_INSIGHT,
+            "version_hash": "TEXT",
+            "_corrida_id": "TEXT",
+            "_fuente_id": "TEXT",
+            "_ingestado_en": "TIMESTAMPTZ",
+            "visto_por_ultima_vez": "TIMESTAMPTZ",
+        }
+
+        with self.conectar().begin() as cx:
+            existe = cx.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema=:e AND table_name=:t)"
+                ),
+                {"e": esquema, "t": tabla},
+            ).scalar()
+            if not existe:
+                columnas = ", ".join(
+                    f'"{nombre}" {tipo}' for nombre, tipo in definiciones.items()
+                )
+                cx.execute(text(
+                    f'CREATE TABLE "{esquema}"."{tabla}" ({columnas})'
+                ))
+                # El UPSERT busca por insight_id en cada corrida. Sin indice,
+                # una cuenta con dos años de historial diario a nivel anuncio
+                # (facil: 300k filas) hace un seq scan por fila entrante.
+                cx.execute(text(
+                    f'CREATE INDEX IF NOT EXISTS "{tabla}__insight_id_idx" '
+                    f'ON "{esquema}"."{tabla}" (insight_id)'
+                ))
+            else:
+                for nombre, tipo in definiciones.items():
+                    cx.execute(text(
+                        f'ALTER TABLE "{esquema}"."{tabla}" '
+                        f'ADD COLUMN IF NOT EXISTS "{nombre}" {tipo}'
+                    ))
+                cx.execute(text(
+                    f'CREATE INDEX IF NOT EXISTS "{tabla}__insight_id_idx" '
+                    f'ON "{esquema}"."{tabla}" (insight_id)'
+                ))
+        return esquema, tabla
+
+    def actualizar_insights_meta(
+        self,
+        esquema: str,
+        tabla: str,
+        df: pd.DataFrame,
+        corrida: Corrida,
+    ) -> dict:
+        """Corrige los dias de la ventana sin borrar los anteriores."""
+        esquema, tabla = self._asegurar_tabla_insights(esquema, tabla)
+        ahora = datetime.now(timezone.utc)
+        campos_lectura = list(CAMPOS_INSIGHT) + ["version_hash"]
+        seleccion = ", ".join(f'"{c}"' for c in campos_lectura)
+        columnas = list(CAMPOS_INSIGHT) + [
+            "version_hash",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+            "visto_por_ultima_vez",
+        ]
+
+        entrantes = {}
+        for _, serie in df.iterrows():
+            fila = fila_insight(serie)
+            clave = fila.get("insight_id")
+            if not clave:
+                raise RuntimeError("Meta Ads devolvio una fila sin insight_id")
+            entrantes[clave] = fila
+
+        stats = {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+        with self.conectar().begin() as cx:
+            # Dos crons solapados no pueden decidir a la vez que el mismo dia
+            # es nuevo (mismo criterio que Calendar y Zoho).
+            cx.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:nombre))"),
+                {"nombre": f"{esquema}.{tabla}:meta_ads"},
+            )
+            anteriores = {}
+            for existente in cx.execute(
+                text(f'SELECT {seleccion} FROM "{esquema}"."{tabla}"')
+            ).mappings():
+                fila = dict(existente)
+                if fila.get("insight_id"):
+                    anteriores[fila["insight_id"]] = fila
+
+            nombres = ", ".join(f'"{c}"' for c in columnas)
+            binds = ", ".join(f":{c}" for c in columnas)
+
+            for clave, entrante in entrantes.items():
+                anterior = anteriores.get(clave)
+                version = hash_insight(entrante)
+
+                if anterior and anterior.get("version_hash") == version:
+                    cx.execute(
+                        text(
+                            f'UPDATE "{esquema}"."{tabla}" SET '
+                            "visto_por_ultima_vez=:ahora, "
+                            "_corrida_id=:corrida, _fuente_id=:fuente, "
+                            "_ingestado_en=:ahora WHERE insight_id=:clave"
+                        ),
+                        {
+                            "clave": clave,
+                            "ahora": ahora,
+                            "corrida": corrida.corrida_id,
+                            "fuente": corrida.fuente_id,
+                        },
+                    )
+                    stats["sin_cambios"] += 1
+                    continue
+
+                stats["actualizados" if anterior else "nuevos"] += 1
+                if anterior:
+                    cx.execute(
+                        text(
+                            f'DELETE FROM "{esquema}"."{tabla}" '
+                            "WHERE insight_id=:clave"
+                        ),
+                        {"clave": clave},
+                    )
+
+                actual = {
+                    **{c: limpiar_valor_meta(entrante.get(c))
+                       for c in CAMPOS_INSIGHT},
+                    "version_hash": version,
+                    "_corrida_id": corrida.corrida_id,
+                    "_fuente_id": corrida.fuente_id,
+                    "_ingestado_en": ahora,
+                    "visto_por_ultima_vez": ahora,
+                }
+                cx.execute(
+                    text(
+                        f'INSERT INTO "{esquema}"."{tabla}" '
+                        f"({nombres}) VALUES ({binds})"
+                    ),
+                    actual,
+                )
+
+            stats["actual_total"] = cx.execute(
+                text(f'SELECT COUNT(*) FROM "{esquema}"."{tabla}"')
+            ).scalar()
+
+        logger.info(
+            "Meta Ads %s.%s: %d nuevos, %d corregidos, %d sin cambios; "
             "%d acumulados",
             esquema,
             tabla,

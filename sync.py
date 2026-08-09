@@ -31,6 +31,7 @@ import duckdb
 
 from sources.google_calendar import CAMPOS_EVENTO
 from sources.zoho_imap import CAMPOS_CORREO
+from sources.meta_ads import CAMPOS_INSIGHT
 import catalogo_cliente
 import config
 import registry
@@ -245,6 +246,162 @@ def _sincronizar_zoho_imap(
     return corrida
 
 
+def _sincronizar_meta_ads(
+    destino,
+    cliente: dict,
+    fuente: dict,
+    corrida: Corrida,
+    fresca: bool,
+    probar: bool,
+) -> Corrida:
+    """
+    Ruta acumulativa de Meta Ads.
+
+    Dos tablas con semantica DISTINTA a proposito, y por eso no puede pasar por
+    la ruta generica:
+
+      - insights (obligatoria): UPSERT. ``dias`` es la ventana que se le vuelve
+        a pedir a Meta, no el historial guardado. Releer un dia que ya estaba
+        NO lo duplica: lo CORRIGE, que es exactamente lo que hace falta porque
+        la ventana de atribucion sigue moviendo las conversiones de un dia
+        durante semanas.
+      - estructura (opcional): full refresh con la guarda de vaciado normal. Es
+        un snapshot del estado actual de la cuenta —presupuestos, estados,
+        segmentacion— y ahi si la foto de hoy reemplaza a la de ayer.
+    """
+    cid = cliente["cliente_id"]
+    fid = fuente["fuente_id"]
+    esquema = nombre_esquema(cid)
+    conf = dict(fuente.get("config", {}))
+    tabla_logica = conf.get("tabla") or "meta_ads"
+    actual = nombre_tabla(fid, tabla_logica)
+
+    if fresca:
+        corrida.tablas = [f"{esquema}.{actual}"]
+        corrida.tablas_logicas = {tabla_logica}
+        corrida.estado = "omitido"
+        corrida.detalle = destino.ultimo_detalle(cid, fid)
+        corrida.fin = ahora_utc()
+        logger.info("[%s/%s] OMITIDO: Meta Ads sigue fresco", cid, fid)
+        return corrida
+
+    tmp = duckdb.connect(database=":memory:")
+    try:
+        obj = crear_fuente("meta_ads", fid, conf)
+        frag = obj.cargar(tmp)
+        if not frag.tablas:
+            raise RuntimeError("Meta Ads no produjo ninguna tabla")
+        corrida.alertas += list(getattr(frag, "alertas", []))
+
+        # Por contrato del conector, la PRIMERA tabla son los insights y las
+        # siguientes (si 'incluir_estructura' esta activo) son snapshots.
+        tabla_logica = frag.tablas[0]
+        actual = nombre_tabla(fid, tabla_logica)
+        df = tmp.execute(f'SELECT * FROM "{tabla_logica}"').df()
+        corrida.filas = len(df)
+
+        cols_actual = list(CAMPOS_INSIGHT) + [
+            "version_hash",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+            "visto_por_ultima_vez",
+        ]
+
+        if probar:
+            logger.info(
+                "[PRUEBA] %s.%s: %d filas de insights en la ventana; no se "
+                "escribe data", esquema, actual, len(df),
+            )
+            stats = {
+                "actual_total": len(df),
+                "nuevos": len(df),
+                "actualizados": 0,
+                "sin_cambios": 0,
+            }
+        else:
+            stats = destino.actualizar_insights_meta(esquema, actual, df, corrida)
+
+        corrida.detalle = {
+            actual: {
+                "columnas": cols_actual,
+                "filas": int(stats["actual_total"]),
+            },
+        }
+        corrida.tablas = [f"{esquema}.{actual}"]
+        corrida.tablas_logicas = {tabla_logica}
+
+        # --- tablas de snapshot (estructura), si las hay ---
+        previo = {} if probar else destino.ultimo_detalle(cid, fid)
+        bloqueadas = []
+        for extra in frag.tablas[1:]:
+            df_extra = tmp.execute(f'SELECT * FROM "{extra}"').df()
+            columnas = list(df_extra.columns)
+            destino_tabla = nombre_tabla(fid, extra)
+
+            alertas, bloquear = _revisar_calidad(
+                previo, destino_tabla, columnas, len(df_extra)
+            )
+            corrida.alertas += alertas
+            for a in alertas:
+                logger.warning("[%s/%s] %s", cid, fid, a)
+
+            if bloquear:
+                # Igual que en la ruta generica (C-01): se copia el detalle
+                # anterior para que la guarda siga teniendo con que comparar en
+                # la proxima corrida y no se desarme sola.
+                corrida.detalle[destino_tabla] = previo[destino_tabla]
+                bloqueadas.append(destino_tabla)
+                continue
+
+            corrida.detalle[destino_tabla] = {
+                "columnas": columnas, "filas": len(df_extra),
+            }
+            if probar:
+                logger.info(
+                    "[PRUEBA] %s.%s -> %d filas, columnas: %s",
+                    esquema, destino_tabla, len(df_extra), ", ".join(columnas),
+                )
+            else:
+                destino.escribir_tabla(
+                    esquema, destino_tabla, agregar_trazabilidad(df_extra, corrida)
+                )
+            corrida.tablas.append(f"{esquema}.{destino_tabla}")
+            corrida.tablas_logicas.add(extra)
+            corrida.filas += len(df_extra)
+
+        if bloqueadas:
+            corrida.estado = "ok_con_bloqueo"
+            logger.error(
+                "[%s/%s] BLOQUEO de escritura en %s. Los insights SI se "
+                "actualizaron; lo que se conservo es el snapshot anterior.",
+                cid, fid, ", ".join(bloqueadas),
+            )
+        else:
+            corrida.estado = "ok_con_alertas" if corrida.alertas else "ok"
+
+        logger.info(
+            "[%s/%s] %s: %d filas leidas; %d nuevas, %d corregidas, "
+            "%d sin cambios; %d acumuladas",
+            cid,
+            fid,
+            corrida.estado.upper(),
+            len(df),
+            stats["nuevos"],
+            stats["actualizados"],
+            stats["sin_cambios"],
+            stats["actual_total"],
+        )
+    except Exception as e:  # noqa: BLE001
+        corrida.estado = "error"
+        corrida.error = f"{type(e).__name__}: {e}"
+        logger.exception("[%s/%s] FALLO: %s", cid, fid, e)
+    finally:
+        tmp.close()
+        corrida.fin = ahora_utc()
+    return corrida
+
+
 def _esta_fresca(destino, cliente_id, fuente) -> bool:
     """True si la fuente se sincronizo hace menos de 'frescura_minutos'."""
     minutos = int(fuente.get("frescura_minutos", 0) or 0)
@@ -336,6 +493,11 @@ def sincronizar_fuente(destino, cliente: dict, fuente: dict, forzar=False, proba
 
     if fuente.get("tipo") == "zoho_imap":
         return _sincronizar_zoho_imap(
+            destino, cliente, fuente, corrida, fresca, probar
+        )
+
+    if fuente.get("tipo") == "meta_ads":
+        return _sincronizar_meta_ads(
             destino, cliente, fuente, corrida, fresca, probar
         )
 

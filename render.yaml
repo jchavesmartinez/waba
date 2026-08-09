@@ -63,6 +63,12 @@ services:
       #   sync: false
       # - key: API_TOKEN_FERRETERIA_A
       #   sync: false
+      # - key: ZOHO_PASSWORD_FERRETERIA_A
+      #   sync: false
+      # Token de System User del Business Manager, permiso ads_read, con la
+      # cuenta publicitaria asignada como activo. Uno por cliente.
+      # - key: META_ADS_TOKEN_FERRETERIA_A
+      #   sync: false
 
   # --- BOT de WhatsApp (capa de lectura) ---
   # Servicio web que recibe el webhook de la Meta Cloud API, resuelve

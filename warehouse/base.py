@@ -224,6 +224,27 @@ class Destino(ABC):
             f"El destino '{self.tipo}' no soporta UPSERT de Zoho IMAP."
         )
 
+    def actualizar_insights_meta(
+        self,
+        esquema: str,
+        tabla_actual: str,
+        df: "pd.DataFrame",
+        corrida: Corrida,
+    ) -> dict:
+        """
+        Crea la tabla de insights si falta y hace UPSERT por (cuenta, nivel,
+        entidad, dia, desglose).
+
+        La ventana de 'dias' solo limita lo que se vuelve a PEDIRLE a Meta; el
+        historial anterior nunca se borra. Y a diferencia de Calendar o de
+        correo, aca el UPSERT no es solo para evitar duplicados: las cifras de
+        un mismo dia CAMBIAN durante semanas por la ventana de atribucion, asi
+        que releer y corregir es parte del funcionamiento normal.
+        """
+        raise NotImplementedError(
+            f"El destino '{self.tipo}' no soporta UPSERT de Meta Ads."
+        )
+
     def __repr__(self):
         return f"<{self.__class__.__name__} tipo={self.tipo}>"
 

@@ -41,6 +41,13 @@ from sources.zoho_imap import (
     hash_correo,
     limpiar_valor_correo,
 )
+from sources.meta_ads import (
+    CAMPOS_INSIGHT,
+    TIPOS_INSIGHT,
+    fila_insight,
+    hash_insight,
+    limpiar_valor_meta,
+)
 from .base import Destino, Corrida, ESQUEMA_META, TABLA_CORRIDAS
 
 logger = logging.getLogger("fachavi.warehouse.duckdb")
@@ -92,6 +99,20 @@ _TIPOS_CORREO = {
     "cuerpo": "VARCHAR",
     "n_adjuntos": "BIGINT",
     "adjuntos": "VARCHAR",
+}
+
+# Meta Ads son ~60 columnas: en vez de copiarlas a mano (y que se desincronicen
+# con las de Postgres) se traduce el tipo LOGICO que declara el conector.
+_SQL_META = {
+    "entero": "BIGINT",
+    "decimal": "DOUBLE",
+    "texto": "VARCHAR",
+    "fecha": "DATE",
+    "fecha_hora": "TIMESTAMPTZ",
+}
+
+_TIPOS_INSIGHT = {
+    columna: _SQL_META[TIPOS_INSIGHT[columna]] for columna in CAMPOS_INSIGHT
 }
 
 
@@ -417,6 +438,135 @@ class DuckDBDestino(Destino):
         ).fetchone()[0]
         logger.info(
             "Zoho %s.%s: %d nuevos, %d actualizados, %d sin cambios; "
+            "%d acumulados",
+            esquema,
+            tabla,
+            stats["nuevos"],
+            stats["actualizados"],
+            stats["sin_cambios"],
+            stats["actual_total"],
+        )
+        return stats
+
+    # --- Meta Ads: create inicial + UPSERT acumulativo -------------------
+
+    def _asegurar_tabla_insights(self, esquema: str, tabla: str) -> None:
+        con = self.conectar()
+        self.asegurar_esquema(esquema)
+        definiciones = {
+            **_TIPOS_INSIGHT,
+            "version_hash": "VARCHAR",
+            "_corrida_id": "VARCHAR",
+            "_fuente_id": "VARCHAR",
+            "_ingestado_en": "TIMESTAMPTZ",
+            "visto_por_ultima_vez": "TIMESTAMPTZ",
+        }
+        if not self._tabla_existe(esquema, tabla):
+            columnas = ", ".join(
+                f'"{nombre}" {tipo}' for nombre, tipo in definiciones.items()
+            )
+            con.execute(f'CREATE TABLE "{esquema}"."{tabla}" ({columnas})')
+            return
+
+        # Meta agrega metricas nuevas seguido. ADD COLUMN IF NOT EXISTS deja
+        # que la tabla crezca sin DROP y sin perder el historial acumulado.
+        for nombre, tipo in definiciones.items():
+            con.execute(
+                f'ALTER TABLE "{esquema}"."{tabla}" '
+                f'ADD COLUMN IF NOT EXISTS "{nombre}" {tipo}'
+            )
+
+    def actualizar_insights_meta(
+        self,
+        esquema: str,
+        tabla: str,
+        df: pd.DataFrame,
+        corrida: Corrida,
+    ) -> dict:
+        """Corrige los dias de la ventana sin borrar los anteriores."""
+        con = self.conectar()
+        self._asegurar_tabla_insights(esquema, tabla)
+        ahora = datetime.now(timezone.utc)
+        campos_lectura = list(CAMPOS_INSIGHT) + ["version_hash"]
+        seleccion = ", ".join(f'"{c}"' for c in campos_lectura)
+        columnas = list(CAMPOS_INSIGHT) + [
+            "version_hash",
+            "_corrida_id",
+            "_fuente_id",
+            "_ingestado_en",
+            "visto_por_ultima_vez",
+        ]
+
+        anteriores = {}
+        for valores in con.execute(
+            f'SELECT {seleccion} FROM "{esquema}"."{tabla}"'
+        ).fetchall():
+            fila = dict(zip(campos_lectura, valores))
+            if fila.get("insight_id"):
+                anteriores[fila["insight_id"]] = fila
+
+        entrantes = {}
+        for _, serie in df.iterrows():
+            fila = fila_insight(serie)
+            clave = fila.get("insight_id")
+            if not clave:
+                raise RuntimeError("Meta Ads devolvio una fila sin insight_id")
+            # La misma clave dos veces en una corrida solo puede venir de un
+            # breakdown mal declarado; gana la ultima y no se duplica la fila.
+            entrantes[clave] = fila
+
+        stats = {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+        nombres = ", ".join(f'"{c}"' for c in columnas)
+        marcas = ", ".join("?" for _ in columnas)
+
+        con.execute("BEGIN TRANSACTION")
+        try:
+            for clave, entrante in entrantes.items():
+                anterior = anteriores.get(clave)
+                version = hash_insight(entrante)
+
+                if anterior and anterior.get("version_hash") == version:
+                    con.execute(
+                        f'UPDATE "{esquema}"."{tabla}" SET '
+                        "visto_por_ultima_vez=?, _corrida_id=?, _fuente_id=?, "
+                        '_ingestado_en=? WHERE insight_id=?',
+                        [ahora, corrida.corrida_id, corrida.fuente_id, ahora,
+                         clave],
+                    )
+                    stats["sin_cambios"] += 1
+                    continue
+
+                stats["actualizados" if anterior else "nuevos"] += 1
+                if anterior:
+                    con.execute(
+                        f'DELETE FROM "{esquema}"."{tabla}" WHERE insight_id=?',
+                        [clave],
+                    )
+
+                valores = [
+                    limpiar_valor_meta(entrante.get(c)) for c in CAMPOS_INSIGHT
+                ]
+                con.execute(
+                    f'INSERT INTO "{esquema}"."{tabla}" '
+                    f"({nombres}) VALUES ({marcas})",
+                    valores + [
+                        version,
+                        corrida.corrida_id,
+                        corrida.fuente_id,
+                        ahora,
+                        ahora,
+                    ],
+                )
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+        stats["actual_total"] = con.execute(
+            f'SELECT COUNT(*) FROM "{esquema}"."{tabla}"'
+        ).fetchone()[0]
+        logger.info(
+            "Meta Ads %s.%s: %d nuevos, %d corregidos, %d sin cambios; "
             "%d acumulados",
             esquema,
             tabla,

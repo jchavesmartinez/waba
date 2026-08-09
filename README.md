@@ -98,6 +98,38 @@ Una pestaña `usuarios` puede existir para el futuro bot; la ingesta la ignora.
   `destinatarios` permite distinguir el Gmail original cuando viene en `To`.
   El secreto vive en la variable indicada por `password_env`.
 
+- **`meta_ads`** →
+  `{"account_id":"act_1234567890","token_env":"META_ADS_TOKEN_CLIENTE_A","nivel":"ad","dias":30,"tabla":"meta_ads"}`
+  Trae la pauta de Facebook e Instagram desde la Marketing API. **Una fila = un
+  día × una entidad** (según `nivel`: `ad`, `adset`, `campaign` o `account`) ×
+  una combinación de desglose. Agregar por semana, mes o campaña sale de un
+  `GROUP BY`; al revés no se puede, por eso se guarda al grano más fino.
+
+  Igual que `zoho_imap`, `dias` es una ventana de **consulta, no de retención**:
+  las corridas siguientes hacen UPSERT y no borran lo anterior. Pero acá el
+  UPSERT no es solo para evitar duplicados — **las cifras de un día siguen
+  cambiando durante semanas** por la ventana de atribución (una compra del
+  lunes se atribuye el jueves) y por reembolsos de tráfico inválido. Releer y
+  corregir es el funcionamiento normal, no una excepción.
+
+  Opcionales: `breakdowns` (`["age","gender"]`), `atribucion`
+  (`["7d_click","1d_view"]`), `campos_extra`, `solo_con_gasto`, `max_paginas`,
+  `zona_esperada`, y `incluir_estructura: true` → segunda tabla
+  `<tabla>_estructura` con el estado actual de campañas, conjuntos y anuncios
+  (presupuestos, estados, segmentación, creativo).
+
+  El token va en la variable de `token_env`. Usá un token de **System User** del
+  Business Manager con permiso `ads_read` y la cuenta asignada: uno de usuario
+  normal caduca a los 60 días y la ingesta se cae un martes cualquiera sin que
+  nadie haya tocado nada.
+
+  > **Ojo con la zona horaria.** Meta corta los días en la zona de la *cuenta
+  > publicitaria*. Si quedó creada en `America/Los_Angeles` —el default de
+  > muchos Business Manager— el "lunes" arranca a las 2 p.m. del domingo tico y
+  > el gasto diario nunca le va a cuadrar al cliente contra su POS. El conector
+  > lo detecta, deja una alerta y guarda la zona en la columna `zona_horaria`
+  > para que la diferencia sea explicable en vez de misteriosa.
+
 > **Los secretos de los conectores tampoco van en el Sheet.** La regla es la
 > misma que para el warehouse: la celda `config` lleva el **nombre de la
 > variable de entorno** (`dsn_env`, `headers_env`), nunca la contraseña ni el
@@ -221,7 +253,7 @@ Para darle a `cliente_a` su propio proyecto basta con agregar
 | `config.py` | Config desde variables de entorno + resolución de DSN por cliente |
 | `sources/base.py` | Contrato `Source` + helpers compartidos |
 | `sources/__init__.py` | Registro de tipos de fuente + factory |
-| `sources/google_sheets.py`, `csv_url.py`, `api_rest.py`, `postgres.py`, `zoho_imap.py` | Connectors |
+| `sources/google_sheets.py`, `csv_url.py`, `api_rest.py`, `postgres.py`, `zoho_imap.py`, `meta_ads.py` | Connectors |
 | `warehouse/base.py` | Contrato `Destino` |
 | `warehouse/duckdb_dest.py` | DuckDB local / MotherDuck |
 | `warehouse/postgres_dest.py` | Neon / Supabase / Postgres |

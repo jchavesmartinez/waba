@@ -46,11 +46,16 @@ from .google_calendar import GoogleCalendarSource  # noqa: E402
 from .csv_url import CSVURLSource               # noqa: E402
 from .api_rest import ApiRestSource             # noqa: E402
 from .zoho_imap import ZohoIMAPSource           # noqa: E402
+from .meta_ads import MetaAdsSource             # noqa: E402
 
 registrar(GoogleSheetsSource)
 registrar(GoogleCalendarSource)
 registrar(CSVURLSource)
 registrar(ApiRestSource)
+# Meta Ads: solo httpx, que ya es dependencia de api_rest y google_calendar.
+# No necesita el SDK oficial de facebook-business (son ~40 MB y una cadena de
+# dependencias que se rompe sola en cada version de Python).
+registrar(MetaAdsSource)
 # Zoho por IMAP: solo stdlib (imaplib + email), asi que no va en un try/except
 # como las opcionales — no hay dependencia que pueda faltar.
 registrar(ZohoIMAPSource)
