@@ -38,11 +38,29 @@ zoho_imap; ver _sincronizar_meta_ads() en sync.py.
 
 Config esperada (JSON en la columna 'config' del registro):
 
-  {"account_id": "act_1234567890",
-   "token_env": "META_ADS_TOKEN_CLIENTE_A",
-   "nivel": "ad",
-   "dias": 30,
-   "tabla": "meta_ads"}
+  Una sola cuenta:
+    {"account_id": "act_1234567890",
+     "token_env": "META_ADS_TOKEN_CLIENTE_A",
+     "nivel": "ad",
+     "dias": 30,
+     "tabla": "meta_ads"}
+
+  VARIAS cuentas del mismo cliente, fusionadas en UNA tabla:
+    {"cuentas": {"Studios": "act_851459412776926",
+                 "Pagina":  "act_842866223676954"},
+     "token_env": "META_ADS_TOKEN_CLIENTE_A", "nivel": "ad", "dias": 30}
+
+  Lo segundo es mas comun de lo que parece. Casi toda PYME que pauta termina
+  con DOS cuentas publicitarias sin saberlo: la que crea Facebook sola la
+  primera vez que alguien le da "Impulsar publicacion" desde la Pagina, y la
+  del Business Manager que arma despues. Para el dueño eso es "mi publicidad",
+  una sola cosa, y preguntarle al bot cuanto gasto no deberia obligarlo a saber
+  que por dentro son dos cuentas. Las filas quedan en la misma tabla y las
+  columnas 'cuenta_id' y 'cuenta_nombre' permiten separarlas cuando hace falta.
+
+  Si las cuentas estan en MONEDAS distintas se levanta una alerta: sumar el
+  gasto entre ellas daria un numero sin sentido, y eso hay que resolverlo en el
+  catalogo del cliente (o separandolas en dos fuentes), no en silencio.
 
 Opcionales:
   "breakdowns": ["age","gender"]   -> desglose (ver NOTA DE DESGLOSES abajo)
@@ -592,41 +610,63 @@ class MetaAdsSource(Source):
     tipo = "meta_ads"
 
     def cargar(self, con) -> Fragmento:
-        cuenta = self._account_id()
+        cuentas = self._cuentas()
         token = self._token()
         nivel = self._nivel()
         dias = self._dias()
         breakdowns = self._breakdowns()
 
         alertas = []
-        meta_cuenta = self._info_cuenta(cuenta, token, alertas)
         desde = date.today() - timedelta(days=dias)
         hasta = date.today()
 
-        crudos = self._pedir_insights(
-            cuenta, token, nivel, desde, hasta, breakdowns, alertas
-        )
-        filas = [
-            self._a_fila(c, cuenta, nivel, breakdowns, meta_cuenta)
-            for c in crudos
-        ]
+        filas = []
+        info_por_cuenta = {}
+        exitosas = 0
+        for etiqueta, cuenta in cuentas.items():
+            meta_cuenta = self._info_cuenta(cuenta, token, alertas)
+            info_por_cuenta[cuenta] = meta_cuenta
+            try:
+                crudos = self._pedir_insights(
+                    cuenta, token, nivel, desde, hasta, breakdowns, alertas
+                )
+            except (RuntimeError, httpx.HTTPError) as e:
+                # Una cuenta que falla (acceso revocado, id mal escrito) no
+                # tiene por que tumbar a las demas del mismo cliente. Mismo
+                # criterio que google_calendar con varios calendarios.
+                msg = (f"[{self.fuente_id}] la cuenta "
+                       f"'{etiqueta or cuenta}' ({cuenta}): {e}")
+                logger.warning(msg)
+                alertas.append(msg)
+                continue
+
+            exitosas += 1
+            propias = [
+                self._a_fila(c, cuenta, nivel, breakdowns, meta_cuenta, etiqueta)
+                for c in crudos
+            ]
+            if not propias:
+                msg = (f"[{self.fuente_id}] Meta no devolvio NINGUNA fila para "
+                       f"{cuenta} en los ultimos {dias} dias. Puede ser que no "
+                       "haya habido pauta activa en esa cuenta, o que el token "
+                       "no tenga acceso. El historial ya guardado NO se toca.")
+                logger.warning(msg)
+                alertas.append(msg)
+            filas += propias
+
+        if exitosas == 0:
+            # Con TODAS las cuentas caidas si hay que fallar: seguir dejaria una
+            # tabla vacia y la guarda de vaciado tapando un problema de acceso.
+            raise RuntimeError(
+                f"[{self.fuente_id}] no se pudo leer ninguna de las "
+                f"{len(cuentas)} cuentas publicitarias configuradas."
+            )
 
         if self._es_verdadero(self.config.get("solo_con_gasto", False)):
             antes = len(filas)
             filas = [f for f in filas if (f.get("gasto") or 0) > 0]
             logger.info("[%s] solo_con_gasto: %d de %d filas conservadas",
                         self.fuente_id, len(filas), antes)
-
-        if not filas:
-            # No es un error: una PYME que pauso la pauta no tiene insights.
-            # Pero tampoco puede pasar mudo, porque se ve IGUAL que un token
-            # sin permiso sobre la cuenta.
-            msg = (f"[{self.fuente_id}] Meta no devolvio NINGUNA fila para "
-                   f"{cuenta} en los ultimos {dias} dias. Puede ser que no haya "
-                   "habido pauta activa, o que el token no tenga acceso a esa "
-                   "cuenta publicitaria. El historial ya guardado NO se toca.")
-            logger.warning(msg)
-            alertas.append(msg)
 
         df = pd.DataFrame(filas, columns=list(CAMPOS_INSIGHT))
         # inferir_tipos NO se usa: cada columna ya sale tipada de _a_fila().
@@ -636,15 +676,18 @@ class MetaAdsSource(Source):
             df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
             df["fecha_fin"] = pd.to_datetime(df["fecha_fin"], errors="coerce")
 
+        self._avisar_monedas_mezcladas(df, alertas)
+
         nombre_deseado = self.config.get("tabla") or "meta_ads"
         tabla = registrar_df(con, df, nombre_deseado, self.fuente_id)
-        logger.info("[meta_ads:%s] tabla %s (%d filas, nivel=%s, %d dias)",
-                    self.fuente_id, tabla, len(df), nivel, dias)
+        logger.info("[meta_ads:%s] tabla %s (%d filas, nivel=%s, %d dias, "
+                    "%d cuenta(s))", self.fuente_id, tabla, len(df), nivel,
+                    dias, exitosas)
 
         tablas = [tabla]
         if self._es_verdadero(self.config.get("incluir_estructura", False)):
             tabla_est = self._cargar_estructura(
-                con, cuenta, token, meta_cuenta, alertas
+                con, cuentas, token, info_por_cuenta, alertas
             )
             if tabla_est:
                 tablas.append(tabla_est)
@@ -663,23 +706,84 @@ class MetaAdsSource(Source):
 
     # ---------------- config ----------------
 
-    def _account_id(self) -> str:
-        crudo = str(self.config.get("account_id", "")).strip()
-        if not crudo:
+    def _cuentas(self) -> dict:
+        """
+        Normaliza la config a {etiqueta: act_id}.
+
+        Dos formas:
+          {"account_id": "act_123"}                      -> una sola cuenta
+          {"cuentas": {"Studios":"act_123",
+                       "Pagina":"act_456"}}              -> varias, UNA tabla
+
+        Varias cuentas caen en la MISMA tabla, distinguidas por 'cuenta_id' y
+        'cuenta_nombre'. Es el caso normal en una PYME: casi siempre existe una
+        cuenta vieja creada sola al impulsar desde la Pagina de Facebook, y otra
+        del Business Manager. Para el dueño es "mi publicidad", una sola cosa, y
+        el bot tiene que poder sumar las dos sin que nadie escriba un UNION.
+
+        La etiqueta es opcional y solo alimenta 'cuenta_nombre' cuando Meta no
+        devuelve el nombre real de la cuenta.
+        """
+        crudo = self.config.get("cuentas")
+        if crudo:
+            if not isinstance(crudo, dict):
+                raise RuntimeError(
+                    f"Fuente '{self.fuente_id}': 'cuentas' debe ser un objeto "
+                    'JSON de nombre a account_id, p.ej. {"Studios":"act_123"}.'
+                )
+            resultado = {}
+            for etiqueta, valor in crudo.items():
+                if valor is None or not str(valor).strip():
+                    logger.warning("[%s] se ignora la cuenta '%s': id vacio.",
+                                   self.fuente_id, etiqueta)
+                    continue
+                resultado[str(etiqueta).strip()] = _con_prefijo(
+                    str(valor), self.fuente_id)
+            ids = list(resultado.values())
+            if len(ids) != len(set(ids)):
+                # Sin esto, la misma cuenta leida dos veces produciria filas con
+                # la MISMA identidad y el UPSERT las colapsaria: el total no
+                # saldria doble, pero tampoco se notaria el error de config.
+                raise RuntimeError(
+                    f"Fuente '{self.fuente_id}': un mismo account_id aparece "
+                    "mas de una vez en 'cuentas'."
+                )
+            if not resultado:
+                raise RuntimeError(
+                    f"Fuente '{self.fuente_id}': 'cuentas' quedo vacio."
+                )
+            return resultado
+
+        valor = str(self.config.get("account_id", "")).strip()
+        if not valor:
             raise RuntimeError(
-                f"Fuente '{self.fuente_id}' (meta_ads) sin 'account_id' en "
-                "config. Es el identificador de la cuenta publicitaria y va con "
-                'el prefijo act_ (p.ej. {"account_id": "act_1234567890"}). Se '
-                "encuentra en el Administrador de Anuncios, arriba a la "
-                "izquierda, junto al nombre de la cuenta."
+                f"Fuente '{self.fuente_id}' (meta_ads) sin 'account_id' ni "
+                "'cuentas' en config. El account_id va con el prefijo act_ "
+                '(p.ej. {"account_id": "act_1234567890"}) y se encuentra en el '
+                "Administrador de Anuncios, arriba a la izquierda."
             )
-        # Un cliente que copia el numero pelado del Administrador de Anuncios
-        # produciria 404 sin ninguna pista de por que. Se arregla y se sigue.
-        if not crudo.startswith("act_"):
-            logger.info("[%s] account_id sin prefijo; se usa 'act_%s'.",
-                        self.fuente_id, crudo)
-            crudo = f"act_{crudo}"
-        return crudo
+        return {"": _con_prefijo(valor, self.fuente_id)}
+
+    def _avisar_monedas_mezcladas(self, df, alertas: list) -> None:
+        """
+        Dos cuentas en monedas distintas hacen que SUM(gasto) sea una suma de
+        colones con dolares: un numero que se ve bien y no significa nada.
+
+        No se puede convertir aca (haria falta el tipo de cambio de CADA dia), y
+        tampoco se puede partir la tabla sin romper justo lo que se busco al
+        juntar las cuentas. Lo que si se puede es que no pase en silencio.
+        """
+        if df.empty or "moneda" not in df:
+            return
+        monedas = {m for m in df["moneda"].dropna().unique() if str(m).strip()}
+        if len(monedas) > 1:
+            msg = (f"[{self.fuente_id}] las cuentas configuradas usan MONEDAS "
+                   f"DISTINTAS ({', '.join(sorted(monedas))}). Sumar 'gasto' "
+                   "entre ellas no tiene sentido: hay que agrupar por 'moneda' "
+                   "o separar las cuentas en fuentes distintas. Conviene "
+                   "documentarlo en el catalogo del cliente.")
+            logger.warning(msg)
+            alertas.append(msg)
 
     def _token(self) -> str:
         """
@@ -982,14 +1086,20 @@ class MetaAdsSource(Source):
     # ---------------- transformacion ----------------
 
     def _a_fila(self, crudo: dict, cuenta: str, nivel: str,
-                breakdowns: list, meta_cuenta: dict) -> dict:
+                breakdowns: list, meta_cuenta: dict, etiqueta: str = "") -> dict:
         acciones = crudo.get("actions") or []
         valores = crudo.get("action_values") or []
         costos = crudo.get("cost_per_action_type") or []
 
         fila = {
             "cuenta_id": crudo.get("account_id") or cuenta.replace("act_", ""),
-            "cuenta_nombre": crudo.get("account_name") or meta_cuenta.get("name", ""),
+            # Prioridad: el nombre real que da Meta, despues la etiqueta que
+            # escribio el cliente en 'cuentas', despues lo que trajo el nodo de
+            # la cuenta. La etiqueta importa cuando _info_cuenta fallo: sin ella
+            # las filas de dos cuentas distintas serian indistinguibles salvo
+            # por un id numerico.
+            "cuenta_nombre": (crudo.get("account_name") or etiqueta
+                              or meta_cuenta.get("name", "")),
             "moneda": crudo.get("account_currency") or meta_cuenta.get("currency", ""),
             "zona_horaria": meta_cuenta.get("timezone_name", ""),
             "nivel": nivel,
@@ -1074,47 +1184,59 @@ class MetaAdsSource(Source):
 
     # ---------------- estructura (campanias / conjuntos / anuncios) --------
 
-    def _cargar_estructura(self, con, cuenta, token, meta_cuenta,
-                           alertas) -> str:
+    def _cargar_estructura(self, con, cuentas: dict, token,
+                           info_por_cuenta: dict, alertas) -> str:
         """
-        Snapshot de la configuracion actual de la cuenta.
+        Snapshot de la configuracion actual de las cuentas.
 
         Los insights dicen cuanto se gasto; esto dice COMO estaba configurado:
         presupuesto diario, estado, objetivo, segmentacion, creativo. Sin esta
         tabla no se puede responder "cuales campanias estan activas ahora
         mismo" ni "cuanto tengo comprometido por dia", que es justo lo que
         pregunta el dueño de la PYME.
+
+        Con varias cuentas todas caen en la misma tabla; 'cuenta_id' las
+        distingue, igual que en la tabla de insights.
         """
-        divisor = self._divisor_presupuesto(meta_cuenta)
-        moneda = meta_cuenta.get("currency", "")
         filas = []
 
-        for nivel, ruta in (("campaign", "campaigns"),
-                            ("adset", "adsets"),
-                            ("ad", "ads")):
-            try:
-                datos = self._paginar(
-                    f"{cuenta}/{ruta}",
-                    token,
-                    {"fields": ",".join(CAMPOS_ESTRUCTURA_API[nivel])},
-                    alertas,
-                    f"estructura/{ruta}",
-                )
-            except (RuntimeError, httpx.HTTPError) as e:
-                # Un nivel que falla no tiene por que tumbar los otros dos ni
-                # la tabla de insights, que es la importante.
-                msg = f"[{self.fuente_id}] no se pudo leer {ruta}: {e}"
-                logger.warning(msg)
-                alertas.append(msg)
-                continue
-            for item in datos:
-                filas.append(_entidad_a_fila(nivel, item, divisor, moneda))
+        for etiqueta, cuenta in cuentas.items():
+            meta_cuenta = info_por_cuenta.get(cuenta, {})
+            divisor = self._divisor_presupuesto(meta_cuenta)
+            moneda = meta_cuenta.get("currency", "")
+            for nivel, ruta in (("campaign", "campaigns"),
+                                ("adset", "adsets"),
+                                ("ad", "ads")):
+                try:
+                    datos = self._paginar(
+                        f"{cuenta}/{ruta}",
+                        token,
+                        {"fields": ",".join(CAMPOS_ESTRUCTURA_API[nivel])},
+                        alertas,
+                        f"estructura/{ruta}",
+                    )
+                except (RuntimeError, httpx.HTTPError) as e:
+                    # Un nivel que falla no tiene por que tumbar los otros dos
+                    # ni la tabla de insights, que es la importante.
+                    msg = (f"[{self.fuente_id}] no se pudo leer {ruta} de "
+                           f"'{etiqueta or cuenta}': {e}")
+                    logger.warning(msg)
+                    alertas.append(msg)
+                    continue
+                for item in datos:
+                    fila = _entidad_a_fila(nivel, item, divisor, moneda)
+                    # El API no siempre devuelve account_id en cada entidad;
+                    # sin este respaldo, con varias cuentas no se sabria de
+                    # cual vino cada campania.
+                    if not fila.get("cuenta_id"):
+                        fila["cuenta_id"] = cuenta.replace("act_", "")
+                    filas.append(fila)
 
         df = pd.DataFrame(filas, columns=list(CAMPOS_ESTRUCTURA))
         nombre = (self.config.get("tabla") or "meta_ads") + "_estructura"
         tabla = registrar_df(con, df, nombre, self.fuente_id)
-        logger.info("[meta_ads:%s] tabla %s (%d entidades)",
-                    self.fuente_id, tabla, len(df))
+        logger.info("[meta_ads:%s] tabla %s (%d entidades, %d cuenta(s))",
+                    self.fuente_id, tabla, len(df), len(cuentas))
         return tabla
 
 
@@ -1151,6 +1273,19 @@ def _ajustar_tipos(fila: dict) -> dict:
         else:
             ajustada[columna] = valor
     return ajustada
+
+
+def _con_prefijo(valor: str, fuente_id: str) -> str:
+    """
+    Un cliente que copia el numero pelado del Administrador de Anuncios
+    produciria un 404 sin ninguna pista de por que. Se arregla y se avisa.
+    """
+    limpio = str(valor).strip()
+    if not limpio.startswith("act_"):
+        logger.info("[%s] account_id sin prefijo; se usa 'act_%s'.",
+                    fuente_id, limpio)
+        limpio = f"act_{limpio}"
+    return limpio
 
 
 def _entidad_de(fila: dict, nivel: str) -> tuple:

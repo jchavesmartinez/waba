@@ -112,6 +112,20 @@ Una pestaña `usuarios` puede existir para el futuro bot; la ingesta la ignora.
   lunes se atribuye el jueves) y por reembolsos de tráfico inválido. Releer y
   corregir es el funcionamiento normal, no una excepción.
 
+  **Varias cuentas del mismo cliente en una sola tabla.** Casi toda PYME que
+  pauta termina con dos cuentas publicitarias sin saberlo: la que Facebook crea
+  sola la primera vez que alguien impulsa una publicación desde la Página, y la
+  del Business Manager que arma después. Para el dueño eso es *"mi publicidad"*,
+  una sola cosa:
+  ```json
+  {"cuentas":{"Studios":"act_851459412776926","Pagina":"act_842866223676954"}}
+  ```
+  Todo cae en la misma tabla; `cuenta_id` y `cuenta_nombre` las separan cuando
+  hace falta. Si una cuenta falla (acceso revocado, id mal escrito) las demás
+  siguen y queda la alerta; si fallan **todas**, la corrida falla a propósito,
+  para que un problema de acceso no se disfrace de "no hubo pauta". Monedas
+  distintas entre cuentas levantan alerta: sumar el gasto no tendría sentido.
+
   Opcionales: `breakdowns` (`["age","gender"]`), `atribucion`
   (`["7d_click","1d_view"]`), `campos_extra`, `solo_con_gasto`, `max_paginas`,
   `zona_esperada`, y `incluir_estructura: true` → segunda tabla

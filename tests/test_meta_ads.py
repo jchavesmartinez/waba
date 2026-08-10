@@ -224,6 +224,129 @@ def test_se_detecta_el_campo_que_meta_rechaza_para_reintentar_sin_el():
     assert _campos_culpables(mensaje, ["spend"]) == set()
 
 
+# --- varias cuentas en UNA tabla ------------------------------------------
+
+def test_dos_cuentas_no_colisionan_aunque_coincida_todo_lo_demas():
+    """
+    El caso real: el cliente tiene la cuenta vieja de la Pagina y la del BM.
+    Si dos cuentas tuvieran el mismo dia y el mismo id de entidad, una
+    identidad que no incluyera la cuenta las colapsaria en una sola fila y el
+    gasto de una desapareceria sin dejar rastro.
+    """
+    base = {"nivel": "ad", "entidad_id": "120001",
+            "fecha": date(2026, 8, 3), "fecha_fin": date(2026, 8, 3),
+            "desglose": ""}
+    uno = _insight_id({**base, "cuenta_id": "111"})
+    otro = _insight_id({**base, "cuenta_id": "222"})
+    assert uno != otro
+
+
+def test_cuentas_normaliza_una_o_varias():
+    una = _fuente()._cuentas()
+    assert una == {"": "act_1234567890"}
+
+    varias = MetaAdsSource("pauta_meta", {"cuentas": {
+        "Studios": "act_851459412776926",
+        "Pagina": "842866223676954",          # sin prefijo, se corrige
+    }})._cuentas()
+    assert varias == {
+        "Studios": "act_851459412776926",
+        "Pagina": "act_842866223676954",
+    }
+
+
+def test_la_misma_cuenta_repetida_es_error_de_config():
+    fuente = MetaAdsSource("pauta_meta", {"cuentas": {
+        "Studios": "act_111", "Duplicada": "act_111",
+    }})
+    with pytest.raises(RuntimeError, match="mas de una vez"):
+        fuente._cuentas()
+
+
+def test_monedas_distintas_avisan_en_vez_de_sumarse_calladas():
+    fuente = _fuente()
+    df = pd.DataFrame(
+        [{**_fila(), "moneda": "CRC"}, {**_fila(ad_id="9"), "moneda": "USD"}],
+        columns=list(CAMPOS_INSIGHT),
+    )
+    alertas = []
+    fuente._avisar_monedas_mezcladas(df, alertas)
+    assert len(alertas) == 1 and "CRC" in alertas[0] and "USD" in alertas[0]
+
+    # una sola moneda no genera ruido
+    alertas = []
+    fuente._avisar_monedas_mezcladas(
+        pd.DataFrame([_fila()], columns=list(CAMPOS_INSIGHT)), alertas)
+    assert alertas == []
+
+
+def test_una_cuenta_caida_no_tumba_a_la_otra(monkeypatch):
+    """Acceso revocado en una cuenta: se pierde esa, no la corrida entera."""
+    import duckdb
+    import sources.meta_ads as modulo
+
+    class _Cli(_ClienteFalso):
+        def get(self, url, params=None):
+            if "act_MALA" in url:
+                return _RespuestaFalsa({"error": {
+                    "code": 200, "message": "no permitido"}}, status=400)
+            if "/insights" in url:
+                return _RespuestaFalsa({"data": [_crudo()]})
+            if "/campaigns" in url or "/adsets" in url or "/ads" in url:
+                return _RespuestaFalsa({"data": []})
+            return _RespuestaFalsa(CUENTA)
+
+    monkeypatch.setattr(modulo.httpx, "Client", _Cli)
+    monkeypatch.setenv("T", "tok")
+    fuente = modulo.MetaAdsSource("pauta_meta", {
+        "cuentas": {"Buena": "act_BUENA", "Mala": "act_MALA"},
+        "token_env": "T",
+    })
+    con = duckdb.connect(":memory:")
+    try:
+        frag = fuente.cargar(con)
+        filas = con.execute('SELECT COUNT(*) FROM "meta_ads"').fetchone()[0]
+    finally:
+        con.close()
+
+    assert filas == 1
+    assert any("Mala" in a for a in frag.alertas)
+
+
+def test_si_TODAS_las_cuentas_fallan_la_corrida_falla(monkeypatch):
+    """
+    Distinto del caso anterior a proposito: con todas caidas, seguir dejaria
+    una tabla vacia y la guarda de vaciado taparia un problema de ACCESO
+    haciendolo parecer 'no hubo pauta'.
+    """
+    import duckdb
+    import sources.meta_ads as modulo
+
+    class _Cli(_ClienteFalso):
+        def get(self, url, params=None):
+            return _RespuestaFalsa({"error": {
+                "code": 200, "message": "no permitido"}}, status=400)
+
+    monkeypatch.setattr(modulo.httpx, "Client", _Cli)
+    monkeypatch.setenv("T", "tok")
+    fuente = modulo.MetaAdsSource("pauta_meta", {
+        "cuentas": {"A": "act_1", "B": "act_2"}, "token_env": "T",
+    })
+    con = duckdb.connect(":memory:")
+    try:
+        with pytest.raises(RuntimeError, match="ninguna de las 2 cuentas"):
+            fuente.cargar(con)
+    finally:
+        con.close()
+
+
+def test_la_etiqueta_identifica_la_cuenta_si_meta_no_da_el_nombre():
+    crudo = _crudo()
+    crudo.pop("account_name")
+    fila = _fuente()._a_fila(crudo, "act_1", "ad", [], {}, etiqueta="Studios")
+    assert fila["cuenta_nombre"] == "Studios"
+
+
 # --- resolucion del token -------------------------------------------------
 
 MAPA = '{"cliente_a":"EAAG-token-a","cliente_b":"EAAH-token-b"}'
