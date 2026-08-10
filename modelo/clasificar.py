@@ -423,6 +423,11 @@ def main():
         logger.warning("--- %d ALERTA(S) ---", len(alertas))
         for a in alertas:
             logger.warning("  %s", a)
+        # Una alerta significa que al menos una parte de la clasificacion no
+        # se completo (por ejemplo, fallo el SDK/API o faltan categorias).
+        # Devolver exito hacia que Render mostrara "finished successfully"
+        # aunque quedaran valores pendientes sin procesar.
+        return 1
     return 0
 
 

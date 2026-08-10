@@ -1,0 +1,8 @@
+# Dependencias del cron de clasificacion semantica.
+#
+# Reutiliza la pila de ingesta porque lee Google Sheets y escribe en Postgres,
+# y agrega solamente el SDK del LLM. No instala FastAPI, matplotlib ni el resto
+# de dependencias exclusivas del bot web.
+
+-r requirements-ingesta.txt
+anthropic==0.40.0

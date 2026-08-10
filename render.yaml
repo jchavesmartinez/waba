@@ -126,7 +126,7 @@ services:
     # los valores que TODAVIA no estan en el mapeo, asi que correrlo mas
     # seguido no clasifica mas cosas, solo gasta llamadas.
     schedule: "30 8 * * *"
-    buildCommand: pip install -r requirements-ingesta.txt
+    buildCommand: pip install -r requirements-clasificar.txt
     startCommand: python -m modelo.clasificar --y-construir
     envVars:
       - key: PYTHON_VERSION
