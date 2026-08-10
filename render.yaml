@@ -83,6 +83,66 @@ services:
   # numero->cliente, decide tablas por el catalogo y responde con text-to-SQL
   # (la respuesta sale por una llamada al Graph API). Comparte el mismo Sheet
   # maestro y el mismo Neon que la ingesta (solo lee).
+  # -----------------------------------------------------------------------
+  # Capa semantica: convierte las tablas raw en tablas de negocio.
+  #
+  # DOS CRONS SEPARADOS a proposito, porque hacen cosas de costo muy distinto:
+  #
+  #   fachavi-modelos      SQL puro, sin LLM. Barato: puede correr seguido.
+  #   fachavi-clasificar   llama al LLM. Corre una vez al dia.
+  #
+  # El orden importa. 'construir' reconstruye las tablas derivadas leyendo la
+  # tabla de mapeo; 'clasificar' es quien la llena. Un comercio nuevo aparece
+  # como 'sin_clasificar' hasta que clasificar corra, y por eso ese job termina
+  # con --y-construir: reconstruye al final para que el mapeo nuevo entre de
+  # una vez y el cliente no vea 'sin_clasificar' por 24 horas mas.
+  # -----------------------------------------------------------------------
+  - type: cron
+    name: fachavi-modelos
+    runtime: python
+    plan: starter
+    # 20 minutos despues de cada hora, para caer despues de la ingesta y no
+    # reconstruir sobre datos a medio escribir.
+    schedule: "20 * * * *"
+    buildCommand: pip install -r requirements-ingesta.txt
+    startCommand: python -m modelo.construir
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: MASTER_SPREADSHEET_ID
+        sync: false
+      - key: WAREHOUSE_TIPO
+        value: postgres
+      - key: WAREHOUSE_DSN
+        sync: false
+
+  - type: cron
+    name: fachavi-clasificar
+    runtime: python
+    plan: starter
+    # 08:30 UTC = 2:30am hora tica. Una vez al dia alcanza: el job solo mira
+    # los valores que TODAVIA no estan en el mapeo, asi que correrlo mas
+    # seguido no clasifica mas cosas, solo gasta llamadas.
+    schedule: "30 8 * * *"
+    buildCommand: pip install -r requirements-ingesta.txt
+    startCommand: python -m modelo.clasificar --y-construir
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: MASTER_SPREADSHEET_ID
+        sync: false
+      - key: WAREHOUSE_TIPO
+        value: postgres
+      - key: WAREHOUSE_DSN
+        sync: false
+      # Este cron SI necesita la API key; los otros dos no.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
   - type: web
     name: waba
     runtime: python

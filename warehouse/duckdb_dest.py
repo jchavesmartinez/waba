@@ -115,6 +115,15 @@ _TIPOS_INSIGHT = {
     columna: _SQL_META[TIPOS_INSIGHT[columna]] for columna in CAMPOS_INSIGHT
 }
 
+# Tipos logicos de la capa semantica (modelo/tipos.py) -> SQL de DuckDB.
+_SQL_SEMANTICO = {
+    "texto": "VARCHAR",
+    "entero": "BIGINT",
+    "decimal": "DOUBLE",
+    "fecha_hora_es": "TIMESTAMP",
+    "fecha_iso": "TIMESTAMP",
+}
+
 
 class DuckDBDestino(Destino):
     tipo = "duckdb"
@@ -577,6 +586,49 @@ class DuckDBDestino(Destino):
         )
         return stats
 
+    # --- Capa semantica: reconstruccion completa -------------------------
+
+    def reconstruir_tabla(self, esquema: str, tabla: str, columnas: list,
+                          filas: list):
+        con = self.conectar()
+        self.asegurar_esquema(esquema)
+        definicion = ", ".join(
+            f'"{c}" {_SQL_SEMANTICO.get(t, "VARCHAR")}' for c, t in columnas)
+        nombres = [c for c, _ in columnas]
+
+        # DROP y CREATE en la MISMA transaccion que el INSERT: si algo falla a
+        # mitad, la tabla anterior sigue en pie. Sin esto, un error al insertar
+        # dejaria al cliente sin tabla hasta la proxima corrida.
+        con.execute("BEGIN TRANSACTION")
+        try:
+            con.execute(f'DROP TABLE IF EXISTS "{esquema}"."{tabla}"')
+            con.execute(f'CREATE TABLE "{esquema}"."{tabla}" ({definicion})')
+            if filas:
+                marcas = ", ".join("?" for _ in nombres)
+                con.executemany(
+                    f'INSERT INTO "{esquema}"."{tabla}" VALUES ({marcas})',
+                    [[limpiar_valor(f.get(c)) for c in nombres] for f in filas],
+                )
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+        logger.info("semantica %s.%s: %d filas", esquema, tabla, len(filas))
+
+    def leer_filas(self, sql: str, params: dict = None) -> list:
+        # Los :nombre se resuelven a marcadores posicionales para que el SQL
+        # que escribe construir_modelos.py sea el mismo en los dos destinos.
+        valores = []
+        if params:
+            for clave, valor in params.items():
+                if f":{clave}" in sql:
+                    sql = sql.replace(f":{clave}", "?")
+                    valores.append(valor)
+        con = self.conectar()
+        res = con.execute(sql, valores) if valores else con.execute(sql)
+        columnas = [d[0] for d in res.description]
+        return [dict(zip(columnas, f)) for f in res.fetchall()]
+
     def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
         con = self.conectar()
         self.asegurar_esquema(esquema)
@@ -678,3 +730,4 @@ class DuckDBDestino(Destino):
             [cliente_id, fuente_id],
         ).fetchone()
         return fila[0] if fila and fila[0] else None
+

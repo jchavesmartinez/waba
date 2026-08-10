@@ -6,7 +6,7 @@ El bot NUNCA escribe. Esta capa:
     config.dsn_de_cliente, la MISMA logica que usa la ingesta),
   - cachea un engine de SQLAlchemy por DSN,
   - ejecuta SQL dentro de una transaccion READ ONLY, con:
-      * search_path fijado al esquema del cliente (raw_<cliente_id>), para que
+      * search_path fijado a los esquemas del cliente (semantic_ y raw_), para que
         el modelo pueda nombrar las tablas sin prefijo y NO pueda saltar a otro
         esquema por descuido;
       * statement_timeout, que corta consultas que se pasen de tiempo;
@@ -26,6 +26,7 @@ from sqlalchemy import create_engine, text
 
 import config
 from warehouse.base import nombre_esquema
+from modelo.construir import nombre_esquema_semantico
 
 logger = logging.getLogger("fachavi.bot.warehouse_ro")
 
@@ -53,14 +54,22 @@ def _engine(cliente: dict):
     return _engines[dsn]
 
 
-def _prep(cx, esquema: str):
+def _prep(cx, esquema: str, cliente_id: str = ""):
     """Configura la sesion de solo lectura sobre una transaccion ya abierta."""
     # READ ONLY tiene que ser lo primero de la transaccion. Aunque el SQL se
     # cuele con un INSERT/UPDATE, Postgres lo rechaza.
     cx.execute(text("SET TRANSACTION READ ONLY"))
     cx.execute(text(f"SET LOCAL statement_timeout = {int(config.BOT_TIMEOUT_MS)}"))
-    # Aisla al cliente: solo ve su esquema. Sin 'public' ni otros raw_*.
-    cx.execute(text(f'SET LOCAL search_path = "{esquema}"'))
+    # Aisla al cliente: solo ve SUS esquemas. Sin 'public' ni los de otros
+    # clientes. Son dos porque la capa semantica escribe aparte:
+    #   semantic_<cliente>  tablas derivadas (listas para consumo)
+    #   raw_<cliente>       tablas ingestadas tal cual
+    # El aislamiento ENTRE CLIENTES no cambia: los dos esquemas son del mismo.
+    # El orden importa: si una derivada y una raw se llamaran igual, gana la
+    # derivada, que es la que tiene la logica de negocio aplicada.
+    cx.execute(text(
+        f'SET LOCAL search_path = "{nombre_esquema_semantico(cliente_id)}", '
+        f'"{esquema}"'))
 
 
 def ejecutar(cliente: dict, sql: str, limite: int | None = None):
@@ -81,7 +90,7 @@ def ejecutar(cliente: dict, sql: str, limite: int | None = None):
     with _engine(cliente).connect() as cx:
         trans = cx.begin()
         try:
-            _prep(cx, esquema)
+            _prep(cx, esquema, cliente["cliente_id"])
             res = cx.execute(text(sql))
             columnas = list(res.keys())
             filas = [tuple(r) for r in res.fetchmany(limite)]
@@ -104,13 +113,21 @@ def listar_tablas(cliente: dict) -> list:
     al reves: se listan las tablas reales que existen de verdad en el
     warehouse, y se busca cual TERMINA en '__<tabla_logica>'.
     """
-    esquema = nombre_esquema(cliente["cliente_id"])
+    cid = cliente["cliente_id"]
     sql = """
         SELECT table_name FROM information_schema.tables
-        WHERE table_schema = :esq AND table_type = 'BASE TABLE'
+        WHERE table_schema = ANY(:esq) AND table_type = 'BASE TABLE'
     """
-    filas = leer_interno(cliente, sql, {"esq": esquema})
-    return [f["table_name"] for f in filas if not f["table_name"].startswith("_")]
+    filas = leer_interno(cliente, sql, {
+        "esq": [nombre_esquema_semantico(cid), nombre_esquema(cid)]})
+    # Se excluyen las que empiezan con '_' (metadata: _catalogo, _kpis, _mapeo)
+    # y las de rechazos: son diagnostico de la ingesta, no data de negocio, y
+    # solo gastarian espacio del prompt.
+    return sorted({
+        f["table_name"] for f in filas
+        if not f["table_name"].startswith("_")
+        and not f["table_name"].endswith("__rechazos")
+    })
 
 
 def listar_columnas(cliente: dict, tablas_reales) -> dict:
@@ -121,14 +138,16 @@ def listar_columnas(cliente: dict, tablas_reales) -> dict:
     tablas = list(tablas_reales or [])
     if not tablas:
         return {}
-    esquema = nombre_esquema(cliente["cliente_id"])
+    cid = cliente["cliente_id"]
     sql = """
         SELECT table_name, column_name, data_type
         FROM information_schema.columns
-        WHERE table_schema = :esq AND table_name = ANY(:tablas)
+        WHERE table_schema = ANY(:esq) AND table_name = ANY(:tablas)
         ORDER BY table_name, ordinal_position
     """
-    filas = leer_interno(cliente, sql, {"esq": esquema, "tablas": tablas})
+    filas = leer_interno(cliente, sql, {
+        "esq": [nombre_esquema_semantico(cid), nombre_esquema(cid)],
+        "tablas": tablas})
     out: dict = {}
     for f in filas:
         out.setdefault(f["table_name"], []).append((f["column_name"], f["data_type"]))
@@ -145,7 +164,7 @@ def leer_interno(cliente: dict, sql: str, params: dict | None = None):
     with _engine(cliente).connect() as cx:
         trans = cx.begin()
         try:
-            _prep(cx, esquema)
+            _prep(cx, esquema, cliente["cliente_id"])
             res = cx.execute(text(sql), params or {})
             columnas = list(res.keys())
             filas = [dict(zip(columnas, r)) for r in res.fetchall()]

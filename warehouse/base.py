@@ -245,6 +245,37 @@ class Destino(ABC):
             f"El destino '{self.tipo}' no soporta UPSERT de Meta Ads."
         )
 
+    def reconstruir_tabla(self, esquema: str, tabla: str, columnas: list,
+                          filas: list):
+        """
+        DROP + CREATE + INSERT de una tabla DERIVADA (capa semantica).
+
+        `columnas` es [(nombre, tipo_logico)] y viene de la metadata, NO de los
+        datos: un modelo sin filas tiene que crear igual su tabla completa. Si
+        el esquema saliera de las filas, una tabla vacia quedaria sin columnas
+        y el bot no la veria nunca; peor, cambiaria de forma segun cuantas
+        filas hubo ese dia.
+
+        Es DROP y no UPSERT a proposito: la tabla derivada es una funcion pura
+        de sus entradas (raw + mapeo + overrides + metadata), asi que
+        reconstruirla entera es la operacion natural. Lo contrario de la
+        ingesta, donde el origen no se puede volver a leer completo.
+        """
+        raise NotImplementedError(
+            f"El destino '{self.tipo}' no soporta la capa semantica."
+        )
+
+    def leer_filas(self, sql: str, params: dict = None) -> list:
+        """
+        Ejecuta un SELECT y devuelve una lista de dicts.
+
+        Existe para que construir_modelos.py no tenga que saber si por debajo
+        hay un engine de SQLAlchemy o una conexion nativa de DuckDB.
+        """
+        raise NotImplementedError(
+            f"El destino '{self.tipo}' no soporta lectura generica."
+        )
+
     def __repr__(self):
         return f"<{self.__class__.__name__} tipo={self.tipo}>"
 

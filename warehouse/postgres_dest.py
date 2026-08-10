@@ -110,6 +110,15 @@ _TIPOS_INSIGHT = {
     columna: _SQL_META[TIPOS_INSIGHT[columna]] for columna in CAMPOS_INSIGHT
 }
 
+# Tipos logicos de la capa semantica (modelo/tipos.py) -> SQL de Postgres.
+_SQL_SEMANTICO = {
+    "texto": "TEXT",
+    "entero": "BIGINT",
+    "decimal": "DOUBLE PRECISION",
+    "fecha_hora_es": "TIMESTAMP",
+    "fecha_iso": "TIMESTAMP",
+}
+
 
 def _ident(nombre: str) -> str:
     """
@@ -701,6 +710,37 @@ class PostgresDestino(Destino):
             stats["actual_total"],
         )
         return stats
+
+    # --- Capa semantica: reconstruccion completa -------------------------
+
+    def reconstruir_tabla(self, esquema: str, tabla: str, columnas: list,
+                          filas: list):
+        esquema, tabla = _ident(esquema), _ident(tabla)
+        self.asegurar_esquema(esquema)
+        definicion = ", ".join(
+            f'"{c}" {_SQL_SEMANTICO.get(t, "TEXT")}' for c, t in columnas)
+        nombres = [c for c, _ in columnas]
+
+        # DROP, CREATE e INSERT en la MISMA transaccion: si algo falla a mitad,
+        # la tabla anterior sigue en pie. Sin esto, un error al insertar
+        # dejaria al cliente sin tabla hasta la proxima corrida.
+        with self.conectar().begin() as cx:
+            cx.execute(text(f'DROP TABLE IF EXISTS "{esquema}"."{tabla}"'))
+            cx.execute(text(f'CREATE TABLE "{esquema}"."{tabla}" ({definicion})'))
+            if filas:
+                binds = ", ".join(f":{c}" for c in nombres)
+                cx.execute(
+                    text(f'INSERT INTO "{esquema}"."{tabla}" '
+                         f'({", ".join(chr(34) + c + chr(34) for c in nombres)}) '
+                         f'VALUES ({binds})'),
+                    [{c: f.get(c) for c in nombres} for f in filas],
+                )
+        logger.info("semantica %s.%s: %d filas", esquema, tabla, len(filas))
+
+    def leer_filas(self, sql: str, params: dict = None) -> list:
+        with self.conectar().connect() as cx:
+            res = cx.execute(text(sql), params or {})
+            return [dict(f) for f in res.mappings()]
 
     def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
         self.asegurar_esquema(esquema)
