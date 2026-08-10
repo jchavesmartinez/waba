@@ -62,11 +62,18 @@ _CAMPOS_COLS = (
     # clasifica_en='cuenta_contable' crea esa columna y le aplica las tres
     # capas (override > mapeo > regla).
     "clasifica_en",
+    # Columnas adicionales, separadas por coma, que se presentan junto al
+    # campo principal al clasificador. Pueden ser campos extraidos por el
+    # modelo o columnas de la tabla raw (p.ej. asunto,tipo_transaccion).
+    "clasifica_con",
     "descripcion",
 )
 
 _CLASIFICACION_COLS = (
     "modelo_id",
+    # Columnas contra las que se evalua ESTA regla, separadas por coma. Vacio
+    # conserva el comportamiento historico: solo el campo que clasifica.
+    "columnas",
     "patron",           # patron SQL LIKE sobre la columna clasificada
     "valor",            # que se asigna cuando calza
     "prioridad",        # menor gana; permite reglas especificas antes que generales
@@ -157,10 +164,29 @@ def _leer_pestania(libro, cid: str, nombre: str, columnas: tuple,
             logger.warning("[%s] falta la pestania '%s' del Sheet.", cid, nombre)
         return []
 
+    # No se usa get_all_records(): varias plantillas traen una fila explicativa
+    # encima del encabezado y gspread la interpreta como headers vacios
+    # duplicados. Se detecta la fila que contiene la columna clave y desde ahi
+    # se arma el registro, permitiendo notas editables antes de la tabla.
+    valores = ws.get_all_values()
+    encabezado_i = next(
+        (i for i, fila in enumerate(valores)
+         if clave in {str(c).strip().lower().replace(" ", "_") for c in fila}),
+        None,
+    )
+    if encabezado_i is None:
+        if not silencioso:
+            logger.warning("[%s] la pestania '%s' no tiene encabezado '%s'.",
+                           cid, nombre, clave)
+        return []
+
+    encabezados = [str(c).strip().lower().replace(" ", "_")
+                   for c in valores[encabezado_i]]
     filas = []
-    for cruda in ws.get_all_records():
-        f = {str(k).strip().lower().replace(" ", "_"): str(v).strip()
-             for k, v in cruda.items()}
+    for cruda in valores[encabezado_i + 1:]:
+        f = {encabezados[i]: str(v).strip()
+             for i, v in enumerate(cruda)
+             if i < len(encabezados) and encabezados[i]}
         # Una fila sin su columna clave es una fila en blanco o a medio
         # escribir; se ignora sin ruido. Google devuelve las filas vacias que
         # quedan debajo de los datos.

@@ -37,6 +37,7 @@ tres son problemas que hay que ver, no filas que deban desaparecer en silencio.
 import hashlib
 import json
 import logging
+import re
 
 from . import extractores, tipos
 from .metadata import campos_de, clasificacion_de, overrides_de
@@ -95,6 +96,7 @@ class Modelo:
         # etiqueta sin desplegar), pero dos filas del Sheet para la misma
         # columna es un error de configuracion que hay que ver.
         vistas = set()
+        destinos_clasificacion = set()
         for campo in self.campos_declarados:
             columna = campo.get("columna", "")
             if columna in vistas:
@@ -116,6 +118,29 @@ class Modelo:
                     f"'{campo['tipo']}' desconocido. Disponibles: "
                     f"{', '.join(tipos.tipos_disponibles())}."
                 )
+            for contexto in self.columnas_contexto(campo):
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", contexto):
+                    raise RuntimeError(
+                        f"El modelo '{self.modelo_id}', columna '{columna}': "
+                        f"clasifica_con contiene un nombre invalido: '{contexto}'."
+                    )
+            destino = str(campo.get("clasifica_en", "")).strip()
+            if destino:
+                if destino in destinos_clasificacion:
+                    raise RuntimeError(
+                        f"El modelo '{self.modelo_id}' declara mas de un campo "
+                        f"que escribe la clasificacion '{destino}'. Usa un solo "
+                        "campo principal y agrega los demas en clasifica_con."
+                    )
+                destinos_clasificacion.add(destino)
+
+        for regla in self.reglas:
+            for columna in _lista_columnas(regla.get("columnas")):
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", columna):
+                    raise RuntimeError(
+                        f"El modelo '{self.modelo_id}' tiene una regla con "
+                        f"columna invalida: '{columna}'."
+                    )
 
     # ---------------- esquema ----------------
 
@@ -143,6 +168,14 @@ class Modelo:
             if destino and destino not in vistas:
                 salida.append((destino, "texto"))
                 vistas.add(destino)
+        # El contexto puede venir de la tabla raw (por ejemplo 'asunto') y no
+        # ser un campo extraido del cuerpo. Se copia a la tabla semantica para
+        # que el job de clasificacion, que corre despues, pueda leerlo.
+        for campo in self.campos:
+            for columna in self.columnas_contexto(campo):
+                if columna not in vistas:
+                    salida.append((columna, "texto"))
+                    vistas.add(columna)
         return salida
 
     def columnas_rechazos(self) -> list:
@@ -187,6 +220,7 @@ class Modelo:
             fila[COL_CLAVE] = clave
             fila[COL_ORIGEN] = self.tabla_origen
             fila[COL_MODELO] = self.modelo_id
+            self._copiar_contexto_raw(fila, cruda)
             self._clasificar(fila, mapeo, indice_overrides.get(clave, {}))
             derivadas.append(fila)
 
@@ -233,12 +267,13 @@ class Modelo:
                 fila[destino] = override[destino]
                 continue
 
-            clave = _normalizar(origen)
+            valor_clasificacion = self.valor_clasificacion(fila, campo)
+            clave = _normalizar(valor_clasificacion)
             if clave and clave in mapeo:
                 fila[destino] = mapeo[clave]
                 continue
 
-            fila[destino] = self._por_regla(origen) or SIN_CLASIFICAR
+            fila[destino] = self._por_regla(fila, campo, origen) or SIN_CLASIFICAR
 
         # Overrides sobre columnas que no son de clasificacion (corregir un
         # monto mal leido, por ejemplo).
@@ -246,15 +281,48 @@ class Modelo:
             if columna in fila and fila.get(columna) != valor:
                 fila[columna] = valor
 
-    def _por_regla(self, valor):
+    def _por_regla(self, fila: dict, campo: dict, valor):
         """Primera regla que calza, en orden de prioridad."""
-        texto = _normalizar(valor)
-        if not texto:
-            return None
         for regla in self.reglas:
+            columnas = _lista_columnas(regla.get("columnas"))
+            if columnas:
+                texto = _normalizar(" | ".join(
+                    str(fila.get(c) or "") for c in columnas
+                ))
+            else:
+                texto = _normalizar(valor)
+            if not texto:
+                continue
             if _calza_like(texto, _normalizar(regla.get("patron"))):
                 return regla.get("valor")
         return None
+
+    def columnas_contexto(self, campo: dict) -> list:
+        """Columnas extra que acompanan al valor principal al clasificar."""
+        principal = str(campo.get("columna", "")).strip()
+        return [c for c in _lista_columnas(campo.get("clasifica_con"))
+                if c and c != principal]
+
+    def columnas_de_clasificacion(self, campo: dict) -> list:
+        principal = str(campo.get("columna", "")).strip()
+        return [principal] + self.columnas_contexto(campo)
+
+    def valor_clasificacion(self, fila: dict, campo: dict) -> str:
+        """Texto estable que se mapea y se presenta al LLM."""
+        columnas = self.columnas_de_clasificacion(campo)
+        if len(columnas) == 1:
+            return str(fila.get(columnas[0]) or "").strip()
+        return " | ".join(
+            f"{columna}: {str(fila.get(columna) or '').strip()}"
+            for columna in columnas
+        )
+
+    def _copiar_contexto_raw(self, fila: dict, cruda: dict) -> None:
+        for campo in self.campos:
+            for columna in self.columnas_contexto(campo):
+                if columna not in fila:
+                    valor = cruda.get(columna)
+                    fila[columna] = None if valor is None else str(valor).strip()
 
     def _indexar_overrides(self) -> dict:
         indice = {}
@@ -348,6 +416,17 @@ def _normalizar(valor) -> str:
     plano = unicodedata.normalize("NFKD", str(valor))
     plano = "".join(c for c in plano if not unicodedata.combining(c))
     return " ".join(plano.upper().split())
+
+
+def _lista_columnas(valor) -> list:
+    """Lista editable en Sheet: acepta comas o punto y coma."""
+    vistas, salida = set(), []
+    for parte in re.split(r"[,;]", str(valor or "")):
+        columna = parte.strip()
+        if columna and columna not in vistas:
+            salida.append(columna)
+            vistas.add(columna)
+    return salida
 
 
 def _calza_like(texto: str, patron: str) -> bool:

@@ -86,6 +86,36 @@ def test_solo_se_mandan_valores_distintos_y_sin_clasificar(destino, monkeypatch)
     assert "AM PM" not in enviados        # ya estaba clasificado
 
 
+def test_el_llm_recibe_las_columnas_de_contexto_elegidas(monkeypatch):
+    d = DuckDBDestino(":memory:")
+    d.asegurar_esquema("semantic_cliente_a")
+    d.reconstruir_tabla(
+        "semantic_cliente_a", "transacciones_contexto",
+        [("comercio", "texto"), ("asunto", "texto"),
+         ("tipo_transaccion", "texto"), ("cuenta_contable", "texto")],
+        [{"comercio": "AM PM", "asunto": "Compra aprobada",
+          "tipo_transaccion": "COMPRA", "cuenta_contable": SIN_CLASIFICAR}],
+    )
+    meta = _metadata()
+    meta["campos"] = [{
+        "modelo_id": "bac", "columna": "comercio", "tipo": "texto",
+        "patron": "Comercio", "clasifica_en": "cuenta_contable",
+        "clasifica_con": "asunto,tipo_transaccion",
+    }]
+    modelo = Modelo(
+        {"modelo_id": "bac", "tabla_origen": "correos",
+         "tabla_destino": "transacciones_contexto",
+         "extractor": "bac_transacciones", "columna_texto": "cuerpo"},
+        meta,
+    )
+    llamadas = _simular(monkeypatch, [])
+    C.clasificar_modelo(d, "semantic_cliente_a", modelo, meta)
+    assert llamadas[0] == [
+        "comercio: AM PM | asunto: Compra aprobada | tipo_transaccion: COMPRA"
+    ]
+    d.cerrar()
+
+
 def test_no_se_reclasifica_lo_que_ya_esta_en_el_mapeo(destino, monkeypatch):
     """El costo tiende a cero: la segunda corrida no vuelve a preguntar."""
     _simular(monkeypatch, [

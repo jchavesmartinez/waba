@@ -77,7 +77,8 @@ def _modelo(overrides=None, reglas=None, campos=None):
 
 
 def _fila(cuerpo=CUERPO_BAC, clave="c1"):
-    return {"correo_id": clave, "cuerpo": cuerpo}
+    return {"correo_id": clave, "cuerpo": cuerpo,
+            "asunto": "Notificacion de compra BAC"}
 
 
 # --- extraccion y tipado --------------------------------------------------
@@ -208,6 +209,34 @@ def test_el_mapeo_ignora_acentos_y_espacios_de_mas():
     assert filas[0]["cuenta_contable"] == "Supermercado"
 
 
+def test_varias_columnas_forman_un_solo_contexto_de_clasificacion():
+    campos = [dict(c) for c in CAMPOS]
+    campos[0]["clasifica_con"] = "asunto, tipo_transaccion"
+    modelo = _modelo(campos=campos, reglas=[])
+
+    columnas = dict(modelo.columnas())
+    assert columnas["asunto"] == "texto"
+
+    cruda = _fila()
+    esperada = modelo.valor_clasificacion(
+        {"comercio": "AM PM VEROLIZ", "asunto": cruda["asunto"],
+         "tipo_transaccion": "COMPRA"}, campos[0])
+    filas, _ = modelo.procesar(
+        [cruda], mapeo={esperada.upper(): "Supermercado"})
+
+    assert filas[0]["asunto"] == "Notificacion de compra BAC"
+    assert filas[0]["cuenta_contable"] == "Supermercado"
+
+
+def test_una_regla_puede_elegir_las_columnas_que_evalua():
+    campos = [dict(c) for c in CAMPOS]
+    campos[0]["clasifica_con"] = "asunto,tipo_transaccion"
+    reglas = [{"modelo_id": "bac", "columnas": "asunto,tipo_transaccion",
+               "patron": "%COMPRA%", "valor": "Compras", "prioridad": "10"}]
+    filas, _ = _modelo(campos=campos, reglas=reglas).procesar([_fila()])
+    assert filas[0]["cuenta_contable"] == "Compras"
+
+
 # --- validacion de la metadata --------------------------------------------
 
 def test_dos_campos_con_la_misma_columna_es_error_de_config():
@@ -228,6 +257,15 @@ def test_un_tipo_inexistente_falla_al_construir_no_en_produccion():
 def test_un_modelo_sin_campos_no_arranca():
     with pytest.raises(RuntimeError, match="_campos"):
         _modelo(campos=[])
+
+
+def test_dos_campos_no_pueden_pisar_la_misma_clasificacion():
+    campos = CAMPOS + [
+        {"modelo_id": "bac", "columna": "ciudad", "tipo": "texto",
+         "patron": "Ciudad", "clasifica_en": "cuenta_contable"}
+    ]
+    with pytest.raises(RuntimeError, match="clasifica_con"):
+        _modelo(campos=campos)
 
 
 # --- identidad y overrides ------------------------------------------------

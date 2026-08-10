@@ -196,16 +196,16 @@ def _pendientes(destino, esquema_sem: str, modelo, ya_mapeados: set) -> dict:
     diferencia entre 300 llamadas y una, y ademas garantiza que las 300 filas
     reciban la misma categoria.
     """
-    columnas = modelo.valores_a_clasificar()
-    if not columnas:
+    campos = [c for c in modelo.campos if c.get("clasifica_en")]
+    if not campos:
         return {}
 
     pendientes = {}
-    for columna in columnas:
-        destino_col = next(
-            (c.get("clasifica_en") for c in modelo.campos
-             if c["columna"] == columna), None)
-        sql = (f'SELECT DISTINCT "{columna}" AS valor FROM "{esquema_sem}"."'
+    for campo in campos:
+        columnas = modelo.columnas_de_clasificacion(campo)
+        destino_col = campo.get("clasifica_en")
+        seleccion = ", ".join(f'"{c}"' for c in columnas)
+        sql = (f'SELECT DISTINCT {seleccion} FROM "{esquema_sem}"."'
                f'{modelo.tabla_destino}" WHERE "{destino_col}" = :sc')
         try:
             filas = destino.leer_filas(sql, {"sc": SIN_CLASIFICAR})
@@ -216,7 +216,7 @@ def _pendientes(destino, esquema_sem: str, modelo, ya_mapeados: set) -> dict:
                 modelo.modelo_id, modelo.tabla_destino, e)
             return {}
         for fila in filas:
-            original = (fila.get("valor") or "").strip()
+            original = modelo.valor_clasificacion(fila, campo)
             clave = _normalizar(original)
             if clave and clave not in ya_mapeados:
                 pendientes[clave] = original
