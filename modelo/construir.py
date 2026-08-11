@@ -28,6 +28,7 @@ import argparse
 import logging
 import sys
 
+import catalogo_cliente
 import config
 from .metadata import leer as leer_metadata
 from .motor import Modelo
@@ -39,6 +40,7 @@ logger = logging.getLogger("fachavi.modelo.construir")
 
 SUFIJO_RECHAZOS = "__rechazos"
 TABLA_MAPEO = "_mapeo"
+FUENTE_METADATA_SEMANTICA = "_modelo_semantico"
 
 
 def nombre_esquema_semantico(cliente_id: str) -> str:
@@ -56,16 +58,16 @@ def construir_cliente(destino, cliente: dict, probar: bool = False) -> dict:
     """Construye todas las tablas derivadas de un cliente."""
     cid = cliente["cliente_id"]
     metadata = leer_metadata(cliente)
-    if not metadata["modelos"]:
-        logger.info("[%s] sin modelos declarados; nada que construir.", cid)
-        return {"modelos": 0, "filas": 0, "rechazos": 0}
-
     esquema_raw = nombre_esquema(cid)
     esquema_sem = nombre_esquema_semantico(cid)
     if not probar:
         destino.asegurar_esquema(esquema_sem)
 
     total = {"modelos": 0, "filas": 0, "rechazos": 0, "alertas": []}
+    tablas_construidas = set()
+
+    if not metadata["modelos"]:
+        logger.info("[%s] sin modelos declarados; se limpia su metadata semantica.", cid)
 
     for fila in metadata["modelos"]:
         try:
@@ -92,8 +94,70 @@ def construir_cliente(destino, cliente: dict, probar: bool = False) -> dict:
         total["filas"] += resultado["filas"]
         total["rechazos"] += resultado["rechazos"]
         total["alertas"] += resultado["alertas"]
+        tablas_construidas.add(modelo.tabla_destino)
+
+    _publicar_metadata_semantica(
+        destino, cliente, esquema_raw, esquema_sem, tablas_construidas, probar)
 
     return total
+
+
+def _publicar_metadata_semantica(destino, cliente: dict, esquema_raw: str,
+                                 esquema_sem: str, tablas_reales: set,
+                                 probar: bool = False) -> None:
+    """Publica catalogo/KPIs de modelos sin copiar sus datos al esquema raw.
+
+    El bot lee el catalogo consolidado desde ``raw_<cliente>._catalogo``, pero
+    resuelve cada nombre logico contra las tablas reales de AMBOS esquemas.
+    Por eso solo se escriben aqui las filas pequenas de metadata; la tabla de
+    negocio sigue viviendo exclusivamente en ``semantic_<cliente>``.
+    """
+    catalogo, kpis = catalogo_cliente.leer(cliente)
+    nombres = _nombres_logicos(tablas_reales)
+
+    def corresponde(valor_tabla) -> bool:
+        mencionadas = [t.lower() for t in catalogo_cliente.tablas_de(valor_tabla)]
+        return bool(mencionadas) and all(t in nombres for t in mencionadas)
+
+    catalogo_sem = [f for f in catalogo if corresponde(f.get("tabla"))]
+    kpis_sem = [f for f in kpis if corresponde(f.get("tabla"))]
+
+    if probar:
+        logger.info(
+            "[PRUEBA] metadata semantica de '%s': %d filas de catalogo, %d KPIs",
+            cliente.get("cliente_id"), len(catalogo_sem), len(kpis_sem))
+        return
+
+    # Estas funciones borran solamente las filas de FUENTE_METADATA_SEMANTICA;
+    # nunca pisan las publicadas por fachavi-ingesta bajo otras fuentes.
+    destino.escribir_catalogo(
+        esquema_raw, FUENTE_METADATA_SEMANTICA, catalogo_sem)
+    destino.escribir_kpis(esquema_raw, FUENTE_METADATA_SEMANTICA, kpis_sem)
+
+    aplicar = getattr(destino, "aplicar_comentarios", None)
+    if aplicar and catalogo_sem:
+        mapa = {}
+        for real in tablas_reales:
+            logico = real.rsplit("__", 1)[-1].lower()
+            mapa[logico] = real
+            mapa[real.lower()] = real
+        aplicar(esquema_sem, mapa, catalogo_sem)
+
+    logger.info(
+        "[%s] metadata semantica publicada: %d filas de catalogo, %d KPIs",
+        cliente.get("cliente_id"), len(catalogo_sem), len(kpis_sem))
+
+
+def _nombres_logicos(tablas_reales: set) -> set:
+    """Acepta en el Sheet tanto ``transacciones`` como el nombre fisico."""
+    nombres = set()
+    for tabla in tablas_reales:
+        real = str(tabla or "").strip().lower()
+        if not real:
+            continue
+        nombres.add(real)
+        nombres.add(real.rsplit("__", 1)[-1])
+    return nombres
 
 
 def _construir_modelo(destino, cid, esquema_raw, esquema_sem, modelo,

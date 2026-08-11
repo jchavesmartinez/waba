@@ -9,7 +9,13 @@ reconstruir no deja restos de la corrida anterior.
 import pandas as pd
 import pytest
 
-from modelo.construir import SUFIJO_RECHAZOS, _escribir, nombre_esquema_semantico
+from modelo.construir import (
+    FUENTE_METADATA_SEMANTICA,
+    SUFIJO_RECHAZOS,
+    _escribir,
+    _publicar_metadata_semantica,
+    nombre_esquema_semantico,
+)
 from modelo.motor import Modelo
 from warehouse.duckdb_dest import DuckDBDestino
 
@@ -177,3 +183,48 @@ def test_un_override_huerfano_se_detecta(destino):
     huerfanos = modelo.claves_de_override() - claves
     assert huerfanos == {"YA_NO_EXISTE"}
     assert filas[0]["cuenta_contable"] == "Regalos"
+
+
+# --- publicacion de metadata semantica -----------------------------------
+
+def test_modelos_publica_catalogo_y_kpis_sin_copiar_datos_a_raw(monkeypatch):
+    escritos = []
+
+    class Destino:
+        def escribir_catalogo(self, esquema, fuente_id, filas):
+            escritos.append(("catalogo", esquema, fuente_id, filas))
+
+        def escribir_kpis(self, esquema, fuente_id, filas):
+            escritos.append(("kpis", esquema, fuente_id, filas))
+
+    monkeypatch.setattr(
+        "modelo.construir.catalogo_cliente.leer",
+        lambda cliente: (
+            [
+                {"tabla": "ventas", "columna": "*"},
+                {"tabla": "transacciones", "columna": "*",
+                 "instruccion": "si: la puede usar el bot"},
+                {"tabla": "transacciones", "columna": "monto"},
+            ],
+            [
+                {"kpi": "ventas_totales", "tabla": "ventas"},
+                {"kpi": "gasto_neto", "tabla": "transacciones"},
+            ],
+        ),
+    )
+
+    _publicar_metadata_semantica(
+        Destino(), {"cliente_id": "cliente_a"}, "raw_cliente_a",
+        "semantic_cliente_a", {"finanzas__transacciones"})
+
+    catalogo = escritos[0]
+    kpis = escritos[1]
+    assert catalogo[:3] == (
+        "catalogo", "raw_cliente_a", FUENTE_METADATA_SEMANTICA)
+    assert [f["tabla"] for f in catalogo[3]] == [
+        "transacciones", "transacciones"]
+    assert kpis[:3] == ("kpis", "raw_cliente_a", FUENTE_METADATA_SEMANTICA)
+    assert [f["kpi"] for f in kpis[3]] == ["gasto_neto"]
+    # No existe ninguna escritura de la tabla de negocio en raw: estas son
+    # exclusivamente las dos tablas pequenas de metadata.
+    assert {e[0] for e in escritos} == {"catalogo", "kpis"}
