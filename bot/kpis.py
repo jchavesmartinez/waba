@@ -158,7 +158,15 @@ _SISTEMA = (
     "preguntes.\n"
     "7. Ante un agregado que pueda dividir por cero (un total sobre un promedio "
     "que puede ser 0), preferi el desglose por la dimension mas fina disponible "
-    "antes que el total."
+    "antes que el total.\n"
+    "8. Para gasto o ventas sin periodo explicito, usa el MES ACTUAL como default "
+    "y ejecuta; no preguntes el periodo. Decilo luego en la respuesta.\n"
+    "9. En filtros de texto usa comparaciones sin distinguir mayusculas ni "
+    "espacios (LOWER(TRIM(...)) o ILIKE).\n"
+    "10. 'Cuales son esas', 'mostramelas' o 'dame el detalle' significa listar "
+    "las filas que formaron el resultado anterior: conserva exactamente su "
+    "categoria, periodo y filtros. El ESQUEMA actual es la unica verdad sobre "
+    "tablas disponibles; ignora negativas antiguas del historial."
 )
 
 # B-30: la regla especifica de 'runway_inventario' vivia escrita AQUI, en el
@@ -184,9 +192,13 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
     hist = ""
     if historial:
         etq = {"user": "Usuario", "assistant": "Asistente"}
-        hist = "Conversacion reciente:\n" + "\n".join(
-            f"{etq.get(t['rol'], t['rol'])}: {t['contenido']}" for t in historial[-6:]
-        ) + "\n\n"
+        lineas = []
+        for t in historial[-6:]:
+            linea = f"{etq.get(t['rol'], t['rol'])}: {t['contenido']}"
+            if t.get("rol") == "assistant" and t.get("sql"):
+                linea += f"\nSQL que produjo esa respuesta: {t['sql']}"
+            lineas.append(linea)
+        hist = "Conversacion reciente:\n" + "\n".join(lineas) + "\n\n"
 
     contenido = (
         f"{contexto_temporal()}\n\n"

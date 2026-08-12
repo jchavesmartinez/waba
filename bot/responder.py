@@ -193,7 +193,8 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     if respuesta.adjuntos:
         nombres = ", ".join(a.nombre for a in respuesta.adjuntos)
         texto_memoria = f"{texto_memoria}\n[Se envió el archivo adjunto: {nombres}]"
-    memoria.guardar_intercambio(cliente, numero, pregunta, texto_memoria)
+    memoria.guardar_intercambio(
+        cliente, numero, pregunta, texto_memoria, sql=respuesta.sql)
     return respuesta
 
 
@@ -315,11 +316,14 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # 4) Si pidio archivo, armarlo con el MISMO resultado. Nunca se vuelve a
     #    consultar la base: el adjunto es otra presentacion de lo ya autorizado.
     if fmt == formato.TEXTO or not filas:
-        return Respuesta(texto)
+        return Respuesta(texto, sql=sql)
     # Si el gráfico salió de nuestra propia inferencia (no lo pidió el usuario),
     # un aviso de "no pude armarlo" es ruido sobre algo que nunca prometimos.
-    return _armar_adjunto(cid, fmt, pregunta, texto, columnas, filas, historial,
-                          avisar_si_falla=not hubo_arte)
+    respuesta = _armar_adjunto(
+        cid, fmt, pregunta, texto, columnas, filas, historial,
+        avisar_si_falla=not hubo_arte)
+    respuesta.sql = sql
+    return respuesta
 
 
 def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,

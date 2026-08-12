@@ -39,6 +39,9 @@ class Respuesta:
 
     texto: str
     adjuntos: list = field(default_factory=list)
+    # Consulta que produjo la respuesta. No se muestra al usuario; se guarda en
+    # memoria para que "cuales son esas" conserve exactamente los filtros.
+    sql: str = ""
 
     def __str__(self) -> str:      # compatibilidad con codigo viejo/tests
         return self.texto

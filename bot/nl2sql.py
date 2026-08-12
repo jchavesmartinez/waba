@@ -58,6 +58,15 @@ _SISTEMA_SQL = (
     "  escritura. Solo SELECT.\n"
     "- Si la pregunta no se puede responder con estas tablas, devolve exactamente: "
     "  SELECT 'NO_RESPONDIBLE' AS nota;\n"
+    "- Para filtros de texto escritos por el usuario (categorias, comercios, "
+    "productos), compara sin distinguir mayusculas ni espacios: usa "
+    "LOWER(TRIM(columna)) = LOWER(TRIM('valor')) o ILIKE.\n"
+    "- Si pregunta por gasto/ventas sin indicar periodo, usa el MES ACTUAL como "
+    "default y deja que la respuesta lo diga; no pidas aclaracion.\n"
+    "- En seguimientos como 'cuales son esas', 'mostramelas' o 'y el detalle', "
+    "reutiliza la categoria, periodo y demas filtros del resultado anterior y "
+    "devuelve las filas de detalle que lo componen. El esquema actual manda sobre "
+    "cualquier afirmacion vieja del historial acerca de acceso a datos.\n"
     "- Devolve SOLO el SQL, sin explicacion, sin markdown, sin ```."
 )
 
@@ -75,8 +84,12 @@ def _historial_texto(historial) -> str:
     if not historial:
         return ""
     etiqueta = {"user": "Usuario", "assistant": "Asistente"}
-    lineas = [f"{etiqueta.get(t['rol'], t['rol'])}: {t['contenido']}"
-              for t in historial]
+    lineas = []
+    for t in historial:
+        linea = f"{etiqueta.get(t['rol'], t['rol'])}: {t['contenido']}"
+        if t.get("rol") == "assistant" and t.get("sql"):
+            linea += f"\nSQL que produjo esa respuesta: {t['sql']}"
+        lineas.append(linea)
     return "\n".join(lineas)
 
 
@@ -233,14 +246,24 @@ def validar_sql(sql: str, tablas_permitidas) -> tuple[bool, str]:
     # Nombres de CTE: son alias, no tablas fisicas; se ignoran en el chequeo.
     ctes = {c.alias_or_name.lower() for c in arbol.find_all(exp.CTE)}
 
+    tablas_fisicas = []
     for tabla in arbol.find_all(exp.Table):
         if tabla.db:  # tiene esquema explicito -> no se permite calificar
             return False, f"no se permite calificar por esquema: {tabla.db}"
         nombre = tabla.name.lower()
         if nombre in ctes:
             continue
+        tablas_fisicas.append(nombre)
         if nombre not in permit:
             return False, f"tabla no permitida: {nombre}"
+
+    # Un SELECT de texto inventado pasa todas las validaciones de seguridad y
+    # produce respuestas absurdas como "no tengo contexto" sin consultar nada.
+    # El unico SELECT sin tabla permitido es el sentinel contractual.
+    if not tablas_fisicas:
+        limpio = re.sub(r"\s+", " ", (sql or "").strip().rstrip(";")).lower()
+        if limpio != "select 'no_respondible' as nota":
+            return False, "la consulta debe leer una tabla; no se aceptan respuestas literales."
 
     return True, ""
 

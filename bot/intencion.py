@@ -135,10 +135,25 @@ def clasificar(pregunta: str, historial=None) -> str:
     if limpia in _SALUDOS:
         return "saludo"
 
+    # Respuestas cortas a una pregunta del bot ("este mes", "en total") y
+    # referencias al ultimo resultado ("esas", "el detalle") son continuacion
+    # de una consulta, no charla sobre el bot. Mandarlas a 'meta' pierde el hilo
+    # justo cuando el usuario esta dando el parametro que se le pidio.
+    palabras = limpia.split()
+    if historial and len(palabras) <= 8:
+        ultimo_asistente = next(
+            (str(t.get("contenido", "")) for t in reversed(historial)
+             if t.get("rol") == "assistant"), "")
+        referencias = ("esas", "esos", "estas", "estos", "detalle",
+                       "en total", "este mes", "ultimos 30", "últimos 30")
+        if ultimo_asistente and (
+                ultimo_asistente.rstrip().endswith("?")
+                or any(r in limpia for r in referencias)):
+            return "datos"
+
     # Atajo: si el mensaje empieza con un verbo de accion sobre datos, es
     # SIEMPRE 'datos' — sin gastar una llamada al LLM. Esto evita que "calcula
     # el crecimiento quincenal" se clasifique como 'meta' por contexto.
-    palabras = limpia.split()
     if palabras and any(palabras[0].startswith(v) for v in _VERBOS_DATOS):
         return "datos"
 
