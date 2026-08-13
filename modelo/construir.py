@@ -115,12 +115,17 @@ def _publicar_metadata_semantica(destino, cliente: dict, esquema_raw: str,
     catalogo, kpis = catalogo_cliente.leer(cliente)
     nombres = _nombres_logicos(tablas_reales)
 
-    def corresponde(valor_tabla) -> bool:
+    def menciona_semantica(valor_tabla) -> bool:
         mencionadas = [t.lower() for t in catalogo_cliente.tablas_de(valor_tabla)]
-        return bool(mencionadas) and all(t in nombres for t in mencionadas)
+        return bool(mencionadas) and any(t in nombres for t in mencionadas)
 
-    catalogo_sem = [f for f in catalogo if corresponde(f.get("tabla"))]
-    kpis_sem = [f for f in kpis if corresponde(f.get("tabla"))]
+    # El catalogo describe filas de las tablas semanticas. Un KPI, en cambio,
+    # puede cruzar una tabla semantica con una raw (transacciones;presupuesto):
+    # se publica si menciona al menos una tabla del modelo y el bot validara la
+    # existencia real de todas antes de ejecutar SQL.
+    catalogo_sem = [f for f in catalogo
+                    if str(f.get("tabla", "")).lower() in nombres]
+    kpis_sem = [f for f in kpis if menciona_semantica(f.get("tabla"))]
 
     if probar:
         logger.info(
@@ -164,8 +169,9 @@ def _construir_modelo(destino, cid, esquema_raw, esquema_sem, modelo,
                       probar) -> dict:
     alertas = []
     crudas = _leer_origen(destino, esquema_raw, modelo)
+    auxiliares = _leer_auxiliares(destino, esquema_raw, modelo)
     mapeo = {} if probar else _leer_mapeo(destino, esquema_sem, modelo)
-    filas, rechazos = modelo.procesar(crudas, mapeo)
+    filas, rechazos = modelo.procesar(crudas, mapeo, auxiliares)
 
     # --- overrides huerfanos ---
     # Un override apunta a una clave. Si esa clave ya no existe —porque cambio
@@ -236,6 +242,22 @@ def _leer_origen(destino, esquema_raw, modelo) -> list:
         raise RuntimeError(f"no se pudo leer el origen. SQL: {sql} -- {e}") from e
 
 
+def _leer_auxiliares(destino, esquema_raw, modelo) -> dict:
+    """Lee una vez cada tabla auxiliar declarada; nunca hace N+1 consultas."""
+    salida = {}
+    for join in modelo.joins:
+        tabla = join.get("tabla_auxiliar", "")
+        if not tabla or tabla in salida:
+            continue
+        sql = f'SELECT * FROM "{esquema_raw}"."{tabla}"'
+        try:
+            salida[tabla] = destino.leer_filas(sql)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                f"no se pudo leer la tabla auxiliar '{tabla}'. SQL: {sql} -- {e}") from e
+    return salida
+
+
 def _leer_mapeo(destino, esquema_sem, modelo) -> dict:
     """
     Lee {valor_normalizado: valor_asignado} que llena el job de clasificacion.
@@ -244,12 +266,20 @@ def _leer_mapeo(destino, esquema_sem, modelo) -> dict:
     aca antes de que el job haya escrito nada, y eso no es un problema (las
     filas salen 'sin_clasificar', que es la respuesta honesta).
     """
-    sql = (f'SELECT valor_normalizado, valor_asignado FROM "{esquema_sem}"."'
+    sql = (f'SELECT * FROM "{esquema_sem}"."'
            f'{TABLA_MAPEO}" WHERE modelo_id = :m')
     try:
         filas = destino.leer_filas(sql, {"m": modelo.modelo_id})
-        return {f["valor_normalizado"]: f["valor_asignado"] for f in filas
-                if f.get("valor_normalizado")}
+        salida = {}
+        for f in filas:
+            clave = f.get("valor_normalizado")
+            if not clave:
+                continue
+            dimension = f.get("clasifica_en", "")
+            salida[(dimension, clave)] = f.get("valor_asignado")
+            if not dimension:
+                salida[clave] = f.get("valor_asignado")
+        return salida
     except Exception:  # noqa: BLE001
         logger.debug("todavia no hay tabla de mapeo en %s", esquema_sem)
         return {}

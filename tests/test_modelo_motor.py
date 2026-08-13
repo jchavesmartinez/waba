@@ -12,7 +12,7 @@ convertidos a texto plano por el conector IMAP (que es como llegan a la tabla).
 
 import pytest
 
-from modelo.motor import SIN_CLASIFICAR, Modelo
+from modelo.motor import SIN_CLASIFICAR, Modelo, _normalizar
 from modelo.tipos import convertir
 
 
@@ -79,6 +79,44 @@ def _modelo(overrides=None, reglas=None, campos=None):
 def _fila(cuerpo=CUERPO_BAC, clave="c1"):
     return {"correo_id": clave, "cuerpo": cuerpo,
             "asunto": "Notificacion de compra BAC"}
+
+
+def test_join_auxiliar_asigna_titular_y_separa_mapeos_por_dimension():
+    campos = CAMPOS + [{
+        "modelo_id": "bac", "columna": "comercio_concepto",
+        "tipo": "texto", "patron": "Comercio",
+        "clasifica_en": "linea_presupuesto_id",
+        "clasifica_con": "titular",
+    }]
+    meta = {
+        "campos": campos, "clasificacion": [], "overrides": [],
+        "joins": [{
+            "modelo_id": "bac", "tabla_auxiliar": "sharepoint_db__tarjetas",
+            "columna_base": "tarjeta", "columna_auxiliar": "ultimos4",
+            "transformacion": "ultimos4", "columnas_salida": "titular",
+            "fecha_base": "fecha_transaccion",
+            "vigencia_desde": "vigencia_desde",
+            "vigencia_hasta": "vigencia_hasta", "activo": "si",
+        }],
+    }
+    modelo = Modelo(
+        {"modelo_id": "bac", "tabla_origen": "correos",
+         "tabla_destino": "transacciones", "columna_texto": "cuerpo"}, meta)
+    mapeo = {
+        ("cuenta_contable", _normalizar("AM PM VEROLIZ")): "Alimentacion",
+        ("linea_presupuesto_id",
+         _normalizar("comercio_concepto: AM PM VEROLIZ | titular: Jose")):
+            "GAS-008",
+    }
+    auxiliares = {"sharepoint_db__tarjetas": [{
+        "ultimos4": "8774", "titular": "Jose", "activo": "si",
+        "vigencia_desde": "2026-01-01", "vigencia_hasta": "",
+    }]}
+    filas, rechazos = modelo.procesar([_fila()], mapeo, auxiliares)
+    assert rechazos == []
+    assert filas[0]["titular"] == "Jose"
+    assert filas[0]["cuenta_contable"] == "Alimentacion"
+    assert filas[0]["linea_presupuesto_id"] == "GAS-008"
 
 
 # --- extraccion y tipado --------------------------------------------------
@@ -220,9 +258,9 @@ def test_varias_columnas_forman_un_solo_contexto_de_clasificacion():
     cruda = _fila()
     esperada = modelo.valor_clasificacion(
         {"comercio": "AM PM VEROLIZ", "asunto": cruda["asunto"],
-         "tipo_transaccion": "COMPRA"}, campos[0])
+         "tipo_transaccion": None}, campos[0])
     filas, _ = modelo.procesar(
-        [cruda], mapeo={esperada.upper(): "Supermercado"})
+        [cruda], mapeo={_normalizar(esperada): "Supermercado"})
 
     assert filas[0]["asunto"] == "Notificacion de compra BAC"
     assert filas[0]["cuenta_contable"] == "Supermercado"

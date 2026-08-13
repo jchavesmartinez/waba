@@ -40,7 +40,7 @@ import logging
 import re
 
 from . import extractores, tipos
-from .metadata import campos_de, clasificacion_de, overrides_de
+from .metadata import campos_de, clasificacion_de, joins_de, overrides_de
 
 logger = logging.getLogger("fachavi.modelo.motor")
 
@@ -77,6 +77,7 @@ class Modelo:
         self.campos = self._extractor.campos_efectivos(self.campos_declarados)
         self.reglas = clasificacion_de(metadata, self.modelo_id)
         self.overrides = overrides_de(metadata, self.modelo_id)
+        self.joins = joins_de(metadata, self.modelo_id)
         self._validar()
 
     def _validar(self):
@@ -141,6 +142,30 @@ class Modelo:
                         f"El modelo '{self.modelo_id}' tiene una regla con "
                         f"columna invalida: '{columna}'."
                     )
+        for join in self.joins:
+            tabla_aux = join.get("tabla_auxiliar", "")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tabla_aux):
+                raise RuntimeError(
+                    f"El modelo '{self.modelo_id}' tiene tabla auxiliar "
+                    f"invalida: '{tabla_aux}'.")
+            for nombre in (join.get("columna_base"),
+                           join.get("columna_auxiliar")):
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", nombre or ""):
+                    raise RuntimeError(
+                        f"El modelo '{self.modelo_id}' tiene un _join con "
+                        f"columna invalida: '{nombre}'.")
+            for nombre in (_lista_columnas(join.get("columnas_salida")) +
+                           [join.get("fecha_base"), join.get("vigencia_desde"),
+                            join.get("vigencia_hasta")]):
+                if nombre and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", nombre):
+                    raise RuntimeError(
+                        f"El modelo '{self.modelo_id}' tiene un _join con "
+                        f"columna invalida: '{nombre}'.")
+            if join.get("transformacion", "exacto").lower() not in {
+                    "", "exacto", "normalizado", "ultimos4"}:
+                raise RuntimeError(
+                    f"El modelo '{self.modelo_id}' tiene transformacion de "
+                    f"_join desconocida: '{join.get('transformacion')}'.")
 
     # ---------------- esquema ----------------
 
@@ -176,6 +201,11 @@ class Modelo:
                 if columna not in vistas:
                     salida.append((columna, "texto"))
                     vistas.add(columna)
+        for join in self.joins:
+            for columna in _lista_columnas(join.get("columnas_salida")):
+                if columna not in vistas:
+                    salida.append((columna, "texto"))
+                    vistas.add(columna)
         return salida
 
     def columnas_rechazos(self) -> list:
@@ -185,7 +215,8 @@ class Modelo:
 
     # ---------------- procesamiento ----------------
 
-    def procesar(self, filas_origen: list, mapeo: dict = None) -> tuple:
+    def procesar(self, filas_origen: list, mapeo: dict = None,
+                 auxiliares: dict = None) -> tuple:
         """
         Convierte filas raw en (filas_derivadas, rechazos).
 
@@ -194,6 +225,7 @@ class Modelo:
         """
         indice_overrides = self._indexar_overrides()
         mapeo = mapeo or {}
+        auxiliares = auxiliares or {}
         derivadas, rechazos = [], []
 
         for cruda in filas_origen:
@@ -221,6 +253,7 @@ class Modelo:
             fila[COL_ORIGEN] = self.tabla_origen
             fila[COL_MODELO] = self.modelo_id
             self._copiar_contexto_raw(fila, cruda)
+            self._aplicar_joins(fila, cruda, auxiliares)
             self._clasificar(fila, mapeo, indice_overrides.get(clave, {}))
             derivadas.append(fila)
 
@@ -269,6 +302,11 @@ class Modelo:
 
             valor_clasificacion = self.valor_clasificacion(fila, campo)
             clave = _normalizar(valor_clasificacion)
+            clave_mapeo = (destino, clave)
+            if clave and clave_mapeo in mapeo:
+                fila[destino] = mapeo[clave_mapeo]
+                continue
+            # Compatibilidad con la tabla _mapeo anterior (una dimension).
             if clave and clave in mapeo:
                 fila[destino] = mapeo[clave]
                 continue
@@ -283,7 +321,15 @@ class Modelo:
 
     def _por_regla(self, fila: dict, campo: dict, valor):
         """Primera regla que calza, en orden de prioridad."""
+        destino = campo.get("clasifica_en", "")
+        principal = next((c.get("clasifica_en") for c in self.campos
+                          if c.get("clasifica_en")), "")
         for regla in self.reglas:
+            destino_regla = regla.get("clasifica_en", "")
+            if destino_regla and destino_regla != destino:
+                continue
+            if not destino_regla and destino != principal:
+                continue
             columnas = _lista_columnas(regla.get("columnas"))
             if columnas:
                 texto = _normalizar(" | ".join(
@@ -323,6 +369,34 @@ class Modelo:
                 if columna not in fila:
                     valor = cruda.get(columna)
                     fila[columna] = None if valor is None else str(valor).strip()
+
+    def _aplicar_joins(self, fila: dict, cruda: dict, auxiliares: dict) -> None:
+        """Enriquece una fila con tablas auxiliares declaradas en ``_joins``."""
+        for join in self.joins:
+            tabla = join.get("tabla_auxiliar", "")
+            base = fila.get(join.get("columna_base"))
+            if base is None:
+                base = cruda.get(join.get("columna_base"))
+            clave = _transformar_join(base, join.get("transformacion"))
+            if not clave:
+                continue
+            candidatas = []
+            for aux in auxiliares.get(tabla, []):
+                if not _es_si_o_vacio(aux.get("activo", "si")):
+                    continue
+                otra = _transformar_join(
+                    aux.get(join.get("columna_auxiliar")),
+                    join.get("transformacion"))
+                if otra == clave and _vigente(fila, cruda, aux, join):
+                    candidatas.append(aux)
+            if len(candidatas) > 1:
+                logger.warning(
+                    "[%s] _join con %s encontro %d coincidencias para '%s'; "
+                    "se usa la primera.", self.modelo_id, tabla,
+                    len(candidatas), clave)
+            if candidatas:
+                for columna in _lista_columnas(join.get("columnas_salida")):
+                    fila[columna] = candidatas[0].get(columna)
 
     def _indexar_overrides(self) -> dict:
         indice = {}
@@ -416,6 +490,41 @@ def _normalizar(valor) -> str:
     plano = unicodedata.normalize("NFKD", str(valor))
     plano = "".join(c for c in plano if not unicodedata.combining(c))
     return " ".join(plano.upper().split())
+
+
+def _transformar_join(valor, transformacion: str) -> str:
+    t = str(transformacion or "exacto").strip().lower()
+    if t == "ultimos4":
+        return re.sub(r"\D", "", str(valor or ""))[-4:]
+    if t == "normalizado":
+        return _normalizar(valor)
+    return str(valor or "").strip()
+
+
+def _vigente(fila: dict, cruda: dict, aux: dict, join: dict) -> bool:
+    fecha_col = join.get("fecha_base", "")
+    if not fecha_col:
+        return True
+    fecha = fila.get(fecha_col, cruda.get(fecha_col))
+    fecha = _a_fecha_comparable(fecha)
+    if fecha is None:
+        return False
+    desde = _a_fecha_comparable(aux.get(join.get("vigencia_desde", "")))
+    hasta = _a_fecha_comparable(aux.get(join.get("vigencia_hasta", "")))
+    return (desde is None or fecha >= desde) and (hasta is None or fecha <= hasta)
+
+
+def _a_fecha_comparable(valor):
+    if valor is None or valor == "":
+        return None
+    if hasattr(valor, "date"):
+        return valor.date()
+    convertido = tipos.convertir("fecha_iso", valor).get("")
+    return convertido.date() if convertido else None
+
+
+def _es_si_o_vacio(valor) -> bool:
+    return str(valor or "").strip() == "" or _es_si(valor)
 
 
 def _lista_columnas(valor) -> list:

@@ -58,6 +58,7 @@ MAX_TOKENS = 2000
 
 COLUMNAS_MAPEO = [
     ("modelo_id", "texto"),
+    ("clasifica_en", "texto"),       # dimension independiente
     ("valor_normalizado", "texto"),   # llave del JOIN
     ("valor_original", "texto"),      # como lo escribio el banco
     ("valor_asignado", "texto"),
@@ -87,6 +88,20 @@ def _anthropic():
 def clasificar_modelo(destino, esquema_sem: str, modelo, metadata: dict,
                       probar: bool = False, tamano_lote: int = TAMANO_LOTE,
                       forzar: bool = False) -> dict:
+    total = {"pendientes": 0, "clasificados": 0, "sin_resolver": 0,
+             "llamadas": 0, "alertas": []}
+    for campo in (c for c in modelo.campos if c.get("clasifica_en")):
+        r = _clasificar_dimension(destino, esquema_sem, modelo, metadata,
+                                  campo, probar, tamano_lote, forzar)
+        for k in ("pendientes", "clasificados", "sin_resolver", "llamadas"):
+            total[k] += r[k]
+        total["alertas"] += r["alertas"]
+    return total
+
+
+def _clasificar_dimension(destino, esquema_sem: str, modelo, metadata: dict,
+                           campo: dict, probar: bool, tamano_lote: int,
+                           forzar: bool) -> dict:
     """
     Clasifica los valores pendientes de un modelo y actualiza la tabla de mapeo.
 
@@ -96,7 +111,14 @@ def clasificar_modelo(destino, esquema_sem: str, modelo, metadata: dict,
     resultado = {"pendientes": 0, "clasificados": 0, "sin_resolver": 0,
                  "llamadas": 0, "alertas": []}
 
-    categorias = categorias_de(metadata, modelo.modelo_id)
+    dimension = campo.get("clasifica_en", "")
+    categorias = categorias_de(metadata, modelo.modelo_id, dimension)
+    principal = next((c.get("clasifica_en") for c in modelo.campos
+                      if c.get("clasifica_en")), "")
+    # Las filas historicas sin clasifica_en pertenecen solo al destino
+    # principal; no se reutilizan accidentalmente para concepto u otra dimension.
+    if dimension != principal:
+        categorias = [c for c in categorias if c.get("clasifica_en") == dimension]
     if not categorias:
         msg = (f"[{modelo.modelo_id}] no hay categorias declaradas en la "
                "pestania '_categorias'; no se clasifica nada. Sin un conjunto "
@@ -106,8 +128,9 @@ def clasificar_modelo(destino, esquema_sem: str, modelo, metadata: dict,
         resultado["alertas"].append(msg)
         return resultado
 
-    mapeo_actual = _leer_mapeo(destino, esquema_sem, modelo.modelo_id)
-    pendientes = _pendientes(destino, esquema_sem, modelo,
+    mapeo_actual = _leer_mapeo(destino, esquema_sem, modelo.modelo_id,
+                               dimension, aceptar_legacy=(dimension == principal))
+    pendientes = _pendientes(destino, esquema_sem, modelo, campo,
                              set() if forzar else set(mapeo_actual))
     resultado["pendientes"] = len(pendientes)
     if not pendientes:
@@ -159,6 +182,7 @@ def clasificar_modelo(destino, esquema_sem: str, modelo, metadata: dict,
                 continue
             nuevos[clave] = {
                 "modelo_id": modelo.modelo_id,
+                "clasifica_en": dimension,
                 "valor_normalizado": clave,
                 "valor_original": originales[clave],
                 "valor_asignado": categoria,
@@ -187,7 +211,8 @@ def clasificar_modelo(destino, esquema_sem: str, modelo, metadata: dict,
 
 # --------------------------------------------------------------------------
 
-def _pendientes(destino, esquema_sem: str, modelo, ya_mapeados: set) -> dict:
+def _pendientes(destino, esquema_sem: str, modelo, campo: dict,
+                ya_mapeados: set) -> dict:
     """
     {valor_normalizado: valor_original} de lo que falta clasificar.
 
@@ -196,30 +221,25 @@ def _pendientes(destino, esquema_sem: str, modelo, ya_mapeados: set) -> dict:
     diferencia entre 300 llamadas y una, y ademas garantiza que las 300 filas
     reciban la misma categoria.
     """
-    campos = [c for c in modelo.campos if c.get("clasifica_en")]
-    if not campos:
-        return {}
-
     pendientes = {}
-    for campo in campos:
-        columnas = modelo.columnas_de_clasificacion(campo)
-        destino_col = campo.get("clasifica_en")
-        seleccion = ", ".join(f'"{c}"' for c in columnas)
-        sql = (f'SELECT DISTINCT {seleccion} FROM "{esquema_sem}"."'
-               f'{modelo.tabla_destino}" WHERE "{destino_col}" = :sc')
-        try:
-            filas = destino.leer_filas(sql, {"sc": SIN_CLASIFICAR})
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "[%s] no se pudo leer la tabla derivada '%s' (%s). Corre "
-                "primero construir_modelos.py.",
-                modelo.modelo_id, modelo.tabla_destino, e)
-            return {}
-        for fila in filas:
-            original = modelo.valor_clasificacion(fila, campo)
-            clave = _normalizar(original)
-            if clave and clave not in ya_mapeados:
-                pendientes[clave] = original
+    columnas = modelo.columnas_de_clasificacion(campo)
+    destino_col = campo.get("clasifica_en")
+    seleccion = ", ".join(f'"{c}"' for c in columnas)
+    sql = (f'SELECT DISTINCT {seleccion} FROM "{esquema_sem}"."'
+           f'{modelo.tabla_destino}" WHERE "{destino_col}" = :sc')
+    try:
+        filas = destino.leer_filas(sql, {"sc": SIN_CLASIFICAR})
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[%s] no se pudo leer la tabla derivada '%s' (%s). Corre "
+            "primero construir_modelos.py.",
+            modelo.modelo_id, modelo.tabla_destino, e)
+        return {}
+    for fila in filas:
+        original = modelo.valor_clasificacion(fila, campo)
+        clave = _normalizar(original)
+        if clave and clave not in ya_mapeados:
+            pendientes[clave] = original
     return pendientes
 
 
@@ -297,12 +317,16 @@ Responde SOLO un array JSON, sin texto alrededor ni bloques de codigo:
     return salida
 
 
-def _leer_mapeo(destino, esquema_sem: str, modelo_id: str) -> dict:
+def _leer_mapeo(destino, esquema_sem: str, modelo_id: str,
+                 clasifica_en: str = "", aceptar_legacy: bool = False) -> dict:
     sql = (f'SELECT * FROM "{esquema_sem}"."{TABLA_MAPEO}" '
            "WHERE modelo_id = :m")
     try:
-        return {f["valor_normalizado"]: dict(f)
-                for f in destino.leer_filas(sql, {"m": modelo_id})}
+        filas = destino.leer_filas(sql, {"m": modelo_id})
+        return {f["valor_normalizado"]: dict(f) for f in filas
+                if (f.get("clasifica_en", "") == clasifica_en or
+                    (not f.get("clasifica_en") and
+                     (not clasifica_en or aceptar_legacy)))}
     except Exception:  # noqa: BLE001
         return {}      # primera corrida: la tabla todavia no existe
 
@@ -320,15 +344,18 @@ def _guardar_mapeo(destino, esquema_sem: str, actual: dict, nuevos: dict):
     # Se leen TODOS los modelos, no solo el que se acaba de clasificar, porque
     # la reescritura es de la tabla completa y perderiamos los demas.
     try:
-        todos = {(f["modelo_id"], f["valor_normalizado"]): dict(f)
+        todos = {(f["modelo_id"], f.get("clasifica_en", ""),
+                  f["valor_normalizado"]): dict(f)
                  for f in destino.leer_filas(
                      f'SELECT * FROM "{esquema_sem}"."{TABLA_MAPEO}"')}
     except Exception:  # noqa: BLE001
         todos = {}
     for fila in actual.values():
-        todos[(fila["modelo_id"], fila["valor_normalizado"])] = fila
+        todos[(fila["modelo_id"], fila.get("clasifica_en", ""),
+               fila["valor_normalizado"])] = fila
     for fila in nuevos.values():
-        todos[(fila["modelo_id"], fila["valor_normalizado"])] = fila
+        todos[(fila["modelo_id"], fila.get("clasifica_en", ""),
+               fila["valor_normalizado"])] = fila
 
     nombres = [c for c, _ in COLUMNAS_MAPEO]
     filas = [{c: f.get(c) for c in nombres} for f in todos.values()]

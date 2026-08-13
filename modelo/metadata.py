@@ -40,6 +40,7 @@ CAMPOS_SHEET = "_campos"
 CLASIFICACION_SHEET = "_clasificacion"
 CATEGORIAS_SHEET = "_categorias"
 OVERRIDES_SHEET = "_overrides"
+JOINS_SHEET = "_joins"
 
 _MODELOS_COLS = (
     "modelo_id",        # identificador unico dentro del cliente
@@ -71,6 +72,7 @@ _CAMPOS_COLS = (
 
 _CLASIFICACION_COLS = (
     "modelo_id",
+    "clasifica_en",   # destino al que aplica; vacio = destino principal
     # Columnas contra las que se evalua ESTA regla, separadas por coma. Vacio
     # conserva el comportamiento historico: solo el campo que clasifica.
     "columnas",
@@ -81,9 +83,23 @@ _CLASIFICACION_COLS = (
 
 _CATEGORIAS_COLS = (
     "modelo_id",
+    "clasifica_en",   # conjunto cerrado independiente por destino
     "categoria",        # el valor que se le puede asignar a una fila
     "descripcion",      # que entra en esta categoria y que no
     "ejemplos",         # casos concretos, separados por coma
+)
+
+_JOINS_COLS = (
+    "modelo_id",
+    "tabla_auxiliar",       # nombre fisico en raw_<cliente>
+    "columna_base",         # columna extraida o del origen principal
+    "columna_auxiliar",     # llave en la tabla auxiliar
+    "transformacion",       # exacto | normalizado | ultimos4
+    "columnas_salida",      # nombres separados por coma/punto y coma
+    "fecha_base",           # opcional: fecha de la fila principal
+    "vigencia_desde",       # opcional: columna auxiliar
+    "vigencia_hasta",       # opcional: columna auxiliar
+    "activo",
 )
 
 _OVERRIDES_COLS = (
@@ -108,7 +124,7 @@ def leer(cliente: dict) -> dict:
     cid = cliente.get("cliente_id", "")
     spreadsheet_id = str(cliente.get("catalogo_spreadsheet_id", "")).strip()
     vacio = {"modelos": [], "campos": [], "clasificacion": [],
-             "categorias": [], "overrides": []}
+             "categorias": [], "overrides": [], "joins": []}
 
     if not spreadsheet_id:
         return vacio
@@ -145,6 +161,10 @@ def leer(cliente: dict) -> dict:
         "overrides": _leer_pestania(libro, cid, OVERRIDES_SHEET,
                                     _OVERRIDES_COLS, clave="clave",
                                     silencioso=True),
+        "joins": [j for j in _leer_pestania(
+            libro, cid, JOINS_SHEET, _JOINS_COLS,
+            clave="tabla_auxiliar", silencioso=True)
+            if _es_si(j.get("activo", "si"))],
     }
 
 
@@ -201,9 +221,11 @@ def campos_de(metadata: dict, modelo_id: str) -> list:
             if c.get("modelo_id") == modelo_id]
 
 
-def clasificacion_de(metadata: dict, modelo_id: str) -> list:
+def clasificacion_de(metadata: dict, modelo_id: str, clasifica_en: str = "") -> list:
     reglas = [r for r in metadata.get("clasificacion", [])
-              if r.get("modelo_id") == modelo_id]
+              if r.get("modelo_id") == modelo_id and
+              (not clasifica_en or not r.get("clasifica_en") or
+               r.get("clasifica_en") == clasifica_en)]
     # Prioridad ascendente: la regla mas especifica se declara con un numero
     # menor. Sin orden estable, dos patrones que calzan con el mismo comercio
     # ('AM PM%' y 'AM%') darian resultados distintos segun como Google
@@ -211,7 +233,7 @@ def clasificacion_de(metadata: dict, modelo_id: str) -> list:
     return sorted(reglas, key=lambda r: _a_entero(r.get("prioridad"), 100))
 
 
-def categorias_de(metadata: dict, modelo_id: str) -> list:
+def categorias_de(metadata: dict, modelo_id: str, clasifica_en: str = "") -> list:
     """
     Valores validos de clasificacion para un modelo.
 
@@ -222,7 +244,14 @@ def categorias_de(metadata: dict, modelo_id: str) -> list:
     ninguna comparable entre meses.
     """
     return [c for c in metadata.get("categorias", [])
-            if c.get("modelo_id") == modelo_id]
+            if c.get("modelo_id") == modelo_id and
+            (not clasifica_en or c.get("clasifica_en") == clasifica_en or
+             not c.get("clasifica_en"))]
+
+
+def joins_de(metadata: dict, modelo_id: str) -> list:
+    return [j for j in metadata.get("joins", [])
+            if j.get("modelo_id") == modelo_id]
 
 
 def overrides_de(metadata: dict, modelo_id: str) -> list:
