@@ -75,6 +75,11 @@ def _plegar(texto: str) -> str:
     return " ".join(plano.lower().split())
 
 
+def _sin_acentos(texto: str) -> str:
+    plano = unicodedata.normalize("NFKD", str(texto))
+    return "".join(c for c in plano if not unicodedata.combining(c))
+
+
 class Extractor:
     """
     Contrato: texto -> {columna: texto_crudo}.
@@ -165,6 +170,15 @@ class EtiquetaValor(Extractor):
 
     def extraer(self, texto: str, campos: list) -> dict:
         indice = self._indexar(texto)
+        # Algunos proveedores de correo convierten el HTML a texto sin
+        # conservar los <br>: todo el aviso termina en UNA sola linea
+        # ("... Comercio: X Ciudad y pais: Y Fecha: ..."). En ese formato el
+        # indexador historico no puede separar pares. Se completa el indice
+        # buscando exclusivamente las etiquetas declaradas, nunca palabras
+        # arbitrarias del cuerpo.
+        if len(str(texto or "").splitlines()) <= 1:
+            for clave, valor in self._indexar_aplanado(texto, campos).items():
+                indice.setdefault(clave, valor)
         salida = {}
         for campo in campos:
             columna = campo.get("columna")
@@ -177,6 +191,41 @@ class EtiquetaValor(Extractor):
                     salida[f"__etiqueta__{columna}"] = etiqueta.rstrip(":")
                     break
         return salida
+
+    @staticmethod
+    def _indexar_aplanado(texto: str, campos: list) -> dict:
+        """Extrae pares conocidos de un cuerpo que perdio los saltos de linea."""
+        original = str(texto or "")
+        if not original:
+            return {}
+
+        # _sin_acentos conserva una posicion por caracter para el alfabeto
+        # usado por BAC; asi los offsets encontrados sirven para cortar el
+        # texto ORIGINAL y no perdemos tildes ni el numero enmascarado.
+        plegado = _sin_acentos(original).upper()
+        etiquetas = []
+        for campo in campos:
+            for etiqueta in _etiquetas_de(campo):
+                limpia = etiqueta.rstrip(":").strip()
+                if limpia:
+                    etiquetas.append((_plegar(limpia), limpia))
+        por_clave = {clave: original_etq for clave, original_etq in etiquetas}
+        if not por_clave:
+            return {}
+
+        alternativas = sorted(por_clave, key=len, reverse=True)
+        patron = re.compile(
+            r"(?<![A-Z0-9_])(" + "|".join(re.escape(e) for e in alternativas)
+            + r")\s*:", re.IGNORECASE)
+        marcas = list(patron.finditer(plegado))
+        indice = {}
+        for i, marca in enumerate(marcas):
+            clave = _plegar(marca.group(1))
+            fin = marcas[i + 1].start() if i + 1 < len(marcas) else len(original)
+            valor = original[marca.end():fin].strip()
+            if clave not in indice:  # igual que el camino multilínea
+                indice[clave] = valor
+        return indice
 
     @staticmethod
     def _indexar(texto: str) -> dict:

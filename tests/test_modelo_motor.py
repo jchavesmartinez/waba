@@ -41,6 +41,8 @@ Referencia:
 Tipo de Transacción: COMPRA
 Monto: USD 113.13"""
 
+CUERPO_APLANADO = """BAC Hola JOSE CARLOS CHAVES MARTINEZ A continuacion le detallamos la transaccion realizada: Comercio: HOOTERS Ciudad y pais: HEREDIA, Costa Rica Fecha: Ago 12, 2026 , 19:10 MASTER: ************8774 Autorizacion: 032331 Referencia: 51720096 Tipo de Transaccion: COMPRA Monto: CRC 16,895.07 Tiene dudas sobre esta transaccion?"""
+
 CAMPOS = [
     {"modelo_id": "bac", "columna": "comercio", "tipo": "texto",
      "patron": "Comercio", "requerido": "si",
@@ -162,6 +164,24 @@ def test_un_reenvio_manual_se_procesa_igual_que_el_automatico():
     filas, rechazos = _modelo().procesar([_fila(CUERPO_REENVIADO, "c2")])
     assert rechazos == []
     assert filas[0]["comercio"] == "NIKE INC E-COMMERCE"
+
+
+def test_un_correo_html_aplanado_conserva_todas_las_etiquetas_bac():
+    """Zoho puede quitar todos los saltos de linea al convertir cierto HTML."""
+    modelo = Modelo(
+        {"modelo_id": "bac", "tabla_origen": "correos",
+         "tabla_destino": "transacciones", "extractor": "bac_transacciones",
+         "columna_texto": "cuerpo"},
+        {"campos": [], "clasificacion": [], "overrides": []})
+    filas, rechazos = modelo.procesar([_fila(CUERPO_APLANADO, "c3")])
+    assert rechazos == []
+    assert filas[0]["comercio"] == "HOOTERS"
+    assert filas[0]["ciudad_pais"] == "HEREDIA, Costa Rica"
+    assert filas[0]["tarjeta"] == "************8774"
+    assert filas[0]["autorizacion"] == "032331"
+    assert filas[0]["referencia"] == "51720096"
+    assert filas[0]["tipo_transaccion"] == "COMPRA"
+    assert filas[0]["monto"] == 16895.07
 
 
 def test_un_campo_vacio_no_es_un_campo_ausente():
