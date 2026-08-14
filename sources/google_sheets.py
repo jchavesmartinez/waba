@@ -20,7 +20,9 @@ cliente y lo reparte — este conector ya no necesita saber nada de eso.
 """
 
 import logging
+import time
 
+from gspread.exceptions import APIError
 from gclient import abrir_libro
 from .base import (
     Source,
@@ -37,6 +39,51 @@ from .base import (
 import pandas as pd
 
 logger = logging.getLogger("fachavi.sources.google_sheets")
+
+_TAMANO_LOTE_LECTURA = 25
+_REINTENTOS_LECTURA = 4
+
+
+def _rango_hoja(titulo: str) -> str:
+    """Devuelve el titulo escapado como rango A1 de hoja completa."""
+    return "'" + titulo.replace("'", "''") + "'"
+
+
+def _leer_hojas_en_lotes(libro, hojas):
+    """Lee varias pestanias con values.batchGet, no una llamada por hoja."""
+    resultado = {}
+    for inicio in range(0, len(hojas), _TAMANO_LOTE_LECTURA):
+        lote = hojas[inicio:inicio + _TAMANO_LOTE_LECTURA]
+        rangos = [_rango_hoja(ws.title) for ws in lote]
+
+        for intento in range(_REINTENTOS_LECTURA):
+            try:
+                respuesta = libro.values_batch_get(
+                    rangos,
+                    params={"majorDimension": "ROWS"},
+                )
+                break
+            except APIError as exc:
+                codigo = getattr(getattr(exc, "response", None), "status_code", None)
+                if codigo != 429 or intento == _REINTENTOS_LECTURA - 1:
+                    raise
+                espera = 2 ** intento
+                logger.warning(
+                    "Cuota de Google Sheets agotada; reintento %d/%d en %ds",
+                    intento + 1, _REINTENTOS_LECTURA, espera,
+                )
+                time.sleep(espera)
+
+        valores = respuesta.get("valueRanges", [])
+        if len(valores) != len(lote):
+            raise RuntimeError(
+                "Google Sheets devolvio una cantidad inesperada de rangos: "
+                f"se pidieron {len(lote)} y llegaron {len(valores)}."
+            )
+        for ws, value_range in zip(lote, valores):
+            resultado[ws.title] = value_range.get("values", [])
+
+    return resultado
 
 class GoogleSheetsSource(Source):
     tipo = "google_sheets"
@@ -83,6 +130,7 @@ class GoogleSheetsSource(Source):
         vistas = []
         alertas = []
 
+        hojas_seleccionadas = []
         for ws in libro.worksheets():
             titulo = ws.title
             vistas.append(titulo)
@@ -95,7 +143,13 @@ class GoogleSheetsSource(Source):
                 logger.info("[%s] pestania '%s' excluida por config", self.fuente_id, titulo)
                 continue
 
-            registros = ws.get_all_values()
+            hojas_seleccionadas.append(ws)
+
+        registros_por_hoja = _leer_hojas_en_lotes(libro, hojas_seleccionadas)
+
+        for ws in hojas_seleccionadas:
+            titulo = ws.title
+            registros = registros_por_hoja[titulo]
             if not registros or len(registros) < 2:
                 # B-12: esto era un logger.info y por lo tanto invisible. Si la
                 # tabla YA existia con datos, saltarla significa que la guarda de
