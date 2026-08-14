@@ -49,6 +49,14 @@ def _rango_hoja(titulo: str) -> str:
     return "'" + titulo.replace("'", "''") + "'"
 
 
+def _rellenar_filas(registros):
+    """Iguala el ancho de las filas como hacia Worksheet.get_all_values()."""
+    if not registros:
+        return []
+    ancho = max(len(fila) for fila in registros)
+    return [list(fila) + [""] * (ancho - len(fila)) for fila in registros]
+
+
 def _leer_hojas_en_lotes(libro, hojas):
     """Lee varias pestanias con values.batchGet, no una llamada por hoja."""
     resultado = {}
@@ -81,7 +89,9 @@ def _leer_hojas_en_lotes(libro, hojas):
                 f"se pidieron {len(lote)} y llegaron {len(valores)}."
             )
         for ws, value_range in zip(lote, valores):
-            resultado[ws.title] = value_range.get("values", [])
+            resultado[ws.title] = _rellenar_filas(
+                value_range.get("values", [])
+            )
 
     return resultado
 

@@ -1,4 +1,8 @@
-from sources.google_sheets import _leer_hojas_en_lotes, _rango_hoja
+from sources.google_sheets import (
+    _leer_hojas_en_lotes,
+    _rango_hoja,
+    _rellenar_filas,
+)
 
 
 class _Hoja:
@@ -43,3 +47,17 @@ def test_no_hace_solicitudes_si_no_hay_hojas():
 
     assert _leer_hojas_en_lotes(libro, []) == {}
     assert libro.llamadas == []
+
+
+def test_rellena_celdas_finales_omitidas_por_batch_get():
+    registros = [
+        ["encabezado"],
+        ["dato 1", "dato 2", "dato 3"],
+        ["otro 1", "otro 2"],
+    ]
+
+    assert _rellenar_filas(registros) == [
+        ["encabezado", "", ""],
+        ["dato 1", "dato 2", "dato 3"],
+        ["otro 1", "otro 2", ""],
+    ]
