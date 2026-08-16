@@ -18,6 +18,7 @@ La ejecucion en si vive en bot/warehouse_ro.py (transaccion READ ONLY).
 
 import logging
 import re
+import unicodedata
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -407,6 +408,108 @@ def tabla_texto(columnas, filas, tope=30) -> str:
     return "\n".join(lineas)
 
 
+def _normalizar_para_columnas(texto: str) -> str:
+    normal = unicodedata.normalize("NFKD", str(texto or ""))
+    return normal.encode("ascii", "ignore").decode("ascii").lower()
+
+
+def _aliases_columna(columna: str) -> set[str]:
+    """Formas habituales en que un usuario nombra una columna de resultado."""
+    nombre = _normalizar_para_columnas(columna).replace("_", " ").strip()
+    aliases = {nombre}
+    especiales = {
+        "linea id": {"linea id", "id de linea", "identificador de linea"},
+        "categoria": {"categoria", "categorias"},
+        "concepto": {"concepto", "conceptos", "rubro", "rubros"},
+        "titular": {"titular", "persona"},
+        "presupuesto": {"presupuesto", "presupuestado"},
+        "gastado": {"gastado", "gasto"},
+        "disponible": {"disponible", "saldo"},
+    }
+    aliases.update(especiales.get(nombre, set()))
+    if "porcentaje" in nombre or re.search(r"(^| )pct($| )", nombre):
+        aliases.update({"porcentaje", "porcentaje consumido", "pct", "%"})
+    return aliases
+
+
+def _posicion_alias(texto: str, aliases: set[str]):
+    posiciones = []
+    for alias in aliases:
+        if alias == "%":
+            pos = texto.find(alias)
+        else:
+            encontrado = re.search(
+                rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", texto,
+            )
+            pos = encontrado.start() if encontrado else -1
+        if pos >= 0:
+            posiciones.append(pos)
+    return min(posiciones) if posiciones else None
+
+
+def proyectar_columnas_solicitadas(pregunta: str, columnas, filas):
+    """
+    Respeta pedidos explicitos de presentacion sin alterar SQL ni valores.
+
+    La deteccion es conservadora: un simple "solo" no basta si parece expresar
+    un filtro de datos en vez de una lista de columnas.
+    """
+    texto = _normalizar_para_columnas(pregunta)
+    if not columnas:
+        return list(columnas), list(filas), False
+
+    marcadores = list(re.finditer(
+        r"\b(?:solo|solamente|unicamente|la respuesta es|las columnas son|"
+        r"los campos son)\b",
+        texto,
+    ))
+    segmento = texto[marcadores[-1].end():] if marcadores else ""
+    segmento = re.split(r"\bnada mas\b", segmento, maxsplit=1)[0]
+    enfatico = bool(re.search(
+        r"\b(?:nada mas|la respuesta es|las columnas son|los campos son|"
+        r"no (?:pongas|incluyas|muestres))\b",
+        texto,
+    ))
+
+    solicitadas = []
+    if segmento:
+        for indice, columna in enumerate(columnas):
+            posicion = _posicion_alias(segmento, _aliases_columna(columna))
+            if posicion is not None:
+                solicitadas.append((posicion, indice))
+
+    # "Solo categoria Vivienda" suele ser un filtro. Exigimos dos columnas,
+    # salvo que el usuario diga expresamente respuesta/columnas/nada mas.
+    if solicitadas and (enfatico or len(solicitadas) >= 2):
+        indices = [indice for _, indice in sorted(solicitadas)]
+    else:
+        indices = list(range(len(columnas)))
+
+    # Tambien se admite una exclusion aislada: "sin linea id".
+    excluidos = set()
+    for indice, columna in enumerate(columnas):
+        for alias in _aliases_columna(columna):
+            if alias == "%":
+                continue
+            patron = (
+                rf"(?:\bsin\s+|\bomite\s+|\bquita\s+|"
+                rf"\bno\s+(?:pongas|incluyas|muestres)\s+(?:el\s+|la\s+)?){re.escape(alias)}\b"
+            )
+            if re.search(patron, texto):
+                excluidos.add(indice)
+                break
+    indices = [i for i in indices if i not in excluidos]
+
+    cambio = indices != list(range(len(columnas)))
+    if not cambio or not indices:
+        return list(columnas), list(filas), False
+    return (
+        [columnas[i] for i in indices],
+        [tuple(fila[i] for i in indices) for fila in filas],
+        True,
+    )
+
+
 def _nombre_legible(nombre) -> str:
     return str(nombre or "dato").strip().replace("_", " ").capitalize()
 
@@ -503,10 +606,35 @@ def _presupuesto_formateado(columnas, filas, unidad: str):
     return "\n".join(lineas)
 
 
-def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int = 8) -> str:
+def _resultado_compacto(columnas, filas, unidad: str, max_caracteres: int = 3800) -> str:
+    """Tabla compacta para una lista de columnas pedida expresamente."""
+    lineas = ["*" + " | ".join(_nombre_legible(c) for c in columnas) + "*"]
+    usados = 0
+    for fila in filas:
+        linea = "• " + " | ".join(
+            _formatear_valor(valor, columna, unidad)
+            for columna, valor in zip(columnas, fila)
+        )
+        reserva = 80
+        if len("\n".join(lineas)) + len(linea) + reserva > max_caracteres:
+            break
+        lineas.append(linea)
+        usados += 1
+    if usados < len(filas):
+        lineas.append(
+            f"Hay {len(filas) - usados} registros más. Pedime el Excel para verlos completos."
+        )
+    return "\n".join(lineas)
+
+
+def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int = 8,
+                              compacto: bool = False) -> str:
     """Presenta las celdas ejecutadas sin pedirle aritmetica ni datos al LLM."""
     if not filas:
         return "No encontré registros para ese filtro."
+
+    if compacto:
+        return _resultado_compacto(columnas, filas, unidad)
 
     presupuesto = _presupuesto_formateado(columnas, filas, unidad)
     if presupuesto:
@@ -547,7 +675,12 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
     if len(filas) == 1 and len(columnas) == 1 and str(filas[0][0]) == "NO_RESPONDIBLE":
         return ("No puedo responder eso con los datos habilitados para este "
                 "chat. Preguntame sobre ventas o inventario.")
-    return redactar_resultado_exacto(columnas, filas, unidad=unidad)
+    columnas, filas, compacto = proyectar_columnas_solicitadas(
+        pregunta, columnas, filas,
+    )
+    return redactar_resultado_exacto(
+        columnas, filas, unidad=unidad, compacto=compacto,
+    )
 
 
 # B-20: bot/responder.py usaba _tabla_texto (privada de este modulo) en su modo

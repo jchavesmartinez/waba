@@ -118,3 +118,95 @@ def test_decimal_de_excel_no_se_multiplica_por_diez_en_locale_tico():
     valores = pd.to_numeric(_limpiar_numero(serie, coma_decimal=True)).tolist()
     assert valores == [390037.5, 5000.0, 1250000.0, 3.25]
 
+
+def test_pedido_explicito_proyecta_solo_las_columnas_solicitadas():
+    columnas = [
+        "linea_id", "categoria", "concepto", "titular", "presupuesto",
+        "gastado", "disponible", "porcentaje_consumido",
+    ]
+    filas = [
+        ("gas_internet", "Servicios", "Internet", "", 29000, 29895.4, -895.4, 103.1),
+    ]
+
+    proyectadas, valores, cambio = nl2sql.proyectar_columnas_solicitadas(
+        "No pongas la linea id, solo categoria, concepto y porcentaje, nada mas",
+        columnas,
+        filas,
+    )
+
+    assert cambio is True
+    assert proyectadas == ["categoria", "concepto", "porcentaje_consumido"]
+    assert valores == [("Servicios", "Internet", 103.1)]
+
+
+def test_respuesta_compacta_respeta_categoria_concepto_y_porcentaje():
+    columnas = [
+        "linea_id", "categoria", "concepto", "titular", "presupuesto",
+        "gastado", "disponible", "porcentaje_consumido",
+    ]
+    filas = [
+        ("gas_internet", "Servicios", "Internet", "", 29000, 29895.4, -895.4, 103.1),
+        ("gas_celular_jose", "Servicios", "Celular Jose", "", 11000, 21120.06, -10120.06, 192),
+    ]
+
+    texto = nl2sql.redactar_respuesta(
+        "La respuesta es categoria, concepto y porcentaje, nada mas",
+        columnas,
+        filas,
+        unidad="colones y %",
+    )
+
+    assert "*Categoria | Concepto | Porcentaje consumido*" in texto
+    assert "• Servicios | Internet | 103,1%" in texto
+    assert "Linea id" not in texto
+    assert "Presupuesto" not in texto
+    assert "Gastado" not in texto
+
+
+def test_ajuste_de_columnas_conserva_contexto_para_seleccionar_kpi():
+    relleno = [
+        {
+            "kpi": f"ventas_{i}",
+            "nombre": "Ventas por fecha y saldo",
+            "preguntas_ejemplo": "fecha saldo",
+            "formula_sql": "SELECT 1 AS dato FROM ventas",
+        }
+        for i in range(30)
+    ]
+    objetivo = {
+        "kpi": "flujo_caja_semanal",
+        "nombre": "Flujo de caja semanal",
+        "preguntas_ejemplo": "flujo de caja por semana",
+        "formula_sql": "SELECT 1 AS dato FROM ventas",
+    }
+    capturado = {}
+
+    class _Mensajes:
+        def create(self, **kwargs):
+            capturado.update(kwargs)
+            bloque = SimpleNamespace(
+                type="text",
+                text='{"accion":"sql_libre","kpi":"","sql":"","mensaje":""}',
+            )
+            return SimpleNamespace(content=[bloque])
+
+    ctx = SimpleNamespace(
+        schema_text="ventas(dato)",
+        tablas_reales={"ventas"},
+        permitidas=[SimpleNamespace(tabla_logica="ventas", tabla_real="ventas")],
+    )
+    historial = [
+        {"rol": "user", "contenido": "mostrame el flujo de caja semanal"},
+        {"rol": "assistant", "contenido": "Resultado", "sql": "SELECT 1 FROM ventas"},
+    ]
+    with patch.object(
+        kpis, "_anthropic", return_value=SimpleNamespace(messages=_Mensajes()),
+    ):
+        kpis.planificar(
+            "No pongas otras columnas; la respuesta es fecha y saldo, nada mas",
+            relleno + [objetivo],
+            ctx,
+            historial=historial,
+        )
+
+    assert "kpi: flujo_caja_semanal" in capturado["messages"][0]["content"]

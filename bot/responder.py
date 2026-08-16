@@ -324,6 +324,12 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     #    consultar la base: el adjunto es otra presentacion de lo ya autorizado.
     if fmt == formato.TEXTO or not filas:
         return Respuesta(texto, sql=sql)
+    # Una lista explicita de columnas tambien se respeta en el adjunto. La
+    # respuesta textual aplica esta misma proyeccion dentro del redactor para
+    # elegir el formato compacto sin reescribir el SQL ni cambiar valores.
+    columnas, filas, _ = nl2sql.proyectar_columnas_solicitadas(
+        pregunta, columnas, filas,
+    )
     # Si el gráfico salió de nuestra propia inferencia (no lo pidió el usuario),
     # un aviso de "no pude armarlo" es ruido sobre algo que nunca prometimos.
     respuesta = _armar_adjunto(

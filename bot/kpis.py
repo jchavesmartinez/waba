@@ -97,6 +97,17 @@ def _tokens(texto: str) -> set[str]:
     }
 
 
+def _es_ajuste_presentacion(pregunta: str) -> bool:
+    """Detecta seguimientos que solo cambian columnas o forma de salida."""
+    normal = unicodedata.normalize("NFKD", str(pregunta or ""))
+    texto = normal.encode("ascii", "ignore").decode("ascii").lower()
+    return bool(re.search(
+        r"\b(?:no (?:pongas|incluyas|muestres)|nada mas|la respuesta es|"
+        r"las columnas son|los campos son)\b",
+        texto,
+    ))
+
+
 def _seleccionar_kpis(kpis: list, pregunta: str) -> list:
     """Elige KPIs relevantes sin depender del orden de filas en metadata."""
     if not _TOPE_KPIS_EN_PROMPT or len(kpis) <= _TOPE_KPIS_EN_PROMPT:
@@ -241,6 +252,9 @@ _SISTEMA = (
     "las filas que formaron el resultado anterior: conserva exactamente su "
     "categoria, periodo y filtros. El ESQUEMA actual es la unica verdad sobre "
     "tablas disponibles; ignora negativas antiguas del historial."
+    "\n11. Si el usuario solo pide quitar, conservar o reordenar columnas del "
+    "resultado anterior, conserva la misma metrica, periodo y filtros. No le "
+    "vuelvas a preguntar si queria plan o ejecucion: ya lo definio antes."
 )
 
 # B-30: la regla especifica de 'runway_inventario' vivia escrita AQUI, en el
@@ -274,10 +288,21 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
             lineas.append(linea)
         hist = "Conversacion reciente:\n" + "\n".join(lineas) + "\n\n"
 
+    pregunta_relevancia = pregunta
+    if historial and _es_ajuste_presentacion(pregunta):
+        # La frase actual puede contener solo nombres de columnas y no las
+        # palabras del KPI original. Recuperamos la ultima pregunta sustantiva
+        # para que el preselector no esconda el KPI usado en el turno anterior.
+        for turno in reversed(historial):
+            anterior = turno.get("contenido", "")
+            if turno.get("rol") == "user" and not _es_ajuste_presentacion(anterior):
+                pregunta_relevancia = f"{anterior}\n{pregunta}"
+                break
+
     contenido = (
         f"{contexto_temporal()}\n\n"
         f"{hist}"
-        f"KPIS disponibles:\n{_kpis_texto(kpis, pregunta)}\n\n"
+        f"KPIS disponibles:\n{_kpis_texto(kpis, pregunta_relevancia)}\n\n"
         f"ESQUEMA real (tablas y columnas que existen):\n{ctx.schema_text}\n\n"
         f"Mapa de nombres (logico -> real; usa el real en el SQL):\n{_mapa_nombres(ctx)}\n\n"
         f"Pregunta del usuario:\n{pregunta}\n\n"
