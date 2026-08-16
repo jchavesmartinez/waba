@@ -230,14 +230,36 @@ def _limpiar_numero(serie: pd.Series, coma_decimal: bool = True) -> pd.Series:
     coma_decimal=True  (default, convencion tica):  punto = miles, coma = decimal
     coma_decimal=False (convencion anglosajona):    coma  = miles, punto = decimal
     """
-    t = serie.astype(str).str.strip()
-    t = t.str.replace(r"[\s₡$€]", "", regex=True)      # moneda y espacios
-    if coma_decimal:
-        t = t.str.replace(".", "", regex=False)         # miles
-        t = t.str.replace(",", ".", regex=False)        # decimal -> punto
-    else:
-        t = t.str.replace(",", "", regex=False)         # miles
-    return t.str.replace(r"^$", "nan", regex=True)
+    def _uno(valor) -> str:
+        t = re.sub(r"[\s₡$€]", "", str(valor).strip())
+        if not t:
+            return "nan"
+
+        if coma_decimal:
+            if "." in t and "," in t:
+                # Convencion tica explicita: 1.234,56.
+                return t.replace(".", "").replace(",", ".")
+            if "," in t:
+                return t.replace(",", ".")
+            if "." in t:
+                # "5.000" tiene un grupo de miles inequivoco. En cambio
+                # "390037.5" no puede ser miles: suele venir de una celda
+                # numerica de Excel serializada por pandas y el punto es decimal.
+                return t.replace(".", "") if _MILES_PUNTO.fullmatch(t) else t
+            return t
+
+        if "." in t and "," in t:
+            # Convencion anglosajona explicita: 1,234.56.
+            return t.replace(",", "")
+        if "." in t:
+            return t
+        if "," in t:
+            # Igual que arriba: "1,234" es miles; "390037,5" es decimal
+            # producido por una exportacion con locale distinto.
+            return t.replace(",", "") if _MILES_COMA.fullmatch(t) else t.replace(",", ".")
+        return t
+
+    return serie.map(_uno)
 
 
 def coma_decimal_de(config_fuente: dict) -> bool:

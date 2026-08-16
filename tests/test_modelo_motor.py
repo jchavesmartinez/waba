@@ -121,6 +121,65 @@ def test_join_auxiliar_asigna_titular_y_separa_mapeos_por_dimension():
     assert filas[0]["linea_presupuesto_id"] == "GAS-008"
 
 
+def test_join_posterior_usa_linea_presupuesto_nacida_de_clasificacion():
+    campos = CAMPOS + [{
+        "modelo_id": "bac", "columna": "comercio_concepto",
+        "tipo": "texto", "patron": "Comercio",
+        "clasifica_en": "linea_presupuesto_id",
+        "clasifica_con": "titular",
+    }]
+    meta = {
+        "campos": campos, "clasificacion": [], "overrides": [],
+        "joins": [
+            {
+                "modelo_id": "bac",
+                "tabla_auxiliar": "sharepoint_db__tarjetas",
+                "columna_base": "tarjeta", "columna_auxiliar": "ultimos4",
+                "transformacion": "ultimos4", "columnas_salida": "titular",
+                "fecha_base": "fecha_transaccion",
+                "vigencia_desde": "vigencia_desde",
+                "vigencia_hasta": "vigencia_hasta", "activo": "si",
+            },
+            {
+                "modelo_id": "bac",
+                "tabla_auxiliar": "sharepoint_db__presupuesto",
+                "columna_base": "linea_presupuesto_id",
+                "columna_auxiliar": "linea_id",
+                "transformacion": "exacto", "columnas_salida": "concepto",
+                "fecha_base": "fecha_transaccion",
+                "vigencia_desde": "vigencia_desde",
+                "vigencia_hasta": "vigencia_hasta", "activo": "si",
+            },
+        ],
+    }
+    modelo = Modelo(
+        {"modelo_id": "bac", "tabla_origen": "correos",
+         "tabla_destino": "transacciones", "columna_texto": "cuerpo"}, meta)
+    mapeo = {
+        ("linea_presupuesto_id",
+         _normalizar("comercio_concepto: AM PM VEROLIZ | titular: Jose")):
+            "gas_comedera",
+    }
+    auxiliares = {
+        "sharepoint_db__tarjetas": [{
+            "ultimos4": "8774", "titular": "Jose", "activo": "si",
+            "vigencia_desde": "2026-01-01", "vigencia_hasta": "",
+        }],
+        "sharepoint_db__presupuesto": [{
+            "linea_id": "gas_comedera", "concepto": "Comedera",
+            "activo": "si", "vigencia_desde": "2026-01-01",
+            "vigencia_hasta": "",
+        }],
+    }
+
+    filas, rechazos = modelo.procesar([_fila()], mapeo, auxiliares)
+
+    assert rechazos == []
+    assert filas[0]["titular"] == "Jose"
+    assert filas[0]["linea_presupuesto_id"] == "gas_comedera"
+    assert filas[0]["concepto"] == "Comedera"
+
+
 # --- extraccion y tipado --------------------------------------------------
 
 def test_extrae_y_tipa_una_notificacion_real():

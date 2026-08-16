@@ -221,6 +221,16 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # Capa semantica: ¿un KPI predefinido calza? ¿hay que pedir contexto o retar?
     kpis_def = kpis.cargar_kpis(cliente)
     plan = kpis.planificar(pregunta, kpis_def, ctx, historial=historial)
+    unidad_kpi = ""
+    if plan.get("accion") == "usar_kpi":
+        elegido = next(
+            (k for k in kpis_def
+             if str(k.get("kpi", "")).strip().lower()
+             == str(plan.get("kpi", "")).strip().lower()),
+            None,
+        )
+        if elegido:
+            unidad_kpi = str(elegido.get("unidad", "")).strip()
     logger.info("[%s] plan=%s kpi=%s", cid, plan["accion"], plan.get("kpi"))
 
     # Freno anti-interrogatorio: si el turno anterior el bot YA pregunto (su
@@ -243,13 +253,8 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     sql = ""
     if plan["accion"] == "usar_kpi" and plan.get("sql"):
         sql = plan["sql"]
-        # A-19: la formula canonica del KPI se le manda al modelo para que la
-        # "adapte" al periodo/dimension que pidio el usuario. El prompt dice
-        # "respetala", pero nada lo garantiza: el validador comprueba que el SQL
-        # sea SEGURO, no que sea CORRECTO. Un KPI mal adaptado devuelve un numero
-        # plausible y equivocado, que es el peor tipo de error. Como minimo, que
-        # quede el rastro para poder auditar despues cual formula produjo que
-        # numero.
+        # La formula ya viene materializada de forma deterministica desde la
+        # metadata: el modelo eligio el KPI, pero no pudo reescribir su SQL.
         logger.info("[%s] SQL derivado del KPI '%s': %s",
                     cid, plan.get("kpi"), " ".join(sql.split()))
         ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
@@ -292,8 +297,10 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # mejora la frase "te mando el detalle en Excel".
     muestra = filas[:config.BOT_MAX_FILAS]
     try:
-        texto = nl2sql.redactar_respuesta(pregunta, columnas, muestra,
-                                          historial=historial, sql=sql)
+        texto = nl2sql.redactar_respuesta(
+            pregunta, columnas, muestra, historial=historial, sql=sql,
+            unidad=unidad_kpi,
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error redactando respuesta: %s", cid, e)
         # Fallback sin LLM: al menos devolver el dato crudo.

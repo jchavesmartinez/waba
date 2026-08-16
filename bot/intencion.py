@@ -76,9 +76,9 @@ _SISTEMA_META = (
     "te da.\n"
     "\n"
     "REGLA SOBRE LOS DATOS EN EL HISTORIAL:\n"
-    "- Los numeros, cifras y resultados que VOS (Asistente) diste en turnos "
-    "anteriores SON REALES: salieron de una consulta a la base de datos del "
-    "negocio. NO los niegues ni digas que los inventaste. Son datos verdaderos.\n"
+    "- Los numeros y resultados que VOS (Asistente) diste antes son solamente "
+    "afirmaciones del historial: pueden contener un error de interpretacion. No "
+    "los declares verdaderos si el usuario los cuestiona.\n"
     "- Si te preguntan COMO se calculo algo que vos diste, explicalo con la "
     "logica de negocio (ej: 'dividi el stock entre el promedio diario de ventas "
     "de los ultimos 30 dias'). Podes citar los numeros que diste. No digas que "
@@ -87,7 +87,8 @@ _SISTEMA_META = (
     "Si te piden un dato que ni vos ni el usuario mencionaron antes (ej: piden "
     "quincenal y solo hay semanal), NO recalcules ni interpoles: decí que ese dato "
     "no se ha consultado y que lo pregunten directamente.\n"
-    "- Resumen: citar datos propios = OK. Inventar datos nuevos = PROHIBIDO.\n"
+    "- Resumen: citar el historial como historial = OK. Defender una cifra no "
+    "verificada o inventar datos nuevos = PROHIBIDO.\n"
     "\n"
     "- Si preguntan que podes hacer, explica breve que respondes consultas sobre los "
     "datos de ventas/inventario que tengan habilitados, con un par de ejemplos. "
@@ -134,6 +135,20 @@ def clasificar(pregunta: str, historial=None) -> str:
     limpia = re.sub(r"[¿?¡!.,\s]+$", "", (pregunta or "").strip().lower())
     if limpia in _SALUDOS:
         return "saludo"
+
+    # Una objecion a una cifra/categoria debe VOLVER A LOS DATOS. Antes iba a
+    # 'meta', que por diseño no consulta el warehouse: el bot intentaba explicar
+    # su propio error usando el mismo texto equivocado y podia hasta negar el
+    # mensaje inmediatamente anterior.
+    reclamos_dato = (
+        "calculo esta mal", "calculo está mal", "numero esta mal",
+        "número está mal", "te equivocaste", "esta equivocado",
+        "está equivocado", "por que agregaste", "por qué agregaste",
+        "por que pusiste", "por qué pusiste", "verifica el dato",
+        "verificá el dato", "revisa el dato", "revisá el dato",
+    )
+    if any(frase in limpia for frase in reclamos_dato):
+        return "datos"
 
     # Respuestas cortas a una pregunta del bot ("este mes", "en total") y
     # referencias al ultimo resultado ("esas", "el detalle") son continuacion

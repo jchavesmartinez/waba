@@ -18,7 +18,8 @@ La ejecucion en si vive en bot/warehouse_ro.py (transaccion READ ONLY).
 
 import logging
 import re
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal
 
 import sqlglot
 from sqlglot import exp
@@ -406,39 +407,147 @@ def tabla_texto(columnas, filas, tope=30) -> str:
     return "\n".join(lineas)
 
 
-def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="") -> str:
-    """Convierte el resultado del SELECT en una respuesta de WhatsApp."""
-    # Caso trivial: una sola celda -> se responde directo, sin gastar tokens.
-    if len(filas) == 1 and len(columnas) == 1:
-        valor = filas[0][0]
-        if str(valor) == "NO_RESPONDIBLE":
-            return ("No puedo responder eso con los datos habilitados para este "
-                    "chat. Preguntame sobre ventas o inventario.")
+def _nombre_legible(nombre) -> str:
+    return str(nombre or "dato").strip().replace("_", " ").capitalize()
 
-    # Se incluye el SQL para que el redactor sepa QUE se calculo (ASC/DESC,
-    # agregaciones) y no mal-etiquete un resultado de una pregunta eliptica.
-    bloque_sql = f"Consulta SQL ejecutada (para que la interpretes; NO la muestres):\n{sql}\n\n" if sql else ""
-    contenido = (
-        f"Pregunta de este turno:\n{pregunta}\n\n"
-        f"{bloque_sql}"
-        f"Resultado de la consulta ({len(filas)} filas):\n{tabla_texto(columnas, filas)}"
-    )
-    # El historial va como turnos previos, para que la respuesta tenga
-    # continuidad ("como te decia", "de esos 3 productos..."). El turno actual
-    # es el ultimo mensaje 'user'.
-    messages = _historial_a_messages(historial)
-    messages.append({"role": "user", "content": contenido})
-    resp = _anthropic().messages.create(
-        model=config.BOT_MODELO_RESPUESTA,
-        max_tokens=500,
-        system=_SISTEMA_RESP,
-        messages=messages,
-    )
-    texto = "".join(b.text for b in resp.content
-                    if getattr(b, "type", "") == "text").strip()
-    # OJO: aca NO se limpia el arte ASCII. Lo hace bot/responder.py, que ademas
-    # necesita SABER si lo hubo para mandar el grafico de verdad en su lugar.
+
+def _numero_decimal(valor):
+    if isinstance(valor, bool) or not isinstance(valor, (int, float, Decimal)):
+        return None
+    return Decimal(str(valor))
+
+
+def _formatear_numero(valor) -> str:
+    numero = _numero_decimal(valor)
+    if numero is None:
+        return str(valor)
+    if numero == numero.to_integral_value():
+        return f"{int(numero):,}".replace(",", ".")
+    ingles = f"{numero:,.2f}"
+    return ingles.translate(str.maketrans({",": ".", ".": ","})).rstrip("0").rstrip(",")
+
+
+def _formatear_valor(valor, columna: str = "", unidad: str = "") -> str:
+    if valor is None:
+        return "—"
+    if isinstance(valor, datetime):
+        return valor.strftime("%Y-%m-%d %H:%M")
+    if isinstance(valor, date):
+        return valor.isoformat()
+    numero = _numero_decimal(valor)
+    if numero is None:
+        return str(valor)
+
+    nombre = str(columna or "").lower()
+    unidad_l = str(unidad or "").lower()
+    texto = _formatear_numero(numero)
+    if any(x in nombre for x in ("pct", "porcentaje", "%")):
+        return f"{texto}%"
+    es_conteo = any(x in nombre for x in (
+        "cantidad", "unidades", "movimientos", "registros", "pendientes",
+    ))
+    if not es_conteo and "colon" in unidad_l:
+        return f"₡{texto}"
+    if not es_conteo and ("dolar" in unidad_l or "usd" in unidad_l):
+        return f"USD {texto}"
     return texto
+
+
+def _presupuesto_formateado(columnas, filas, unidad: str):
+    """Formato exacto para los dos KPIs de plan presupuestario."""
+    idx = {str(c).strip().lower(): i for i, c in enumerate(columnas)}
+    if not {"categoria", "mensual", "total_general"}.issubset(idx):
+        return None
+
+    total = filas[0][idx["total_general"]] if filas else 0
+    lineas = [f"*Presupuesto mensual total: {_formatear_valor(total, 'mensual', unidad)}*"]
+    tiene_concepto = "concepto" in idx
+    tiene_total_categoria = "total_categoria" in idx
+
+    if not tiene_concepto:
+        for fila in filas:
+            categoria = fila[idx["categoria"]]
+            mensual = fila[idx["mensual"]]
+            lineas.append(
+                f"• *{categoria}:* {_formatear_valor(mensual, 'mensual', unidad)}"
+            )
+        return "\n".join(lineas)
+
+    grupos = []
+    posiciones = {}
+    for fila in filas:
+        categoria = str(fila[idx["categoria"]])
+        if categoria not in posiciones:
+            posiciones[categoria] = len(grupos)
+            grupos.append([categoria, [], None])
+        grupo = grupos[posiciones[categoria]]
+        grupo[1].append(fila)
+        if tiene_total_categoria:
+            grupo[2] = fila[idx["total_categoria"]]
+
+    for categoria, detalles, total_categoria in grupos:
+        if total_categoria is None:
+            # Nunca sumar en el redactor: si SQL no trajo el subtotal, se omite.
+            lineas.append(f"\n*{categoria}*")
+        else:
+            lineas.append(
+                f"\n*{categoria} — "
+                f"{_formatear_valor(total_categoria, 'mensual', unidad)}*"
+            )
+        for fila in detalles:
+            concepto = fila[idx["concepto"]]
+            mensual = fila[idx["mensual"]]
+            lineas.append(
+                f"  • {concepto}: {_formatear_valor(mensual, 'mensual', unidad)}"
+            )
+    return "\n".join(lineas)
+
+
+def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int = 8) -> str:
+    """Presenta las celdas ejecutadas sin pedirle aritmetica ni datos al LLM."""
+    if not filas:
+        return "No encontré registros para ese filtro."
+
+    presupuesto = _presupuesto_formateado(columnas, filas, unidad)
+    if presupuesto:
+        return presupuesto
+
+    if len(filas) == 1:
+        partes = [
+            f"*{_nombre_legible(col)}:* {_formatear_valor(valor, col, unidad)}"
+            for col, valor in zip(columnas, filas[0])
+        ]
+        return "\n".join(partes)
+
+    lineas = [f"*Resultado exacto ({len(filas)} registros):*"]
+    for fila in filas[:tope]:
+        partes = [
+            f"{_nombre_legible(col)}: {_formatear_valor(valor, col, unidad)}"
+            for col, valor in zip(columnas, fila)
+        ]
+        lineas.append("• " + " | ".join(partes))
+    if len(filas) > tope:
+        lineas.append(
+            f"Hay {len(filas) - tope} registros más. Pedime el Excel para verlos completos."
+        )
+    return "\n".join(lineas)
+
+
+def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
+                       unidad: str = "") -> str:
+    """
+    Convierte el SELECT en texto sin permitir una segunda interpretacion numerica.
+
+    El LLM ya participo al entender la pregunta y elegir/generar el SQL. Una vez
+    que PostgreSQL respondio, volver a pedirle que sume o resuma introduce una
+    segunda fuente de verdad: era la causa de que el Excel estuviera correcto y
+    el mensaje no. La salida textual ahora usa exactamente las mismas filas que
+    el archivo.
+    """
+    if len(filas) == 1 and len(columnas) == 1 and str(filas[0][0]) == "NO_RESPONDIBLE":
+        return ("No puedo responder eso con los datos habilitados para este "
+                "chat. Preguntame sobre ventas o inventario.")
+    return redactar_resultado_exacto(columnas, filas, unidad=unidad)
 
 
 # B-20: bot/responder.py usaba _tabla_texto (privada de este modulo) en su modo

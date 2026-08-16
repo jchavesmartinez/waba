@@ -255,6 +255,13 @@ class Modelo:
             self._copiar_contexto_raw(fila, cruda)
             self._aplicar_joins(fila, cruda, auxiliares)
             self._clasificar(fila, mapeo, indice_overrides.get(clave, {}))
+            # Algunos joins dependen de una columna que nace de la
+            # clasificacion (p. ej. linea_presupuesto_id). La primera pasada
+            # mantiene disponibles los joins de contexto como titular para el
+            # clasificador; esta segunda completa solamente las salidas que
+            # aun faltan, sin repetir ni sobrescribir los joins ya resueltos.
+            self._aplicar_joins(
+                fila, cruda, auxiliares, solo_si_faltan_salidas=True)
             derivadas.append(fila)
 
         return derivadas, rechazos
@@ -370,9 +377,15 @@ class Modelo:
                     valor = cruda.get(columna)
                     fila[columna] = None if valor is None else str(valor).strip()
 
-    def _aplicar_joins(self, fila: dict, cruda: dict, auxiliares: dict) -> None:
+    def _aplicar_joins(self, fila: dict, cruda: dict, auxiliares: dict,
+                       solo_si_faltan_salidas: bool = False) -> None:
         """Enriquece una fila con tablas auxiliares declaradas en ``_joins``."""
         for join in self.joins:
+            salidas = _lista_columnas(join.get("columnas_salida"))
+            if (solo_si_faltan_salidas and salidas and
+                    all(fila.get(columna) not in (None, "")
+                        for columna in salidas)):
+                continue
             tabla = join.get("tabla_auxiliar", "")
             base = fila.get(join.get("columna_base"))
             if base is None:
@@ -395,7 +408,7 @@ class Modelo:
                     "se usa la primera.", self.modelo_id, tabla,
                     len(candidatas), clave)
             if candidatas:
-                for columna in _lista_columnas(join.get("columnas_salida")):
+                for columna in salidas:
                     fila[columna] = candidatas[0].get(columna)
 
     def _indexar_overrides(self) -> dict:

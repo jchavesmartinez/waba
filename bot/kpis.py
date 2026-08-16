@@ -26,8 +26,11 @@ seguridad, solo mejora la definicion de la consulta.
 import json
 import logging
 import re
+import unicodedata
 
 import config
+import sqlglot
+from sqlglot import exp
 from bot.nl2sql import contexto_temporal
 from bot import catalogo, warehouse_ro
 
@@ -75,18 +78,58 @@ def cargar_kpis(cliente: dict) -> list:
 
 
 # B-31: con muchos KPIs definidos el prompt se vuelve caro y el reconocimiento
-# EMPEORA por exceso de opciones. 0 = sin tope (todos).
-_TOPE_KPIS_EN_PROMPT = 25
+# empeora por exceso de opciones. Antes se cortaban por POSICION y eso escondia
+# los KPIs del final del Sheet. Ahora se eligen por relevancia contra la pregunta.
+_TOPE_KPIS_EN_PROMPT = 16
+_STOPWORDS = {
+    "como", "cual", "cuales", "cuanto", "cuantos", "dame", "decime",
+    "donde", "este", "esta", "estos", "estas", "para", "quiero", "tengo",
+    "total", "todos", "todas", "mostrar", "muestra", "necesito", "mes",
+}
 
 
-def _kpis_texto(kpis: list) -> str:
-    if _TOPE_KPIS_EN_PROMPT and len(kpis) > _TOPE_KPIS_EN_PROMPT:
-        logger.warning(
-            "el cliente tiene %d KPIs definidos; se mandan los primeros %d al "
-            "planificador. Conviene depurar el tab '_kpis'.",
-            len(kpis), _TOPE_KPIS_EN_PROMPT,
+def _tokens(texto: str) -> set[str]:
+    normal = unicodedata.normalize("NFKD", str(texto or ""))
+    normal = normal.encode("ascii", "ignore").decode("ascii").lower()
+    return {
+        t for t in re.findall(r"[a-z0-9_]+", normal)
+        if len(t) >= 4 and t not in _STOPWORDS
+    }
+
+
+def _seleccionar_kpis(kpis: list, pregunta: str) -> list:
+    """Elige KPIs relevantes sin depender del orden de filas en metadata."""
+    if not _TOPE_KPIS_EN_PROMPT or len(kpis) <= _TOPE_KPIS_EN_PROMPT:
+        return list(kpis)
+
+    consulta = _tokens(pregunta)
+    puntuados = []
+    for pos, kpi in enumerate(kpis):
+        principales = _tokens(" ".join((
+            kpi.get("kpi", ""), kpi.get("nombre", ""),
+            kpi.get("preguntas_ejemplo", ""),
+        )))
+        secundarios = _tokens(" ".join((
+            kpi.get("descripcion", ""), kpi.get("dimensiones", ""),
+            kpi.get("supuestos", ""),
+        )))
+        score = 3 * len(consulta & principales) + len(consulta & secundarios)
+        puntuados.append((score, -pos, kpi))
+
+    if not any(score for score, _, _ in puntuados):
+        return list(kpis[:_TOPE_KPIS_EN_PROMPT])
+    puntuados.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [k for _, _, k in puntuados[:_TOPE_KPIS_EN_PROMPT]]
+
+
+def _kpis_texto(kpis: list, pregunta: str = "") -> str:
+    seleccionados = _seleccionar_kpis(kpis, pregunta)
+    if len(seleccionados) < len(kpis):
+        logger.info(
+            "se seleccionaron %d de %d KPIs por relevancia para la pregunta",
+            len(seleccionados), len(kpis),
         )
-        kpis = kpis[:_TOPE_KPIS_EN_PROMPT]
+    kpis = seleccionados
     bloques = []
     for k in kpis:
         campos = [f"kpi: {k.get('kpi','')}", f"nombre: {k.get('nombre','')}"]
@@ -108,6 +151,38 @@ def _mapa_nombres(ctx) -> str:
     return "\n".join(pares)
 
 
+def sql_canonico(kpi: dict, ctx) -> str:
+    """
+    Materializa la formula declarada en metadata con nombres fisicos reales.
+
+    El modelo elige QUE KPI corresponde, pero no vuelve a escribir su formula.
+    El reemplazo se hace sobre el AST para no tocar alias, columnas o literales.
+    """
+    formula = str(kpi.get("formula_sql", "")).strip().rstrip(";")
+    if not formula:
+        raise ValueError(f"el KPI '{kpi.get('kpi', '')}' no tiene formula_sql")
+
+    arbol = sqlglot.parse_one(formula, read="postgres")
+    mapa = {p.tabla_logica.lower(): p.tabla_real for p in ctx.permitidas}
+    reales = {str(t).lower() for t in ctx.tablas_reales}
+    ctes = {str(c.alias_or_name).lower() for c in arbol.find_all(exp.CTE)}
+
+    for tabla in arbol.find_all(exp.Table):
+        if tabla.db:
+            raise ValueError("formula KPI con esquema explicito no permitida")
+        nombre = tabla.name.lower()
+        if nombre in ctes or nombre in reales:
+            continue
+        real = mapa.get(nombre)
+        if not real:
+            raise ValueError(
+                f"la tabla logica '{tabla.name}' del KPI no esta habilitada"
+            )
+        tabla.set("this", exp.to_identifier(real))
+
+    return arbol.sql(dialect="postgres")
+
+
 _SISTEMA = (
     "Sos el planificador de un bot de datos por WhatsApp. Con la PREGUNTA del "
     "usuario, un catalogo de KPIS predefinidos y el ESQUEMA real de tablas, "
@@ -115,10 +190,9 @@ _SISTEMA = (
     "forma:\n"
     '{"accion":"usar_kpi|sql_libre|pedir_contexto|retar","kpi":"","sql":"","mensaje":""}\n'
     "Reglas:\n"
-    "- usar_kpi: un KPI del catalogo calza claro y tenes los parametros. Escribi "
-    "en 'sql' UN SELECT de solo lectura usando la 'formula_sql' de ese KPI como "
-    "definicion canonica (respetala), adaptando dimension/periodo/filtros que pida "
-    "el usuario. Usa los NOMBRES REALES de tabla del mapa. Poné el id en 'kpi'.\n"
+    "- usar_kpi: un KPI del catalogo calza claro y tenes los parametros. Pone su "
+    "id exacto en 'kpi' y deja 'sql' VACIO. La aplicacion ejecutara la formula_sql "
+    "canonica; vos NO la copies, adaptes ni reescribas.\n"
     "- pedir_contexto: si calzan VARIOS KPIs o falta un parametro clave (ej: piden "
     "'el mejor' y hay KPI por unidades y por ingreso; o 'crecimiento' sin periodo). "
     "En 'mensaje' hace UNA pregunta corta para desambiguar. No inventes la respuesta.\n"
@@ -203,7 +277,7 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
     contenido = (
         f"{contexto_temporal()}\n\n"
         f"{hist}"
-        f"KPIS disponibles:\n{_kpis_texto(kpis)}\n\n"
+        f"KPIS disponibles:\n{_kpis_texto(kpis, pregunta)}\n\n"
         f"ESQUEMA real (tablas y columnas que existen):\n{ctx.schema_text}\n\n"
         f"Mapa de nombres (logico -> real; usa el real en el SQL):\n{_mapa_nombres(ctx)}\n\n"
         f"Pregunta del usuario:\n{pregunta}\n\n"
@@ -217,7 +291,24 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
             messages=[{"role": "user", "content": contenido}],
         )
         txt = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-        return _parsear(txt)
+        plan = _parsear(txt)
+        if plan["accion"] != "usar_kpi":
+            return plan
+
+        elegido = next(
+            (k for k in kpis
+             if str(k.get("kpi", "")).strip().lower() == plan["kpi"].lower()),
+            None,
+        )
+        if elegido is None:
+            logger.warning("el planificador eligio un KPI inexistente: %r", plan["kpi"])
+            return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+        try:
+            plan["sql"] = sql_canonico(elegido, ctx)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("KPI '%s' sin SQL canonico ejecutable: %s", plan["kpi"], e)
+            return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+        return plan
     except Exception as e:  # noqa: BLE001
         logger.warning("planificador KPI fallo (%s); cae a sql_libre", e)
         return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
