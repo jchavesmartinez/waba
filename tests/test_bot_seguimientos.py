@@ -66,6 +66,8 @@ def test_pedir_pdf_reutiliza_ultimo_sql_sin_volver_a_planificar():
     assert respuesta.texto == "Listo, te adjunto el PDF con 5 registros."
     assert "Resultado exacto" not in respuesta.texto
     assert len(pdf["filas"]) == 5
+    assert pdf["resumen"] == ""
+    assert pdf["titulo"].lower() != "en un pdf"
 
 
 def test_si_a_oferta_de_detalle_fuerza_desglose_y_no_repite_resumen():

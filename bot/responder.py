@@ -470,8 +470,11 @@ def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,
         elif fmt == formato.CSV:
             adj = artefactos.csv_texto(columnas, filas, titulo=titulo)
         elif fmt == formato.PDF:
+            resumen_pdf = (
+                "" if texto.startswith("Listo, te adjunto el PDF") else texto
+            )
             adj = artefactos.pdf_reporte(columnas, filas, titulo=titulo,
-                                         resumen=texto)
+                                         resumen=resumen_pdf)
         else:
             return Respuesta(texto)
     except Exception as e:  # noqa: BLE001
@@ -508,6 +511,8 @@ _RUIDO_TITULO = re.compile(
 
 def _titulo(pregunta: str) -> str:
     """Titulo del grafico/archivo a partir de la pregunta, sin gastar el modelo."""
+    if formato.es_pedido_solo_formato(pregunta):
+        return "Consulta"
     t = _RUIDO_TITULO.sub(" ", pregunta or "")
     t = " ".join(t.split()).strip(" ¿?¡!.,:;-")
     if len(t) < 4:                       # quedo vacio o casi ("de", "las")

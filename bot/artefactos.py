@@ -332,8 +332,8 @@ def csv_texto(columnas, filas, titulo: str = "", caption: str = ""):
 
 # --- PDF -----------------------------------------------------------------
 
-def pdf_reporte(columnas, filas, titulo: str = "", resumen: str = "",
-                incluir_grafico: bool = True, caption: str = ""):
+def _pdf_reporte_legacy(columnas, filas, titulo: str = "", resumen: str = "",
+                        incluir_grafico: bool = True, caption: str = ""):
     """
     Reporte de una pagina: titulo, resumen en texto, grafico (si sale) y tabla.
     Es el formato para "mandame el reporte" / "pasalo a PDF".
@@ -397,6 +397,181 @@ def pdf_reporte(columnas, filas, titulo: str = "", resumen: str = "",
             estilos["Normal"]))
 
     doc.build(hist)
+    buf.seek(0)
+
+    return Adjunto(
+        tipo="document",
+        contenido=buf.getvalue(),
+        nombre=nombre_archivo(titulo or "reporte", "pdf"),
+        mime=MIME_PDF,
+        caption=caption,
+    )
+
+
+def _anchos_tabla_pdf(columnas, filas, ancho_disponible: float) -> list[float]:
+    """Distribuye el ancho disponible sin permitir que la tabla salga de pagina."""
+    cantidad = len(columnas)
+    if cantidad == 0:
+        return []
+
+    pesos = []
+    muestra = filas[:30]
+    for indice, columna in enumerate(columnas):
+        largos = [len(str(columna))]
+        largos.extend(len(_a_texto(fila[indice])) for fila in muestra)
+        peso = min(max(max(largos, default=6), 6), 26)
+        nombre = str(columna).lower()
+        if nombre.startswith("_") or nombre.endswith("_id") or "clave" in nombre:
+            peso = min(peso, 14)
+        elif "fecha" in nombre:
+            peso = min(peso, 16)
+        elif any(x in nombre for x in ("monto", "cantidad", "pct", "porcentaje")):
+            peso = min(peso, 12)
+        pesos.append(float(peso))
+
+    minimo = min(42.0, ancho_disponible / cantidad * 0.65)
+    restante = max(ancho_disponible - minimo * cantidad, 0)
+    total_pesos = sum(pesos) or 1
+    anchos = [minimo + restante * peso / total_pesos for peso in pesos]
+    anchos[-1] += ancho_disponible - sum(anchos)
+    return anchos
+
+
+def _grafico_util_en_pdf(columnas, filas) -> bool:
+    """Evita graficos cuyo eje termina siendo un hash, ID u origen tecnico."""
+    if len(columnas) > 5 or len(filas) < 2:
+        return False
+    for indice, columna in enumerate(columnas):
+        valores = [fila[indice] for fila in filas if fila[indice] is not None]
+        if valores and not all(_a_numero(v) is not None for v in valores):
+            nombre = str(columna).strip().lower()
+            return not (
+                nombre.startswith("_") or nombre.endswith("_id")
+                or "clave" in nombre or "origen" in nombre
+            )
+    return False
+
+
+def pdf_reporte(columnas, filas, titulo: str = "", resumen: str = "",
+                incluir_grafico: bool = True, caption: str = ""):
+    """Reporte adaptable: nunca desborda horizontalmente y pagina tablas largas."""
+    from xml.sax.saxutils import escape
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import (Image, Paragraph, SimpleDocTemplate,
+                                    Spacer, Table, TableStyle)
+
+    es_ancho = len(columnas) > 5
+    tamano_pagina = landscape(letter) if es_ancho else letter
+    margen = 1.2 * cm if es_ancho else 1.6 * cm
+    ancho_disponible = tamano_pagina[0] - 2 * margen
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=tamano_pagina,
+        leftMargin=margen,
+        rightMargin=margen,
+        topMargin=1.3 * cm,
+        bottomMargin=1.3 * cm,
+        title=titulo or "Reporte",
+    )
+    estilos = getSampleStyleSheet()
+    estilos["Title"].fontSize = 18 if es_ancho else 20
+    estilos["Title"].leading = 22
+    estilos["Title"].alignment = TA_CENTER
+    cuerpo = ParagraphStyle(
+        "PDFBody", parent=estilos["BodyText"], fontSize=9, leading=12,
+        alignment=TA_LEFT,
+    )
+    tamano_tabla = 6.5 if es_ancho else 7.5
+    celda = ParagraphStyle(
+        "PDFCell", parent=estilos["Normal"], fontSize=tamano_tabla,
+        leading=tamano_tabla + 1.5, splitLongWords=1, wordWrap="CJK",
+        alignment=TA_LEFT,
+    )
+    encabezado = ParagraphStyle(
+        "PDFHeader", parent=celda, fontName="Helvetica-Bold",
+        textColor=colors.white,
+    )
+
+    hist = [
+        Paragraph(escape(titulo or "Reporte de datos"), estilos["Title"]),
+        Paragraph(date.today().strftime("Generado el %d/%m/%Y"), cuerpo),
+        Spacer(1, 10),
+    ]
+
+    if resumen:
+        seguro = escape(resumen).replace("\n", "<br/>")
+        hist.append(Paragraph(seguro, cuerpo))
+        hist.append(Spacer(1, 10))
+
+    if incluir_grafico and _grafico_util_en_pdf(columnas, filas):
+        try:
+            g = grafico_png(columnas, filas, titulo=titulo)
+            if g:
+                img = ImageReader(io.BytesIO(g.contenido))
+                iw, ih = img.getSize()
+                ancho = min(ancho_disponible, 16 * cm, iw)
+                hist.append(Image(
+                    io.BytesIO(g.contenido), width=ancho,
+                    height=ancho * ih / iw,
+                ))
+                hist.append(Spacer(1, 12))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("no se pudo incrustar el grafico en el PDF: %s", e)
+
+    tope_pdf = int(getattr(config, "BOT_ADJUNTO_PDF_MAX_FILAS", 60))
+    filas_pdf = filas[:tope_pdf]
+    datos = [[Paragraph(escape(str(c)), encabezado) for c in columnas]]
+    for fila in filas_pdf:
+        fila_pdf = []
+        for valor in fila:
+            texto = _a_texto(valor)
+            if len(texto) > 240:
+                texto = texto[:237] + "..."
+            fila_pdf.append(Paragraph(escape(texto), celda))
+        datos.append(fila_pdf)
+
+    anchos = _anchos_tabla_pdf(columnas, filas_pdf, ancho_disponible)
+    tabla = Table(
+        datos, colWidths=anchos, repeatRows=1, hAlign="LEFT", splitByRow=1,
+    )
+    tabla.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F3864")),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#BFBFBF")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+         [colors.white, colors.HexColor("#F2F2F2")]),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    hist.append(tabla)
+    if len(filas) > tope_pdf:
+        hist.append(Spacer(1, 8))
+        hist.append(Paragraph(
+            f"<i>Se muestran las primeras {tope_pdf} de {len(filas)} filas. "
+            f"Pedi el archivo en Excel para verlas todas.</i>",
+            cuerpo,
+        ))
+
+    def _pie_pagina(canvas, documento):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#666666"))
+        canvas.drawRightString(
+            tamano_pagina[0] - margen, 0.65 * cm, f"Pagina {documento.page}",
+        )
+        canvas.restoreState()
+
+    doc.build(hist, onFirstPage=_pie_pagina, onLaterPages=_pie_pagina)
     buf.seek(0)
 
     return Adjunto(

@@ -116,6 +116,38 @@ def test_pdf_acepta_decimal():
     assert adj.contenido[:5] == b"%PDF-"
 
 
+def test_pdf_ancho_ajusta_todas_las_columnas_al_papel():
+    columnas = [
+        "_clave", "_origen", "comercio", "cuenta_contable",
+        "fecha_transaccion", "tarjeta_tipo", "tipo_transaccion",
+        "monto_moneda", "monto",
+    ]
+    filas = [(
+        "bb82451d8161363187df172c9c55cf05df3b06b3",
+        "correo_zoho__correos", "MXM SN PABLO HDIA OCN", "sin_clasificar",
+        "2026-08-16 13:02", "MASTER", "COMPRA", "CRC", Decimal("13759"),
+    )]
+    ancho_disponible = 720.0
+
+    anchos = artefactos._anchos_tabla_pdf(
+        columnas, filas, ancho_disponible,
+    )
+    adj = artefactos.pdf_reporte(
+        columnas, filas, titulo="Gastos sin clasificar", incluir_grafico=False,
+    )
+
+    assert len(anchos) == len(columnas)
+    assert abs(sum(anchos) - ancho_disponible) < 0.01
+    assert all(ancho > 0 for ancho in anchos)
+    assert adj.contenido[:5] == b"%PDF-"
+
+
+def test_pdf_no_grafica_identificadores_tecnicos():
+    columnas = ["_clave", "monto"]
+    filas = [("hash-a", 10), ("hash-b", 20)]
+    assert artefactos._grafico_util_en_pdf(columnas, filas) is False
+
+
 # --- Escalas incomparables (2) ------------------------------------------
 
 def test_no_mezcla_series_de_escalas_distintas(monkeypatch):
