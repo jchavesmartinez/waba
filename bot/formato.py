@@ -56,6 +56,22 @@ _REGLAS = (
 
 _COMPILADAS = tuple((f, re.compile(p)) for f, p in _REGLAS)
 
+_AFIRMACION = re.compile(
+    r"^\s*(?:si|sí|dale|claro|correcto|exacto|por supuesto|ok)(?:\b|[,!.])",
+    re.IGNORECASE,
+)
+
+# Palabras de transporte/presentacion. Se quitan para decidir si el mensaje
+# contiene una consulta de negocio nueva o solamente dice "eso en PDF".
+_RUIDO_PEDIDO = re.compile(
+    r"\b(?:pdf|reporte|informe|documento|excel|xlsx?|hoja de calculo|planilla|"
+    r"csv|grafico|grafica|imagen|archivo|exporta\w*|descarga\w*|adjunta\w*|"
+    r"manda\w*|pasa\w*|envia\w*|genera\w*|quiero|necesito|dame|en|a|"
+    r"por favor|porfa|te|pedi|ya|eso|esto|ese|esa|mismo|misma|anterior|resultado|"
+    r"detalle|datos|el|la|los|las|un|una|de|del|si)\b",
+    re.IGNORECASE,
+)
+
 
 def detectar(pregunta: str) -> str:
     """Devuelve 'texto' | 'grafico' | 'excel' | 'pdf' | 'csv'."""
@@ -77,6 +93,42 @@ def detectar(pregunta: str) -> str:
                 return EXCEL
             return formato
 
+    return TEXTO
+
+
+def es_afirmacion(pregunta: str) -> bool:
+    """True para respuestas cortas que aceptan una opcion ofrecida."""
+    texto = (pregunta or "").strip()
+    return len(texto.split()) <= 10 and bool(_AFIRMACION.search(texto))
+
+
+def es_pedido_solo_formato(pregunta: str) -> bool:
+    """
+    Distingue "eso en PDF" de "ventas de agosto en PDF".
+
+    El primero debe reutilizar la consulta anterior; el segundo contiene una
+    pregunta de datos nueva y debe pasar por el planificador normal.
+    """
+    if detectar(pregunta) == TEXTO:
+        return False
+    restante = _RUIDO_PEDIDO.sub(" ", _sin_tildes(pregunta))
+    restante = re.sub(r"\b\d+\b|[^a-z0-9]+", " ", restante).strip()
+    return not restante
+
+
+def detectar_con_contexto(pregunta: str, historial=None) -> str:
+    """Hereda el formato ofrecido cuando el usuario responde afirmativamente."""
+    actual = detectar(pregunta)
+    if actual != TEXTO or not es_afirmacion(pregunta):
+        return actual
+    for turno in reversed(historial or []):
+        if turno.get("rol") != "assistant":
+            continue
+        contenido = str(turno.get("contenido", ""))
+        if "?" not in contenido:
+            return TEXTO
+        ofrecido = detectar(contenido)
+        return ofrecido if ofrecido != TEXTO else TEXTO
     return TEXTO
 
 

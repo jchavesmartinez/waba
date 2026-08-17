@@ -69,6 +69,29 @@ def test_csv_degrada_a_excel_por_defecto():
     assert formato.detectar("mandame el csv") == formato.EXCEL
 
 
+@pytest.mark.parametrize("pregunta", [
+    "En un PDF por favor",
+    "Te pedi un PDF",
+    "PDF del detalle de los 5",
+])
+def test_reconoce_pedido_que_solo_cambia_el_formato(pregunta):
+    assert formato.es_pedido_solo_formato(pregunta) is True
+
+
+def test_un_reporte_nuevo_no_se_confunde_con_reformatear_el_anterior():
+    assert formato.es_pedido_solo_formato("PDF de ventas de agosto") is False
+
+
+def test_si_hereda_el_pdf_que_el_bot_acaba_de_ofrecer():
+    historial = [{
+        "rol": "assistant",
+        "contenido": "¿Queres exportar a PDF el detalle de los 5 gastos?",
+    }]
+    assert formato.detectar_con_contexto(
+        "Si, el detalle de los 5", historial,
+    ) == formato.PDF
+
+
 # --- Tipos de psycopg2 (1) ----------------------------------------------
 
 def test_grafico_acepta_decimal():

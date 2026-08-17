@@ -109,6 +109,51 @@ def _es_comando_olvidar(texto: str) -> bool:
     return any(t == c or t.startswith(c + " ") for c in _CMD_OLVIDAR)
 
 
+def _ultimo_asistente(historial: list) -> str:
+    return next(
+        (str(t.get("contenido", "")) for t in reversed(historial or [])
+         if t.get("rol") == "assistant"),
+        "",
+    )
+
+
+def _confirmacion_de_detalle(pregunta: str, historial: list) -> tuple[str, bool]:
+    """Convierte un "si" a la oferta de detalle en una orden no ambigua."""
+    texto = (pregunta or "").strip().lower()
+    palabras = texto.split()
+    ultimo = _ultimo_asistente(historial).lower()
+    ofrece_detalle = "detalle" in ultimo and "?" in ultimo
+    refiere_detalle = (
+        "detalle" in texto
+        and any(x in texto for x in ("eso", "esos", "esas", "los "))
+    )
+    if len(palabras) <= 12 and (
+            (formato.es_afirmacion(pregunta) and ofrece_detalle)
+            or refiere_detalle):
+        return (
+            "Muestra las filas de detalle que componen el resultado anterior. "
+            "Conserva exactamente su periodo, filtros y criterio. "
+            f"Confirmacion del usuario: {pregunta}",
+            True,
+        )
+    return pregunta, False
+
+
+def _ultimo_sql_seguro(historial: list, tablas_reales) -> str:
+    """Recupera la ultima consulta, solo si sigue pasando la lista blanca."""
+    for turno in reversed(historial or []):
+        if turno.get("rol") != "assistant":
+            continue
+        sql = str(turno.get("sql", "") or "").strip()
+        if not sql:
+            continue
+        ok, motivo = nl2sql.validar_sql(sql, tablas_reales)
+        if ok:
+            return sql
+        logger.info("SQL historico descartado para adjunto: %s", motivo)
+    return ""
+
+
 # --------------------------------------------------------------------------
 # A-14: tope de consumo por cliente y por dia.
 #
@@ -164,8 +209,14 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     # La memoria es best-effort: si falla, seguimos sin historial.
     historial = memoria.cargar_historial(cliente, numero)
 
-    # Ruteo por intencion.
-    intent = intencion.clasificar(pregunta, historial)
+    # Un pedido de archivo es una accion de datos aunque el texto sea tan corto
+    # como "en PDF" o "si, ese". Resolverlo antes evita gastar una llamada en
+    # clasificarlo como charla y perder el resultado al que hace referencia.
+    fmt_solicitado = formato.detectar_con_contexto(pregunta, historial)
+    intent = (
+        "datos" if fmt_solicitado != formato.TEXTO
+        else intencion.clasificar(pregunta, historial)
+    )
     logger.info("[%s] intencion=%s", cid, intent)
 
     if intent == "saludo":
@@ -181,7 +232,10 @@ def responder(numero: str, pregunta: str) -> Respuesta:
             respuesta = Respuesta("No pude procesar eso. Preguntame algo sobre "
                                   "tus datos de ventas o inventario.")
     else:  # "datos"
-        respuesta = _responder_datos(cliente, numero, pregunta, historial)
+        respuesta = _responder_datos(
+            cliente, numero, pregunta, historial,
+            fmt_solicitado=fmt_solicitado,
+        )
 
     # Guardar el intercambio para dar continuidad a los proximos mensajes.
     #
@@ -199,7 +253,7 @@ def responder(numero: str, pregunta: str) -> Respuesta:
 
 
 def _responder_datos(cliente: dict, numero: str, pregunta: str,
-                     historial: list) -> Respuesta:
+                     historial: list, fmt_solicitado: str | None = None) -> Respuesta:
     cid = cliente["cliente_id"]
 
     ctx = catalogo.construir_contexto(cliente)
@@ -214,13 +268,42 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # ANTES de ejecutar porque cambia cuantas filas hay que traer: para responder
     # en texto alcanza con BOT_MAX_FILAS (200), pero un Excel de 200 filas cuando
     # el cliente pidio "el detalle completo" es un archivo mutilado y no se nota.
-    fmt = formato.detectar(pregunta)
+    fmt = fmt_solicitado or formato.detectar_con_contexto(pregunta, historial)
     if fmt != formato.TEXTO:
         logger.info("[%s] formato de salida pedido: %s", cid, fmt)
 
+    # "Eso en PDF" no es una consulta nueva: reutiliza el ultimo SELECT
+    # validado. Si el mensaje agrega tema o periodo ("ventas de agosto en
+    # PDF"), sigue por el planificador normal.
+    fmt_explicito = formato.detectar(pregunta)
+    seguimiento_archivo = fmt != formato.TEXTO and (
+        formato.es_pedido_solo_formato(pregunta)
+        or fmt_explicito == formato.TEXTO
+    )
+    sql_reutilizado = (
+        _ultimo_sql_seguro(historial, ctx.tablas_reales)
+        if seguimiento_archivo else ""
+    )
+    pregunta_efectiva, confirma_detalle = _confirmacion_de_detalle(
+        pregunta, historial,
+    )
+
     # Capa semantica: ¿un KPI predefinido calza? ¿hay que pedir contexto o retar?
     kpis_def = kpis.cargar_kpis(cliente)
-    plan = kpis.planificar(pregunta, kpis_def, ctx, historial=historial)
+    if sql_reutilizado:
+        plan = {
+            "accion": "reutilizar_sql", "kpi": "", "sql": sql_reutilizado,
+            "mensaje": "",
+        }
+        logger.info("[%s] se reutiliza el ultimo SQL para entregar %s", cid, fmt)
+    elif confirma_detalle:
+        # El KPI de resumen no sirve para "si, quiero el detalle". El camino
+        # libre conserva los filtros anteriores y lista las filas subyacentes.
+        plan = {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+    else:
+        plan = kpis.planificar(
+            pregunta_efectiva, kpis_def, ctx, historial=historial,
+        )
     unidad_kpi = ""
     if plan.get("accion") == "usar_kpi":
         elegido = next(
@@ -250,7 +333,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         return Respuesta(plan["mensaje"])
 
     # 1) Conseguir el SQL: del KPI (definicion canonica) o del text-to-SQL libre.
-    sql = ""
+    sql = sql_reutilizado
     if plan["accion"] == "usar_kpi" and plan.get("sql"):
         sql = plan["sql"]
         # La formula ya viene materializada de forma deterministica desde la
@@ -264,11 +347,13 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             sql = ""  # cae al camino libre abajo
 
     if not sql:
-        sql = nl2sql.generar_sql(pregunta, ctx.schema_text, historial=historial)
+        sql = nl2sql.generar_sql(
+            pregunta_efectiva, ctx.schema_text, historial=historial,
+        )
         ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
         if not ok:
             logger.info("[%s] SQL rechazado (%s); reintento. sql=%s", cid, motivo, sql)
-            sql = nl2sql.generar_sql(pregunta, ctx.schema_text,
+            sql = nl2sql.generar_sql(pregunta_efectiva, ctx.schema_text,
                                      correccion=motivo, sql_previo=sql,
                                      historial=historial)
             ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
@@ -283,7 +368,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # ninguna de las dos cosas aplica al Excel, que no pasa por el modelo. El
     # freno real del warehouse sigue siendo el statement_timeout, que no se toca.
     limite = (int(config.BOT_ADJUNTO_MAX_FILAS)
-              if fmt in (formato.EXCEL, formato.CSV) else None)
+              if fmt in (formato.EXCEL, formato.CSV, formato.PDF) else None)
     try:
         columnas, filas = warehouse_ro.ejecutar(cliente, sql, limite=limite)
     except Exception as e:  # noqa: BLE001
@@ -297,10 +382,21 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # mejora la frase "te mando el detalle en Excel".
     muestra = filas[:config.BOT_MAX_FILAS]
     try:
-        texto = nl2sql.redactar_respuesta(
-            pregunta, columnas, muestra, historial=historial, sql=sql,
-            unidad=unidad_kpi,
-        )
+        if sql_reutilizado and fmt != formato.TEXTO:
+            etiqueta = {
+                formato.PDF: "PDF", formato.EXCEL: "Excel", formato.CSV: "CSV",
+                formato.GRAFICO: "grafico",
+            }.get(fmt, "archivo")
+            sustantivo = "registro" if len(filas) == 1 else "registros"
+            texto = (
+                f"Listo, te adjunto el {etiqueta} con "
+                f"{len(filas)} {sustantivo}."
+            )
+        else:
+            texto = nl2sql.redactar_respuesta(
+                pregunta, columnas, muestra, historial=historial, sql=sql,
+                unidad=unidad_kpi,
+            )
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error redactando respuesta: %s", cid, e)
         # Fallback sin LLM: al menos devolver el dato crudo.
@@ -352,10 +448,14 @@ def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,
         # turno anterior. Se busca ahi antes de resignarse a 'consulta.xlsx'.
         for turno in reversed(historial):
             if turno.get("rol") == "user":
-                previo = _titulo(turno.get("contenido", ""))
+                contenido = turno.get("contenido", "")
+                if (formato.es_pedido_solo_formato(contenido)
+                        or formato.es_afirmacion(contenido)):
+                    continue
+                previo = _titulo(contenido)
                 if previo != "Consulta":
                     titulo = previo
-                break
+                    break
     try:
         if fmt == formato.GRAFICO:
             adj = artefactos.grafico_png(columnas, filas, titulo=titulo)
