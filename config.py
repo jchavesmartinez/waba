@@ -199,14 +199,25 @@ def dsn_de_cliente(cliente: dict) -> str:
 # para tener una sola superficie de configuracion.
 # ==========================================================================
 
-# Clave de la API de Anthropic (text-to-SQL + redaccion de la respuesta).
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# --- Gemini / Vertex AI: proveedor unico de IA del repositorio ---
+# "vertex" reutiliza GOOGLE_CREDENTIALS_JSON (recomendado en produccion).
+# "api_key" usa GEMINI_API_KEY y sirve como alternativa para desarrollo.
+GEMINI_BACKEND = os.environ.get("GEMINI_BACKEND", "vertex").strip().lower()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+# Vacio = usa project_id del JSON del service account.
+GEMINI_PROJECT_ID = os.environ.get("GEMINI_PROJECT_ID", "")
+GEMINI_LOCATION = os.environ.get("GEMINI_LOCATION", "global")
+GEMINI_TIMEOUT_SEGUNDOS = int(os.environ.get("GEMINI_TIMEOUT_SEGUNDOS", "90"))
 
-# Modelo para GENERAR el SQL. Haiku alcanza de sobra para esto y es barato.
-BOT_MODELO_SQL = os.environ.get("BOT_MODELO_SQL", "claude-haiku-4-5-20251001")
-
-# Modelo para REDACTAR la respuesta en lenguaje natural a partir de las filas.
-BOT_MODELO_RESPUESTA = os.environ.get("BOT_MODELO_RESPUESTA", "claude-haiku-4-5-20251001")
+# Gemini Flash reemplaza Haiku en todas las tareas. Se conservan variables por
+# funcion para poder subir solo SQL/KPIs a un modelo mayor sin tocar las demas.
+_GEMINI_MODELO_DEFAULT = os.environ.get("GEMINI_MODELO", "gemini-3.6-flash")
+BOT_MODELO_SQL = os.environ.get("BOT_MODELO_SQL", _GEMINI_MODELO_DEFAULT)
+# Solo para conversacion sin datos. Las cifras que devuelve SQL se formatean
+# deterministicamente y no pasan de nuevo por el modelo.
+BOT_MODELO_RESPUESTA = os.environ.get(
+    "BOT_MODELO_RESPUESTA", _GEMINI_MODELO_DEFAULT
+)
 
 # Tope de tokens para GENERAR el SQL. 600 truncaba consultas con varios JOIN o
 # un CTE, y el validador las rechazaba con "no parseable" — un motivo que no
@@ -255,7 +266,7 @@ BOT_MEMORIA_TTL_DIAS = int(os.environ.get("BOT_MEMORIA_TTL_DIAS", "30"))
 # --------------------------------------------------------------------------
 BOT_INTENCION = _es_si(os.environ.get("BOT_INTENCION", "si"))
 BOT_MODELO_INTENCION = os.environ.get(
-    "BOT_MODELO_INTENCION", "claude-haiku-4-5-20251001"
+    "BOT_MODELO_INTENCION", _GEMINI_MODELO_DEFAULT
 )
 
 # --------------------------------------------------------------------------
@@ -264,7 +275,7 @@ BOT_MODELO_INTENCION = os.environ.get(
 # text-to-SQL libre, sin KPIs ni la logica de pedir contexto / retar.
 # --------------------------------------------------------------------------
 BOT_KPIS = _es_si(os.environ.get("BOT_KPIS", "si"))
-BOT_MODELO_KPIS = os.environ.get("BOT_MODELO_KPIS", "claude-haiku-4-5-20251001")
+BOT_MODELO_KPIS = os.environ.get("BOT_MODELO_KPIS", _GEMINI_MODELO_DEFAULT)
 
 # --------------------------------------------------------------------------
 # WhatsApp Cloud API (Meta / Graph API) — transporte del bot.
@@ -361,6 +372,38 @@ BOT_ADJUNTO_CSV = _es_si(os.environ.get("BOT_ADJUNTO_CSV", "no"))
 # texto". El archivo NO se procesa (ver la nota en bot/app.py).
 BOT_MEDIA_ENTRANTE = _es_si(os.environ.get("BOT_MEDIA_ENTRANTE", "si"))
 
+# --------------------------------------------------------------------------
+# NOTAS DE VOZ ENTRANTES: se descargan desde Meta, se transcriben y el texto
+# resultante entra al MISMO flujo de permisos, memoria, KPIs y text-to-SQL.
+# El audio original solo existe en memoria y en un directorio temporal durante
+# la conversion de OGG/Opus; no se conserva en el warehouse.
+# --------------------------------------------------------------------------
+
+# Interruptor independiente del de captions/archivos. Se deja apagado por
+# defecto para no consumir una API por accidente en instalaciones existentes;
+# render.yaml lo activa explicitamente para este servicio.
+BOT_AUDIO_ENTRANTE = _es_si(os.environ.get("BOT_AUDIO_ENTRANTE", "no"))
+
+BOT_AUDIO_MODELO = os.environ.get(
+    "BOT_AUDIO_MODELO", _GEMINI_MODELO_DEFAULT
+)
+
+# Las consultas habladas suelen durar segundos. Este tope evita que una nota
+# accidentalmente larguisima genere una factura o bloquee el worker. La API
+# admite solicitudes inline de menos de 20 MB; el codigo deja margen adicional.
+BOT_AUDIO_MAX_MB = float(os.environ.get("BOT_AUDIO_MAX_MB", "5"))
+BOT_AUDIO_TIMEOUT_SEGUNDOS = int(
+    os.environ.get("BOT_AUDIO_TIMEOUT_SEGUNDOS", "90")
+)
+
+# Contexto de vocabulario, no una orden para contestar. Ayuda a conservar
+# montos, fechas y nombres propios frecuentes en consultas empresariales.
+BOT_AUDIO_PROMPT = os.environ.get(
+    "BOT_AUDIO_PROMPT",
+    "Consulta breve en espanol de Costa Rica sobre ventas, gastos, presupuesto "
+    "o inventario. Conserva exactamente montos, fechas y nombres propios.",
+)
+
 
 # --------------------------------------------------------------------------
 # Verificacion de arranque del BOT (C-05, C-08, B-37).
@@ -394,8 +437,55 @@ def revisar_arranque_bot() -> list:
             "en TODOS los clientes. Si esto no fue deliberado, ponelo en 'no'."
         )
 
-    if not ANTHROPIC_API_KEY:
-        avisos.append("FALTA ANTHROPIC_API_KEY: el bot no va a poder responder.")
+    if GEMINI_BACKEND == "vertex":
+        if not GOOGLE_CREDENTIALS_JSON:
+            avisos.append(
+                "GEMINI_BACKEND=vertex pero falta GOOGLE_CREDENTIALS_JSON: "
+                "Gemini no podra autenticar contra Vertex AI."
+            )
+        elif not GEMINI_PROJECT_ID:
+            try:
+                proyecto_json = json.loads(GOOGLE_CREDENTIALS_JSON).get(
+                    "project_id", ""
+                )
+            except Exception:  # noqa: BLE001
+                proyecto_json = ""
+            if not proyecto_json:
+                avisos.append(
+                    "GEMINI_BACKEND=vertex pero no hay GEMINI_PROJECT_ID ni "
+                    "project_id util en GOOGLE_CREDENTIALS_JSON."
+                )
+    elif GEMINI_BACKEND == "api_key":
+        if not GEMINI_API_KEY:
+            avisos.append(
+                "GEMINI_BACKEND=api_key pero falta GEMINI_API_KEY: el bot no "
+                "va a poder responder."
+            )
+    else:
+        avisos.append(
+            f"GEMINI_BACKEND invalido: '{GEMINI_BACKEND}'. Usa vertex o api_key."
+        )
+
+    try:
+        from google import genai as _genai  # noqa: F401
+    except ImportError:
+        avisos.append(
+            "Falta google-genai: ninguna funcion del modelo va a operar. "
+            "Reinstala requirements-bot.txt."
+        )
+
+    for variable, modelo in (
+        ("BOT_MODELO_SQL", BOT_MODELO_SQL),
+        ("BOT_MODELO_RESPUESTA", BOT_MODELO_RESPUESTA),
+        ("BOT_MODELO_INTENCION", BOT_MODELO_INTENCION),
+        ("BOT_MODELO_KPIS", BOT_MODELO_KPIS),
+        ("BOT_AUDIO_MODELO", BOT_AUDIO_MODELO),
+    ):
+        if not str(modelo or "").strip().lower().startswith("gemini-"):
+            avisos.append(
+                f"{variable}='{modelo}' no es un modelo Gemini. Revisa una "
+                "variable heredada del despliegue anterior."
+            )
 
     # Los adjuntos dependen de librerias que estan en requirements-bot.txt. Si
     # el build quedo viejo, el import falla RECIEN cuando alguien pide un
@@ -415,6 +505,16 @@ def revisar_arranque_bot() -> list:
                 "BOT_ADJUNTOS=si pero faltan librerias: " + ", ".join(faltan) +
                 ". Los pedidos de archivo van a fallar. Reinstala "
                 "requirements-bot.txt o pone BOT_ADJUNTOS=no."
+            )
+
+    if BOT_AUDIO_ENTRANTE:
+        try:
+            __import__("imageio_ffmpeg")
+        except ImportError:
+            avisos.append(
+                "BOT_AUDIO_ENTRANTE=si pero falta imageio-ffmpeg: WhatsApp "
+                "entrega las notas en OGG/Opus y no se podran convertir. "
+                "Reinstala requirements-bot.txt."
             )
 
     if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID):

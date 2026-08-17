@@ -8,7 +8,7 @@ pandas==3.0.5
 pytz==2024.2
 duckdb==1.5.5           # motor temporal de carga (y destino local en dev)
 gspread==6.2.1          # fuentes Google Sheets + registro maestro
-google-auth==2.36.0
+google-auth==2.56.3
 httpx==0.28.1           # fuentes api_rest / csv_url / sharepoint_excel
 openpyxl==3.1.5         # fuente sharepoint_excel (lectura de .xlsx)
 

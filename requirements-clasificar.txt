@@ -5,4 +5,4 @@
 # de dependencias exclusivas del bot web.
 
 -r requirements-ingesta.txt
-anthropic==0.40.0
+google-genai==2.14.0

@@ -31,31 +31,14 @@ Subtotal: CRC 120,000.00
 Total: CRC 135,600.00"""
 
 
-class _Bloque:
-    type = "text"
-
-    def __init__(self, text):
-        self.text = text
-
-
-class _Resp:
-    def __init__(self, texto, stop_reason="end_turn"):
-        self.content = [_Bloque(texto)]
-        self.stop_reason = stop_reason
-
-
 def _llm(monkeypatch, payload, capturar=None):
-    class _Msgs:
-        def create(self, **kw):
-            if capturar is not None:
-                capturar["prompt"] = kw["messages"][0]["content"]
-            texto = payload if isinstance(payload, str) else json.dumps(payload)
-            return _Resp(texto)
+    def generar(modelo, contenido, **kw):
+        if capturar is not None:
+            capturar["prompt"] = contenido
+        texto = payload if isinstance(payload, str) else json.dumps(payload)
+        return P.llm.RespuestaGemini(texto=texto)
 
-    class _Cli:
-        messages = _Msgs()
-
-    monkeypatch.setattr(P, "_anthropic", lambda: _Cli())
+    monkeypatch.setattr(P.llm, "generar_texto", generar)
     monkeypatch.setattr(P.config, "BOT_MODELO_KPIS", "modelo-de-prueba")
 
 
@@ -152,14 +135,15 @@ def test_una_propuesta_sin_campos_utiles_falla(monkeypatch):
 
 
 def test_una_respuesta_cortada_falla_en_vez_de_parsear_la_mitad(monkeypatch):
-    class _Msgs:
-        def create(self, **kw):
-            return _Resp('{"filtro": "x", "campos": [{"col', "max_tokens")
-
-    class _Cli:
-        messages = _Msgs()
-
-    monkeypatch.setattr(P, "_anthropic", lambda: _Cli())
+    monkeypatch.setattr(
+        P.llm,
+        "generar_texto",
+        lambda *args, **kwargs: P.llm.RespuestaGemini(
+            texto='{"filtro": "x", "campos": [{"col',
+            truncada=True,
+            finish_reason="MAX_TOKENS",
+        ),
+    )
     monkeypatch.setattr(P.config, "BOT_MODELO_KPIS", "m")
     with pytest.raises(RuntimeError, match="corto por longitud"):
         P.proponer([{"cuerpo": FACTURA}], "correos")

@@ -272,28 +272,15 @@ def test_el_mapeo_conserva_las_entradas_de_otros_modelos(destino, monkeypatch):
 
 # --- parseo de la respuesta cruda ----------------------------------------
 
-class _Bloque:
-    type = "text"
-
-    def __init__(self, text):
-        self.text = text
-
-
 class _Resp:
     def __init__(self, texto, stop_reason="end_turn"):
-        self.content = [_Bloque(texto)]
-        self.stop_reason = stop_reason
+        self.texto = texto
+        self.truncada = stop_reason == "max_tokens"
+        self.finish_reason = stop_reason
 
 
 def _cliente_falso(monkeypatch, resp):
-    class _Msgs:
-        def create(self, **kw):
-            return resp
-
-    class _Cli:
-        messages = _Msgs()
-
-    monkeypatch.setattr(C, "_anthropic", lambda: _Cli())
+    monkeypatch.setattr(C.llm, "generar_texto", lambda *args, **kwargs: resp)
     monkeypatch.setattr(C.config, "BOT_MODELO_KPIS", "modelo-de-prueba")
 
 
@@ -324,15 +311,11 @@ def test_las_categorias_llegan_al_prompt_con_sus_ejemplos(monkeypatch):
     """
     capturado = {}
 
-    class _Msgs:
-        def create(self, **kw):
-            capturado["prompt"] = kw["messages"][0]["content"]
-            return _Resp("[]")
+    def generar(modelo, contenido, **kwargs):
+        capturado["prompt"] = contenido
+        return _Resp("[]")
 
-    class _Cli:
-        messages = _Msgs()
-
-    monkeypatch.setattr(C, "_anthropic", lambda: _Cli())
+    monkeypatch.setattr(C.llm, "generar_texto", generar)
     monkeypatch.setattr(C.config, "BOT_MODELO_KPIS", "modelo-de-prueba")
     C._preguntar(["X"], CATEGORIAS)
 

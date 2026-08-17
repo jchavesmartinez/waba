@@ -4,11 +4,12 @@ Clientes de Google de solo lectura.
 Un mismo service account autentica:
   - Google Sheets: Sheet maestro, fuentes y catalogos.
   - Google Calendar: calendarios compartidos por los clientes.
+  - Vertex AI: llamadas a Gemini, si tiene ``roles/aiplatform.user``.
 
 Cada API recibe un token con el alcance minimo que necesita. Compartir un
-calendario con el service account NO le da acceso a las hojas, ni al reves:
-ademas del scope, Google exige que cada recurso se comparta explicitamente con
-el ``client_email`` de ``GOOGLE_CREDENTIALS_JSON``.
+calendario con el service account NO le da acceso a las hojas, ni al reves.
+Sheets y Calendar exigen compartir cada recurso; Vertex exige permisos IAM en
+el proyecto, ademas del scope del token.
 """
 
 import json
@@ -23,9 +24,10 @@ import config
 
 logger = logging.getLogger("fachavi.gclient")
 
-# Solo lectura, a proposito: aunque la credencial se filtre, nadie puede
-# modificar ni borrar las hojas de los clientes. Es la defensa que hace que C-06
-# sea "critico en impacto, bajo en probabilidad" y no simplemente critico.
+# Sheets y Calendar son de solo lectura, a proposito: aunque la credencial se
+# filtre, no permite modificar ni borrar esos recursos. Vertex usa el scope de
+# Google Cloud, pero las acciones reales quedan limitadas por los roles IAM del
+# service account; en este proyecto solo debe recibir Vertex AI User.
 #
 # C-06 — lo que este archivo NO puede resolver solo: una sola cuenta de servicio
 # lee la hoja maestra y las hojas de datos de TODOS los clientes. Si se filtra,
@@ -43,8 +45,10 @@ logger = logging.getLogger("fachavi.gclient")
 #   3. Activar la auditoria de acceso de Google Cloud para esta cuenta.
 _SCOPES_SHEETS = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 _SCOPES_CALENDAR = ["https://www.googleapis.com/auth/calendar.readonly"]
+_SCOPES_VERTEX = ["https://www.googleapis.com/auth/cloud-platform"]
 _gc = None
 _calendar_creds = None
+_vertex_creds = None
 # B-10: el cliente se guardaba en una global sin proteccion. En el bot, dos
 # mensajes simultaneos podian construirlo dos veces (dos handshakes OAuth).
 _lock = threading.RLock()
@@ -105,3 +109,21 @@ def credenciales_calendar():
         if not _calendar_creds.valid:
             _calendar_creds.refresh(Request())
         return _calendar_creds
+
+
+def project_id_service_account() -> str:
+    """Project ID declarado en el JSON; puede pisarse con GEMINI_PROJECT_ID."""
+    return str(_info_credenciales().get("project_id", "") or "").strip()
+
+
+def credenciales_vertex():
+    """Credenciales separadas con el scope de Google Cloud para Vertex AI."""
+    global _vertex_creds
+    with _lock:
+        if _vertex_creds is None:
+            _vertex_creds = Credentials.from_service_account_info(
+                _info_credenciales(), scopes=_SCOPES_VERTEX
+            )
+        if not _vertex_creds.valid:
+            _vertex_creds.refresh(Request())
+        return _vertex_creds

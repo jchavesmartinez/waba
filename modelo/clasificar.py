@@ -45,6 +45,7 @@ import sys
 from datetime import datetime, timezone
 
 import config
+import llm
 import registry
 from warehouse import crear_destino
 from .metadata import categorias_de, leer as leer_metadata
@@ -66,24 +67,6 @@ COLUMNAS_MAPEO = [
     ("modelo_llm", "texto"),
     ("clasificado_en", "texto"),
 ]
-
-_cliente = None
-
-
-def _anthropic():
-    """Cliente perezoso: importar este modulo no debe exigir la API key."""
-    global _cliente
-    if _cliente is None:
-        import anthropic
-        if not config.ANTHROPIC_API_KEY:
-            raise RuntimeError(
-                "falta ANTHROPIC_API_KEY: el job de clasificacion no puede "
-                "correr. La construccion de tablas SI puede: los valores "
-                "nuevos quedan 'sin_clasificar' hasta que este job corra."
-            )
-        _cliente = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    return _cliente
-
 
 def clasificar_modelo(destino, esquema_sem: str, modelo, metadata: dict,
                       probar: bool = False, tamano_lote: int = TAMANO_LOTE,
@@ -287,15 +270,38 @@ REGLAS:
 Responde SOLO un array JSON, sin texto alrededor ni bloques de codigo:
 [{{"valor": "...", "categoria": "...", "confianza": "alta"}}]"""
 
-    resp = _anthropic().messages.create(
-        model=config.BOT_MODELO_KPIS,
+    esquema = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "valor": {"type": "string"},
+                "categoria": {
+                    "type": "string",
+                    "enum": sorted(
+                        {str(c.get("categoria", "")) for c in categorias
+                         if c.get("categoria")} | {SIN_CLASIFICAR}
+                    ),
+                },
+                "confianza": {
+                    "type": "string",
+                    "enum": ["alta", "media", "baja"],
+                },
+            },
+            "required": ["valor", "categoria", "confianza"],
+            "additionalProperties": False,
+        },
+    }
+    resp = llm.generar_texto(
+        config.BOT_MODELO_KPIS,
+        prompt,
         max_tokens=MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
+        thinking_level="low",
+        response_schema=esquema,
     )
-    texto = "".join(
-        b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    texto = resp.texto.strip()
 
-    if getattr(resp, "stop_reason", "") == "max_tokens":
+    if resp.truncada:
         # La respuesta quedo cortada: el JSON esta incompleto y parsear la
         # mitad daria un lote a medias sin avisar.
         raise RuntimeError(

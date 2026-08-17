@@ -37,6 +37,7 @@ import logging
 import sys
 
 import config
+import llm
 import registry
 from warehouse import crear_destino
 from warehouse.base import nombre_esquema
@@ -49,19 +50,6 @@ logger = logging.getLogger("fachavi.modelo.proponer")
 MAX_TOKENS = 3000
 MAX_CHARS_MUESTRA = 2500
 MUESTRAS_POR_DEFECTO = 5
-
-_cliente = None
-
-
-def _anthropic():
-    global _cliente
-    if _cliente is None:
-        import anthropic
-        if not config.ANTHROPIC_API_KEY:
-            raise RuntimeError("falta ANTHROPIC_API_KEY")
-        _cliente = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    return _cliente
-
 
 def proponer(muestras: list, tabla_origen: str, columna_texto: str = "cuerpo",
              modelo_id: str = "mi_modelo") -> dict:
@@ -178,18 +166,51 @@ Responde SOLO este JSON, sin texto alrededor ni bloques de codigo:
       "clasifica_en": "", "descripcion": "..."}}
   ]}}"""
 
-    resp = _anthropic().messages.create(
-        model=config.BOT_MODELO_KPIS,
+    esquema = {
+        "type": "object",
+        "properties": {
+            "filtro": {"type": "string"},
+            "extractor": {
+                "type": "string",
+                "enum": ["etiqueta_valor", "regex", "json_ruta"],
+            },
+            "tabla_destino": {"type": "string"},
+            "campos": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "columna": {"type": "string"},
+                        "tipo": {"type": "string"},
+                        "patron": {"type": "string"},
+                        "requerido": {"type": "string"},
+                        "clasifica_en": {"type": "string"},
+                        "descripcion": {"type": "string"},
+                    },
+                    "required": [
+                        "columna", "tipo", "patron", "requerido",
+                        "clasifica_en", "descripcion",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["filtro", "extractor", "tabla_destino", "campos"],
+        "additionalProperties": False,
+    }
+    resp = llm.generar_texto(
+        config.BOT_MODELO_KPIS,
+        prompt,
         max_tokens=MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
+        thinking_level="medium",
+        response_schema=esquema,
     )
-    if getattr(resp, "stop_reason", "") == "max_tokens":
+    if resp.truncada:
         raise RuntimeError(
             "la respuesta se corto por longitud; probá con menos ejemplos o "
             "con documentos mas cortos.")
 
-    texto = "".join(
-        b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    texto = resp.texto.strip()
     texto = texto.removeprefix("```json").removeprefix("```").removesuffix("```")
     datos = json.loads(texto.strip())
     datos["modelo_id"] = modelo_id

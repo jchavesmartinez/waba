@@ -1,12 +1,13 @@
 # Dependencias del BOT de WhatsApp (capa de lectura). Van APARTE de la ingesta:
-# el cron de ingesta no necesita FastAPI ni Anthropic, y el bot no necesita
+# el cron de ingesta no necesita FastAPI ni Gemini, y el bot no necesita
 # gspread para nada mas que resolver numero->cliente del Sheet maestro.
 
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1                # llamada saliente al Graph API de Meta (enviar msg)
-anthropic==0.40.0            # text-to-SQL + redaccion de la respuesta
+google-genai==2.14.0         # Gemini en Vertex AI: intencion, KPIs, SQL y voz
 sqlglot==30.14.0             # valida el SQL generado antes de ejecutarlo
+imageio-ffmpeg==0.6.0        # binario ffmpeg: convierte OGG/Opus de WhatsApp
 
 # --- Adjuntos: graficos, Excel y PDF que el bot manda por WhatsApp ---
 # matplotlib pesa ~50 MB instalado y es la unica dependencia grande del bot.
@@ -27,4 +28,4 @@ pandas==3.0.5
 
 # Resolucion numero->cliente desde el Sheet maestro (reusa registry.py)
 gspread==6.2.1
-google-auth==2.36.0
+google-auth==2.56.3

@@ -1,8 +1,6 @@
 """Regresiones: el texto y el Excel deben compartir una sola verdad numerica."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
-
 import pandas as pd
 
 from bot import intencion, kpis, nl2sql
@@ -19,11 +17,10 @@ def test_presupuesto_se_redacta_con_totales_que_vienen_del_sql():
         ("Servicios", "Celular Aline", 10000, 50000, 5355326),
     ]
 
-    with patch.object(nl2sql, "_anthropic", side_effect=AssertionError("no LLM")):
-        texto = nl2sql.redactar_respuesta(
-            "presupuesto por categoria y concepto", columnas, filas,
-            unidad="colones",
-        )
+    texto = nl2sql.redactar_respuesta(
+        "presupuesto por categoria y concepto", columnas, filas,
+        unidad="colones",
+    )
 
     assert "₡5.355.326" in texto
     assert "*Servicios — ₡50.000*" in texto
@@ -41,10 +38,9 @@ def test_resultado_generico_no_inventa_un_total_que_sql_no_trajo():
 
 
 def test_una_sola_celda_se_devuelve_directa_sin_llm():
-    with patch.object(nl2sql, "_anthropic", side_effect=AssertionError("no LLM")):
-        texto = nl2sql.redactar_respuesta(
-            "total", ["presupuesto_total"], [(5355326,)], unidad="colones",
-        )
+    texto = nl2sql.redactar_respuesta(
+        "total", ["presupuesto_total"], [(5355326,)], unidad="colones",
+    )
     assert texto == "*Presupuesto total:* ₡5.355.326"
 
 
@@ -83,19 +79,16 @@ def test_planificador_elige_kpi_pero_no_puede_reescribir_su_sql():
     }
     capturado = {}
 
-    class _Mensajes:
-        def create(self, **kwargs):
-            capturado.update(kwargs)
-            bloque = SimpleNamespace(
-                type="text",
-                text=(
-                    '{"accion":"usar_kpi","kpi":"plan_presupuesto",'
-                    '"sql":"SELECT 999 AS total","mensaje":""}'
-                ),
-            )
-            return SimpleNamespace(content=[bloque])
-
-    cliente = SimpleNamespace(messages=_Mensajes())
+    def generar(modelo, contenido, **kwargs):
+        capturado.update(kwargs)
+        capturado["contenido"] = contenido
+        return SimpleNamespace(
+            texto=(
+                '{"accion":"usar_kpi","kpi":"plan_presupuesto",'
+                '"sql":"SELECT 999 AS total","mensaje":""}'
+            ),
+            truncada=False,
+        )
     ctx = SimpleNamespace(
         schema_text="sharepoint_db__presupuesto(categoria, monto_mensual, tipo)",
         tablas_reales={"sharepoint_db__presupuesto"},
@@ -104,8 +97,12 @@ def test_planificador_elige_kpi_pero_no_puede_reescribir_su_sql():
             tabla_real="sharepoint_db__presupuesto",
         )],
     )
-    with patch.object(kpis, "_anthropic", return_value=cliente):
+    original = kpis.llm.generar_texto
+    kpis.llm.generar_texto = generar
+    try:
         plan = kpis.planificar("cuanto tengo presupuestado", [definicion], ctx)
+    finally:
+        kpis.llm.generar_texto = original
 
     assert plan["accion"] == "usar_kpi"
     assert "SELECT 999" not in plan["sql"]
@@ -181,14 +178,13 @@ def test_ajuste_de_columnas_conserva_contexto_para_seleccionar_kpi():
     }
     capturado = {}
 
-    class _Mensajes:
-        def create(self, **kwargs):
-            capturado.update(kwargs)
-            bloque = SimpleNamespace(
-                type="text",
-                text='{"accion":"sql_libre","kpi":"","sql":"","mensaje":""}',
-            )
-            return SimpleNamespace(content=[bloque])
+    def generar(modelo, contenido, **kwargs):
+        capturado.update(kwargs)
+        capturado["contenido"] = contenido
+        return SimpleNamespace(
+            texto='{"accion":"sql_libre","kpi":"","sql":"","mensaje":""}',
+            truncada=False,
+        )
 
     ctx = SimpleNamespace(
         schema_text="ventas(dato)",
@@ -199,14 +195,16 @@ def test_ajuste_de_columnas_conserva_contexto_para_seleccionar_kpi():
         {"rol": "user", "contenido": "mostrame el flujo de caja semanal"},
         {"rol": "assistant", "contenido": "Resultado", "sql": "SELECT 1 FROM ventas"},
     ]
-    with patch.object(
-        kpis, "_anthropic", return_value=SimpleNamespace(messages=_Mensajes()),
-    ):
+    original = kpis.llm.generar_texto
+    kpis.llm.generar_texto = generar
+    try:
         kpis.planificar(
             "No pongas otras columnas; la respuesta es fecha y saldo, nada mas",
             relleno + [objetivo],
             ctx,
             historial=historial,
         )
+    finally:
+        kpis.llm.generar_texto = original
 
-    assert "kpi: flujo_caja_semanal" in capturado["messages"][0]["content"]
+    assert "kpi: flujo_caja_semanal" in capturado["contenido"]

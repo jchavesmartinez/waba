@@ -35,7 +35,8 @@ from collections import OrderedDict, deque
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 import config
-from bot import whatsapp
+import registry
+from bot import audio, whatsapp
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -52,10 +53,26 @@ app = FastAPI(title="FACHAVI — WhatsApp bot (Meta Cloud API)")
 _AVISOS_ARRANQUE = config.revisar_arranque_bot()
 
 _SALUDO = "Hola 👋 Mandame tu consulta sobre los datos (ventas, inventario…)."
-_SOLO_TEXTO = (
-    "Por ahora solo entiendo mensajes de texto (todavía no leo archivos que me "
-    "mandés). Escribime tu consulta 🙂 — y si la querés como gráfico, Excel o "
-    "PDF, solo pedímelo."
+_MEDIA_NO_SOPORTADO = (
+    "Entiendo mensajes de texto y notas de voz, pero todavía no leo el contenido "
+    "de fotos o archivos que me mandés. Escribime la consulta o agregala como "
+    "pie del archivo."
+)
+_AUDIO_NO_DISPONIBLE = (
+    "No pude procesar notas de voz en este momento. Escribime la consulta y la "
+    "atiendo igual."
+)
+_AUDIO_MUY_GRANDE = (
+    "La nota de voz es demasiado grande. Mandame una nota más corta o escribime "
+    "la consulta."
+)
+_AUDIO_NO_ENTENDIDO = (
+    "No logré entender esa nota de voz. Probá grabarla de nuevo, más cerca del "
+    "micrófono, o escribime la consulta."
+)
+_NO_REGISTRADO = (
+    "Tu número no está registrado para consultar datos. "
+    "Contactá a la persona que administra este servicio."
 )
 _MUY_RAPIDO = (
     "Estás mandando mensajes muy seguido y tengo que espaciarlos un toque. "
@@ -116,7 +133,7 @@ def _firma_valida(cuerpo: bytes, firma_header: str) -> bool:
     TODO pasaba — o sea, el valor por defecto era "no validar nada", y nada
     avisaba. Cualquiera que descubriera la URL del webhook podia hacerse pasar
     por Meta, suplantar un numero registrado, extraer sus datos y consumir la
-    cuenta de Anthropic. Ahora, sin secreto, se rechaza; el modo inseguro
+    cuenta del proveedor de IA. Ahora, sin secreto, se rechaza; el modo inseguro
     requiere poner BOT_PERMITIR_SIN_FIRMA=si a proposito (para desarrollo local).
     """
     if not config.WHATSAPP_APP_SECRET:
@@ -170,6 +187,52 @@ def _atender(numero: str, texto: str, numero_origen: str = "") -> None:
                 "datos). Pedímelo de nuevo en un momento.",
                 numero_origen,
             )
+
+
+def _atender_audio(numero: str, media_id: str, mime_webhook: str = "",
+                   numero_origen: str = "") -> None:
+    """Descarga, transcribe y entrega una nota al mismo flujo que el texto."""
+    # Se valida ANTES de descargar o llamar a Gemini: un numero ajeno no debe
+    # poder convertir el webhook en una llave para consumir la API.
+    try:
+        registrado = bool(registry.resolver(numero))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("No se pudo validar el numero antes del audio: %s", e)
+        whatsapp.enviar_texto(numero, _AUDIO_NO_DISPONIBLE, numero_origen)
+        return
+    if not registrado:
+        logger.info("Nota de voz de numero no registrado: %s", numero)
+        whatsapp.enviar_texto(numero, _NO_REGISTRADO, numero_origen)
+        return
+
+    contenido, mime_descarga = whatsapp.descargar_media(media_id)
+    if not contenido:
+        whatsapp.enviar_texto(numero, _AUDIO_NO_DISPONIBLE, numero_origen)
+        return
+
+    try:
+        texto = audio.transcribir(contenido, mime_descarga or mime_webhook)
+    except audio.AudioDemasiadoGrande:
+        whatsapp.enviar_texto(numero, _AUDIO_MUY_GRANDE, numero_origen)
+        return
+    except audio.AudioNoEntendido:
+        whatsapp.enviar_texto(numero, _AUDIO_NO_ENTENDIDO, numero_origen)
+        return
+    except audio.ErrorAudio as e:
+        logger.warning("No se pudo transcribir la nota de %s: %s", numero, e)
+        whatsapp.enviar_texto(numero, _AUDIO_NO_DISPONIBLE, numero_origen)
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Error inesperado procesando audio de %s: %s", numero, e)
+        whatsapp.enviar_texto(numero, _AUDIO_NO_DISPONIBLE, numero_origen)
+        return
+
+    # No se escribe el texto en el log: puede contener datos sensibles. La
+    # consulta transcrita se guarda en memoria solo si responder() ya lo hacia
+    # con las consultas escritas.
+    logger.info("Nota de voz de %s transcrita (%d caracteres).", numero,
+                len(texto))
+    _atender(numero, texto, numero_origen)
 
 
 @app.get("/salud")
@@ -242,6 +305,23 @@ async def webhook(request: Request, tareas: BackgroundTasks):
                     tareas.add_task(_atender, numero, texto, origen)
                     continue
 
+                if tipo == "audio":
+                    info_audio = msg.get("audio") or {}
+                    media_id = str(info_audio.get("id", "") or "").strip()
+                    mime = str(info_audio.get("mime_type", "") or "").strip()
+                    if config.BOT_AUDIO_ENTRANTE and media_id:
+                        tareas.add_task(
+                            _atender_audio, numero, media_id, mime, origen
+                        )
+                    else:
+                        tareas.add_task(
+                            whatsapp.enviar_texto,
+                            numero,
+                            _AUDIO_NO_DISPONIBLE,
+                            origen,
+                        )
+                    continue
+
                 # El usuario mando una foto o un archivo CON pie de mensaje
                 # ("mirá esto, ¿cuánto suma?"). El archivo no se procesa —eso es
                 # otro proyecto: parsear un Excel que llega por chat necesita
@@ -256,9 +336,10 @@ async def webhook(request: Request, tareas: BackgroundTasks):
                     tareas.add_task(_atender, numero, caption, origen)
                     continue
 
-                # Imagen, audio, ubicacion, etc.: avisamos que solo texto.
+                # Imagen, ubicacion, etc.: explicamos que el contenido no se lee.
                 logger.info("Mensaje tipo '%s' de %s; no es texto.", tipo, numero)
-                tareas.add_task(whatsapp.enviar_texto, numero, _SOLO_TEXTO, origen)
+                tareas.add_task(whatsapp.enviar_texto, numero,
+                                _MEDIA_NO_SOPORTADO, origen)
 
     # Meta solo quiere un 200 rapido; el envio real va por BackgroundTask.
     return Response(status_code=200)

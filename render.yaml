@@ -139,9 +139,16 @@ services:
         value: postgres
       - key: WAREHOUSE_DSN
         sync: false
-      # Este cron SI necesita la API key; los otros dos no.
-      - key: ANTHROPIC_API_KEY
-        sync: false
+      # Este cron usa Gemini por Vertex AI con el mismo service account. Ese
+      # service account debe tener roles/aiplatform.user en el proyecto.
+      - key: GEMINI_BACKEND
+        value: vertex
+      - key: GEMINI_LOCATION
+        value: global
+      - key: GEMINI_MODELO
+        value: gemini-3.6-flash
+      - key: BOT_MODELO_KPIS
+        value: gemini-3.6-flash
 
   - type: web
     name: waba
@@ -160,12 +167,26 @@ services:
         value: postgres
       - key: WAREHOUSE_DSN
         sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
+      # Gemini reemplaza Claude en intencion, KPIs, SQL y conversacion. Vertex
+      # AI reutiliza GOOGLE_CREDENTIALS_JSON; no hay una segunda API key.
+      - key: GEMINI_BACKEND
+        value: vertex
+      - key: GEMINI_LOCATION
+        value: global
+      - key: GEMINI_MODELO
+        value: gemini-3.6-flash
+      - key: GEMINI_TIMEOUT_SEGUNDOS
+        value: "90"
+      # Se fijan tambien las variables por funcion para sobrescribir cualquier
+      # valor de Claude que haya quedado en el entorno del servicio anterior.
       - key: BOT_MODELO_SQL
-        value: claude-haiku-4-5-20251001
+        value: gemini-3.6-flash
       - key: BOT_MODELO_RESPUESTA
-        value: claude-haiku-4-5-20251001
+        value: gemini-3.6-flash
+      - key: BOT_MODELO_INTENCION
+        value: gemini-3.6-flash
+      - key: BOT_MODELO_KPIS
+        value: gemini-3.6-flash
       # Tabla sin 'instruccion' en el catalogo: no = fail-closed (seguro).
       # C-05: en "si", TODAS las tablas sin documentar de TODOS los clientes
       # quedan consultables. El bot ahora deja una advertencia de nivel alto al
@@ -230,6 +251,16 @@ services:
       # Usa el pie de una foto/archivo entrante como pregunta.
       - key: BOT_MEDIA_ENTRANTE
         value: "si"
+      # --- Notas de voz entrantes ---
+      # Gemini transcribe el audio y luego procesa el texto con el mismo flujo.
+      - key: BOT_AUDIO_ENTRANTE
+        value: "si"
+      - key: BOT_AUDIO_MODELO
+        value: gemini-3.6-flash
+      - key: BOT_AUDIO_MAX_MB
+        value: "5"
+      - key: BOT_AUDIO_TIMEOUT_SEGUNDOS
+        value: "90"
       - key: WHATSAPP_MAX_CAPTION
         value: "1024"
       # --- WhatsApp Cloud API (Meta) ---
@@ -247,7 +278,7 @@ services:
       # que el POST venga de Meta y RECHAZA todo el trafico entrante. Antes
       # aceptaba cualquier cosa en silencio: cualquiera con la URL del webhook
       # podia suplantar un numero registrado, extraer sus datos y consumir la
-      # cuenta de Anthropic.
+      # cuenta de Gemini/Vertex AI.
       - key: WHATSAPP_APP_SECRET
         sync: false
       # Solo para desarrollo local: permite arrancar sin app secret.

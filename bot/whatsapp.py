@@ -290,7 +290,7 @@ def descargar_media(media_id: str) -> tuple[bytes, str]:
     Tambien son dos pasos: GET /{media_id} devuelve una URL temporal, y esa URL
     hay que pedirla CON el mismo Bearer (es la parte que se olvida y da 401).
 
-    Solo se usa si se activa la recepcion de adjuntos (BOT_MEDIA_ENTRANTE).
+    Se usa para notas de voz y para cualquier futura recepcion de adjuntos.
     """
     if not _hay_credenciales() or not media_id:
         return b"", ""

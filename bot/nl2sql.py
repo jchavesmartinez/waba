@@ -26,23 +26,9 @@ import sqlglot
 from sqlglot import exp
 
 import config
+import llm
 
 logger = logging.getLogger("fachavi.bot.nl2sql")
-
-# Cliente Anthropic perezoso: solo se crea si de verdad se usa (asi importar el
-# paquete no exige la key, util para tests).
-_cliente = None
-
-
-def _anthropic():
-    global _cliente
-    if _cliente is None:
-        import anthropic
-        if not config.ANTHROPIC_API_KEY:
-            raise RuntimeError("Falta ANTHROPIC_API_KEY para el bot.")
-        _cliente = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    return _cliente
-
 
 # B-24: era 600 fijo. Una consulta con varios JOIN y un CTE se pasa, sale
 # truncada y el motivo del rechazo confunde. Configurable.
@@ -150,7 +136,7 @@ def contexto_temporal() -> str:
 def generar_sql(pregunta: str, schema_text: str,
                 correccion: str = "", sql_previo: str = "",
                 historial=None) -> str:
-    """Le pide a Claude el SELECT. `correccion` se usa en el reintento."""
+    """Le pide a Gemini el SELECT. `correccion` se usa en el reintento."""
     partes = [
         f"{contexto_temporal()}\n",
         f"Esquema disponible (unicas tablas que existen para vos):\n\n{schema_text}\n",
@@ -171,23 +157,23 @@ def generar_sql(pregunta: str, schema_text: str,
             f"SQL rechazado:\n{sql_previo}\n"
             "Corregilo respetando las reglas."
         )
-    resp = _anthropic().messages.create(
-        model=config.BOT_MODELO_SQL,
+    resp = llm.generar_texto(
+        config.BOT_MODELO_SQL,
+        "\n".join(partes),
         max_tokens=_MAX_TOKENS_SQL,
         system=_SISTEMA_SQL,
-        messages=[{"role": "user", "content": "\n".join(partes)}],
+        thinking_level="low",
     )
     # B-24: si el modelo se quedo sin tokens, el SQL viene CORTADO y el
     # validador lo rechaza con "no parseable", un motivo que no tiene nada que
     # ver con la causa real. Se registra para no perder una tarde ahi.
-    if getattr(resp, "stop_reason", "") == "max_tokens":
+    if resp.truncada:
         logger.warning(
             "El SQL se trunco por el tope de %d tokens: la consulta va a quedar "
             "incompleta y el validador la va a rechazar por 'no parseable'. "
             "Subi BOT_MAX_TOKENS_SQL si esto se repite.", _MAX_TOKENS_SQL,
         )
-    texto = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-    return _extraer_sql(texto)
+    return _extraer_sql(resp.texto)
 
 
 # --- Validador -------------------------------------------------------------

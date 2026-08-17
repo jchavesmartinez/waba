@@ -211,6 +211,7 @@ Paquete `bot/`. **Solo lee del warehouse**, nunca de los sistemas fuente.
 ```
 WhatsApp (Meta Cloud API)
    |  bot/app.py         webhook FastAPI (JSON) + envio por Graph API
+   |  bot/audio.py       nota de voz -> transcripcion -> texto (opcional)
    v
 numero -> cliente        registry.resolver() sobre la pestaña 'usuarios'
    |
@@ -218,7 +219,7 @@ numero -> cliente        registry.resolver() sobre la pestaña 'usuarios'
 raw_<cliente>._catalogo  bot/catalogo.py: filtra tablas por 'instruccion'
    |                     y arma el schema de SOLO las permitidas
    v
-text-to-SQL              bot/nl2sql.py: Claude genera un SELECT; se VALIDA con
+text-to-SQL              bot/nl2sql.py: Gemini genera un SELECT; se VALIDA con
    |                     sqlglot (1 sentencia, solo SELECT, solo tablas de la
    |                     lista blanca, sin esquema ajeno) antes de correrlo
    v
@@ -240,6 +241,37 @@ Dos barreras de seguridad, no una: (1) el prompt solo contiene el schema de las
 tablas permitidas; (2) el SQL se valida antes de ejecutarse y corre en una
 transacción de solo lectura. Aunque algo se colara, Postgres aborta cualquier
 escritura.
+
+### Gemini por Vertex AI
+
+Gemini es el proveedor único de IA: clasifica intención, selecciona KPIs,
+genera SQL, responde preguntas conversacionales, clasifica comercios y
+transcribe notas de voz. Producción usa `GEMINI_BACKEND=vertex` y reutiliza
+`GOOGLE_CREDENTIALS_JSON`; no necesita claves de Anthropic ni OpenAI.
+
+En el proyecto indicado por `GEMINI_PROJECT_ID` —o por `project_id` dentro del
+JSON cuando la variable está vacía— hay que habilitar facturación y la API
+`aiplatform.googleapis.com`, y conceder al `client_email` del service account
+el rol **Vertex AI User** (`roles/aiplatform.user`). La ubicación por defecto es
+`global` y el modelo común se controla con `GEMINI_MODELO`.
+
+Para desarrollo también se admite `GEMINI_BACKEND=api_key` junto con
+`GEMINI_API_KEY`, pero no es la ruta configurada en `render.yaml`.
+
+### Notas de voz
+
+Con `BOT_AUDIO_ENTRANTE=si`, una nota de voz sigue el mismo camino que una
+consulta escrita: primero se verifica que el número esté registrado, se baja el
+audio temporal de Meta, se convierte OGG/Opus a MP3 y se transcribe. Solo el
+texto resultante pasa a `responder()`; por eso conserva los mismos permisos,
+memoria, KPIs, validación SQL y formatos de salida. El audio no se guarda en el
+warehouse ni se copia a los logs.
+
+El modelo predeterminado es `gemini-3.6-flash`, el mismo proveedor que entiende
+la consulta y genera SQL. `BOT_AUDIO_MAX_MB` limita el tamaño aceptado (5 MB por
+defecto) y `BOT_AUDIO_TIMEOUT_SEGUNDOS` controla la conversión. Las notas se
+envían a Vertex AI para transcribirlas, lo que debe contemplarse en la política
+de privacidad ofrecida al cliente.
 
 ## Controles de calidad
 
@@ -281,6 +313,7 @@ Para darle a `cliente_a` su propio proyecto basta con agregar
 | `registry.py` | Lee el Sheet maestro (clientes/fuentes) |
 | `gclient.py` | Autenticación única del service account de Google |
 | `config.py` | Config desde variables de entorno + resolución de DSN por cliente |
+| `llm.py` | Cliente único de Gemini/Vertex AI para texto, JSON y audio |
 | `sources/base.py` | Contrato `Source` + helpers compartidos |
 | `sources/__init__.py` | Registro de tipos de fuente + factory |
 | `sources/google_sheets.py`, `csv_url.py`, `api_rest.py`, `postgres.py`, `zoho_imap.py`, `meta_ads.py` | Connectors |
@@ -288,6 +321,7 @@ Para darle a `cliente_a` su propio proyecto basta con agregar
 | `warehouse/duckdb_dest.py` | DuckDB local / MotherDuck |
 | `warehouse/postgres_dest.py` | Neon / Supabase / Postgres |
 | `bot/app.py` | Webhook de la Meta Cloud API + validación de firma y topes |
+| `bot/audio.py` | Conversión temporal OGG/Opus + transcripción de notas de voz |
 | `bot/responder.py` | Orquestador: registro → memoria → catálogo → SQL |
 | `bot/nl2sql.py` | Genera el SELECT y lo valida con sqlglot |
 | `bot/catalogo.py` | Gobernanza: qué tablas puede leer el bot |

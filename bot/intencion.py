@@ -23,21 +23,9 @@ import logging
 import re
 
 import config
+import llm
 
 logger = logging.getLogger("fachavi.bot.intencion")
-
-_cliente = None
-
-
-def _anthropic():
-    global _cliente
-    if _cliente is None:
-        import anthropic
-        if not config.ANTHROPIC_API_KEY:
-            raise RuntimeError("Falta ANTHROPIC_API_KEY para el bot.")
-        _cliente = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    return _cliente
-
 
 # Atajo sin LLM para saludos/cortesias obvias: evita gastar una llamada.
 _SALUDOS = {
@@ -178,13 +166,17 @@ def clasificar(pregunta: str, historial=None) -> str:
             f"Ultimo mensaje del usuario:\n{pregunta}\n\n"
             "Etiqueta (datos/meta/saludo):"
         )
-        resp = _anthropic().messages.create(
-            model=config.BOT_MODELO_INTENCION,
-            max_tokens=5,
+        resp = llm.generar_texto(
+            config.BOT_MODELO_INTENCION,
+            contenido,
+            # Aunque la salida sea una sola etiqueta, Gemini contabiliza su
+            # presupuesto de salida completo. Un margen pequeno evita cortar
+            # la palabra "saludo" o "datos".
+            max_tokens=20,
             system=_SISTEMA_CLASIF,
-            messages=[{"role": "user", "content": contenido}],
+            thinking_level="minimal",
         )
-        txt = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        txt = resp.texto
         etiqueta = txt.strip().lower().split()[0] if txt.strip() else "datos"
         etiqueta = re.sub(r"[^a-z]", "", etiqueta)
         if etiqueta not in _ETIQUETAS:
@@ -202,14 +194,14 @@ def responder_conversacional(pregunta: str, historial=None) -> str:
                             limpiar_arte_ascii)
     messages = _historial_a_messages(historial)
     messages.append({"role": "user", "content": pregunta})
-    resp = _anthropic().messages.create(
-        model=config.BOT_MODELO_RESPUESTA,
+    resp = llm.generar_texto(
+        config.BOT_MODELO_RESPUESTA,
+        messages,
         max_tokens=400,
         # La fecha va en el system para que "¿qué día es hoy?" tenga respuesta.
         # Antes esa pregunta caia en 'saludo' y devolvia el mensaje de bienvenida.
         system=_SISTEMA_META + "\n\n" + contexto_temporal(),
-        messages=messages,
+        thinking_level="low",
     )
-    texto = "".join(b.text for b in resp.content
-                    if getattr(b, "type", "") == "text").strip()
+    texto = resp.texto.strip()
     return limpiar_arte_ascii(texto)[0]

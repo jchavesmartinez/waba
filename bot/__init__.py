@@ -15,7 +15,7 @@ Flujo (bot/responder.py):
         |  QUE tablas puede leer el bot segun la columna 'instruccion'
         v
     schema de SOLO las tablas permitidas
-        |  bot/nl2sql.py: Claude genera un SELECT, se VALIDA con sqlglot
+        |  bot/nl2sql.py: Gemini genera un SELECT, se VALIDA con sqlglot
         v
     bot/warehouse_ro.py: ejecuta el SELECT en una transaccion READ ONLY
         |

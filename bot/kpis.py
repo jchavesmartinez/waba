@@ -29,25 +29,13 @@ import re
 import unicodedata
 
 import config
+import llm
 import sqlglot
 from sqlglot import exp
 from bot.nl2sql import contexto_temporal
 from bot import catalogo, warehouse_ro
 
 logger = logging.getLogger("fachavi.bot.kpis")
-
-_cliente = None
-
-
-def _anthropic():
-    global _cliente
-    if _cliente is None:
-        import anthropic
-        if not config.ANTHROPIC_API_KEY:
-            raise RuntimeError("Falta ANTHROPIC_API_KEY para el bot.")
-        _cliente = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    return _cliente
-
 
 def cargar_kpis(cliente: dict) -> list:
     """
@@ -268,6 +256,21 @@ _SISTEMA = (
 #
 # La regla 6 de arriba es la version generica que lee ese dato.
 
+_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "accion": {
+            "type": "string",
+            "enum": ["usar_kpi", "sql_libre", "pedir_contexto", "retar"],
+        },
+        "kpi": {"type": "string"},
+        "sql": {"type": "string"},
+        "mensaje": {"type": "string"},
+    },
+    "required": ["accion", "kpi", "sql", "mensaje"],
+    "additionalProperties": False,
+}
+
 
 def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
     """
@@ -309,14 +312,15 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
         "Devolve SOLO el JSON."
     )
     try:
-        resp = _anthropic().messages.create(
-            model=config.BOT_MODELO_KPIS,
+        resp = llm.generar_texto(
+            config.BOT_MODELO_KPIS,
+            contenido,
             max_tokens=700,
             system=_SISTEMA,
-            messages=[{"role": "user", "content": contenido}],
+            thinking_level="low",
+            response_schema=_PLAN_SCHEMA,
         )
-        txt = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-        plan = _parsear(txt)
+        plan = _parsear(resp.texto)
         if plan["accion"] != "usar_kpi":
             return plan
 
