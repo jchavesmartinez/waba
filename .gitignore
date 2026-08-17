@@ -2,3 +2,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Artefactos locales generados durante auditorias y edicion de archivos.
+.codex-*/
+outputs/
+
+# Las dependencias se reinstalan desde sus manifests; nunca se versionan.
+node_modules/
