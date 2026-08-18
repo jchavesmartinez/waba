@@ -71,6 +71,8 @@ def test_csv_degrada_a_excel_por_defecto():
 
 @pytest.mark.parametrize("pregunta", [
     "En un PDF por favor",
+    "Dámelo en un PDF por favor",
+    "Dámelo en Excel sí",
     "Te pedi un PDF",
     "PDF del detalle de los 5",
 ])

@@ -389,7 +389,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             }.get(fmt, "archivo")
             sustantivo = "registro" if len(filas) == 1 else "registros"
             texto = (
-                f"Listo, te adjunto el {etiqueta} con "
+                f"Listo. Le adjunto el {etiqueta} con "
                 f"{len(filas)} {sustantivo}."
             )
         else:
@@ -471,7 +471,7 @@ def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,
             adj = artefactos.csv_texto(columnas, filas, titulo=titulo)
         elif fmt == formato.PDF:
             resumen_pdf = (
-                "" if texto.startswith("Listo, te adjunto el PDF") else texto
+                "" if texto.startswith("Listo. Le adjunto el PDF") else texto
             )
             adj = artefactos.pdf_reporte(columnas, filas, titulo=titulo,
                                          resumen=resumen_pdf)
@@ -498,7 +498,8 @@ def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,
 # eso en Excel" produce un archivo llamado 'eso_en_excel_2026-08-03.xlsx', que
 # en el celular del cliente no dice absolutamente nada tres semanas despues.
 _RUIDO_TITULO = re.compile(
-    r"\b(por favor|porfa|mandame|mandámelo|manda|pasame|pásame|pasa|dame|"
+    r"\b(por favor|porfa|mandame|mandámelo|manda|pasame|pásame|pasa|"
+    r"d[aá]me(?:lo|la|los|las)?|"
     r"envia(me)?|enviá(me)?|quiero|necesito|podes|podés|puedes|me das|"
     r"graficame|graficá|grafica|gráfica|graficar|un gr[aá]fico( de)?|"
     r"el gr[aá]fico( de)?|export[aá](r)?|descarga(r|me)?|gener[aá](r|me)?|"

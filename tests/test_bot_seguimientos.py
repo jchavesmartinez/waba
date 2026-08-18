@@ -57,17 +57,62 @@ def test_pedir_pdf_reutiliza_ultimo_sql_sin_volver_a_planificar():
         patch.object(R.artefactos, "pdf_reporte", side_effect=_pdf),
     ):
         respuesta = R._responder_datos(
-            CLIENTE, "50600000000", "En un PDF por favor", historial,
+            CLIENTE, "50600000000", "Dámelo en un PDF por favor", historial,
         )
 
     assert ejecutado["sql"] == sql_detalle
     assert len(respuesta.adjuntos) == 1
     assert respuesta.adjuntos[0].nombre == "detalle.pdf"
-    assert respuesta.texto == "Listo, te adjunto el PDF con 5 registros."
+    assert respuesta.texto == "Listo. Le adjunto el PDF con 5 registros."
     assert "Resultado exacto" not in respuesta.texto
     assert len(pdf["filas"]) == 5
     assert pdf["resumen"] == ""
     assert pdf["titulo"].lower() != "en un pdf"
+
+
+def test_pedir_excel_con_damelo_reutiliza_el_ultimo_sql():
+    sql_detalle = (
+        "SELECT comercio, monto FROM transacciones "
+        "ORDER BY comercio"
+    )
+    historial = [
+        {"rol": "user", "contenido": "Muéstrame todo el presupuesto"},
+        {
+            "rol": "assistant",
+            "contenido": "Resultado exacto (44 registros)",
+            "sql": sql_detalle,
+        },
+    ]
+    ejecutado = {}
+
+    def _ejecutar(cliente, sql, limite=None):
+        ejecutado.update(sql=sql, limite=limite)
+        return ["concepto", "disponible"], [(f"Concepto {i}", i) for i in range(44)]
+
+    def _excel(columnas, filas, titulo="", **kwargs):
+        return Adjunto(
+            tipo="document", contenido=b"PK-prueba", nombre="presupuesto.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    with (
+        patch.object(R.catalogo, "construir_contexto", return_value=CTX),
+        patch.object(R.kpis, "cargar_kpis", return_value=[]),
+        patch.object(
+            R.kpis, "planificar",
+            side_effect=AssertionError("no debe llamar al planificador"),
+        ),
+        patch.object(R.warehouse_ro, "ejecutar", side_effect=_ejecutar),
+        patch.object(R.artefactos, "excel_xlsx", side_effect=_excel),
+    ):
+        respuesta = R._responder_datos(
+            CLIENTE, "50600000000", "Dámelo en Excel sí", historial,
+        )
+
+    assert ejecutado["sql"] == sql_detalle
+    assert len(respuesta.adjuntos) == 1
+    assert respuesta.adjuntos[0].nombre == "presupuesto.xlsx"
+    assert respuesta.texto == "Listo. Le adjunto el Excel con 44 registros."
 
 
 def test_si_a_oferta_de_detalle_fuerza_desglose_y_no_repite_resumen():

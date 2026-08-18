@@ -66,7 +66,8 @@ _AFIRMACION = re.compile(
 _RUIDO_PEDIDO = re.compile(
     r"\b(?:pdf|reporte|informe|documento|excel|xlsx?|hoja de calculo|planilla|"
     r"csv|grafico|grafica|imagen|archivo|exporta\w*|descarga\w*|adjunta\w*|"
-    r"manda\w*|pasa\w*|envia\w*|genera\w*|quiero|necesito|dame|en|a|"
+    r"manda\w*|pasa\w*|envia\w*|genera\w*|quiero|necesito|"
+    r"dame(?:lo|la|los|las)?|en|a|"
     r"por favor|porfa|te|pedi|ya|eso|esto|ese|esa|mismo|misma|anterior|resultado|"
     r"detalle|datos|el|la|los|las|un|una|de|del|si)\b",
     re.IGNORECASE,
