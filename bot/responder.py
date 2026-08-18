@@ -33,19 +33,19 @@ import logging
 import re
 import threading
 from collections import defaultdict
-from datetime import date
 
 import config
 import registry
 from bot import (artefactos, catalogo, formato, intencion, kpis, memoria,
                  nl2sql, warehouse_ro)
 from bot.salida import Respuesta
+from bot.tiempo import fecha_local
 
 logger = logging.getLogger("fachavi.bot.responder")
 
 _NO_REGISTRADO = (
     "Tu número no está registrado para consultar datos. "
-    "Contactá a la persona que administra este servicio."
+    "Contacte a la persona que administra este servicio."
 )
 _SIN_TABLAS = (
     "Todavía no hay tablas habilitadas para responder por este medio. "
@@ -56,15 +56,15 @@ _SIN_TABLAS = (
 # base caída o un permiso. Antes los dos daban el mismo mensaje.
 _SIN_CATALOGO = (
     "No pude leer la configuración de datos en este momento. "
-    "Probá de nuevo en un ratito; si sigue igual, avisale al administrador."
+    "Inténtelo nuevamente en unos minutos; si continúa igual, informe al administrador."
 )
 _TOPE_DIARIO = (
     "Ya llegamos al tope de consultas de hoy para esta cuenta. "
-    "Mañana se reinicia. Si necesitás más, hablá con el administrador."
+    "Mañana se reinicia. Si necesita más, contacte al administrador."
 )
 _NO_SEGURO = (
     "No pude armar esa consulta de forma segura. "
-    "Probá preguntándolo de otra manera, por ejemplo: "
+    "Intente formularla de otra manera, por ejemplo: "
     "«¿cuánto vendimos ayer?» o «¿qué productos tienen bajo inventario?»."
 )
 _ERROR = "Tuve un problema consultando los datos. Intentá de nuevo en un momento."
@@ -77,13 +77,13 @@ _SIN_GRAFICO = (
 )
 _ADJUNTO_FALLO = (
     "\n\n(Tuve un problema generando el archivo. El dato de arriba es correcto; "
-    "probá pidiéndomelo de nuevo.)"
+    "solicítelo nuevamente.)"
 )
-_OLVIDADO = "Listo, borré lo que veníamos hablando. Empezamos de cero. 🙂"
+_OLVIDADO = "Listo. Borré el historial de esta conversación. Podemos empezar de cero."
 _SALUDO = (
-    "¡Hola! 👋 Soy tu asistente de datos. Preguntame sobre tus ventas o "
-    "inventario, por ejemplo: «¿cuál fue el producto más vendido?» o «¿cuánto "
-    "vendimos ayer?»."
+    "Hola. Soy su asistente de datos. Puede consultarme sobre ventas o "
+    "inventario; por ejemplo: «¿Cuál fue el producto más vendido?» o "
+    "«¿Cuánto vendimos ayer?»."
 )
 
 # Comandos para borrar la memoria del propio numero.
@@ -169,7 +169,7 @@ def _ultimo_sql_seguro(historial: list, tablas_reales) -> str:
 # importa, que es la factura sorpresa.
 # --------------------------------------------------------------------------
 _CONSUMO: dict = defaultdict(int)
-_CONSUMO_DIA = {"fecha": date.today()}
+_CONSUMO_DIA = {"fecha": fecha_local()}
 _LOCK_CONSUMO = threading.Lock()
 
 
@@ -177,7 +177,7 @@ def _pasa_tope_diario(cliente_id: str) -> bool:
     tope = int(getattr(config, "BOT_MAX_MSJ_POR_DIA", 0) or 0)
     if tope <= 0:
         return True
-    hoy = date.today()
+    hoy = fecha_local()
     with _LOCK_CONSUMO:
         if _CONSUMO_DIA["fecha"] != hoy:
             _CONSUMO.clear()
@@ -229,8 +229,8 @@ def responder(numero: str, pregunta: str) -> Respuesta:
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[%s] error respondiendo meta: %s", cid, e)
-            respuesta = Respuesta("No pude procesar eso. Preguntame algo sobre "
-                                  "tus datos de ventas o inventario.")
+            respuesta = Respuesta("No pude procesar eso. Puede hacer una consulta "
+                                  "sobre sus datos de ventas o inventario.")
     else:  # "datos"
         respuesta = _responder_datos(
             cliente, numero, pregunta, historial,
@@ -485,8 +485,8 @@ def _armar_adjunto(cid: str, fmt: str, pregunta: str, texto: str,
         logger.warning("[%s] adjunto '%s' pesa %.1f MB; se responde solo texto",
                        cid, adj.nombre, adj.tamano_mb)
         return Respuesta(
-            texto + "\n\n(El archivo salió muy pesado para WhatsApp. Pedime un "
-                    "período más corto o menos filas y te lo mando.)"
+            texto + "\n\n(El archivo es demasiado pesado para WhatsApp. Solicite "
+                    "un período más corto o menos filas.)"
         )
 
     logger.info("[%s] adjunto listo: %s (%.0f KB, %d filas)",

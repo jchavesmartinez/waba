@@ -207,6 +207,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # Vacio = usa project_id del JSON del service account.
 GEMINI_PROJECT_ID = os.environ.get("GEMINI_PROJECT_ID", "")
 GEMINI_LOCATION = os.environ.get("GEMINI_LOCATION", "global")
+# Render y Neon suelen operar en UTC. "Hoy" y "ayer" deben resolverse en la
+# zona civil del negocio, no en la del servidor.
+BOT_TIMEZONE = (
+    os.environ.get("BOT_TIMEZONE", "America/Costa_Rica").strip()
+    or "America/Costa_Rica"
+)
 GEMINI_TIMEOUT_SEGUNDOS = int(os.environ.get("GEMINI_TIMEOUT_SEGUNDOS", "90"))
 
 # Gemini Flash reemplaza Haiku en todas las tareas. Se conservan variables por

@@ -145,6 +145,8 @@ services:
         value: vertex
       - key: GEMINI_LOCATION
         value: global
+      - key: BOT_TIMEZONE
+        value: America/Costa_Rica
       - key: GEMINI_MODELO
         value: gemini-3.6-flash
       - key: BOT_MODELO_KPIS
@@ -173,6 +175,8 @@ services:
         value: vertex
       - key: GEMINI_LOCATION
         value: global
+      - key: BOT_TIMEZONE
+        value: America/Costa_Rica
       - key: GEMINI_MODELO
         value: gemini-3.6-flash
       - key: GEMINI_TIMEOUT_SEGUNDOS

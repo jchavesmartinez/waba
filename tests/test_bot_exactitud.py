@@ -110,6 +110,26 @@ def test_planificador_elige_kpi_pero_no_puede_reescribir_su_sql():
     assert "deja 'sql' VACIO" in capturado["system"]
 
 
+def test_ventas_de_hoy_no_usan_un_kpi_historico_estatico(monkeypatch):
+    definicion = {
+        "kpi": "ventas_totales",
+        "nombre": "Ventas totales",
+        "preguntas_ejemplo": "ventas totales",
+        "formula_sql": "SELECT SUM(total) AS ventas FROM ventas",
+    }
+    ctx = SimpleNamespace(schema_text="ventas(fecha, total)")
+
+    def no_debe_llamarse(*_args, **_kwargs):
+        raise AssertionError("No debe elegirse un KPI estático para una fecha")
+
+    monkeypatch.setattr(kpis.llm, "generar_texto", no_debe_llamarse)
+    plan = kpis.planificar("ventas totales de hoy", [definicion], ctx)
+
+    assert plan == {
+        "accion": "sql_libre", "kpi": "", "sql": "", "mensaje": "",
+    }
+
+
 def test_decimal_de_excel_no_se_multiplica_por_diez_en_locale_tico():
     serie = pd.Series(["390037.5", "5.000", "1.250.000", "3,25"])
     valores = pd.to_numeric(_limpiar_numero(serie, coma_decimal=True)).tolist()

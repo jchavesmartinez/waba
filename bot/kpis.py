@@ -96,6 +96,23 @@ def _es_ajuste_presentacion(pregunta: str) -> bool:
     ))
 
 
+def _tiene_periodo_explicito(pregunta: str) -> bool:
+    """True si la consulta exige adaptar el SQL a una fecha o periodo."""
+    normal = unicodedata.normalize("NFKD", str(pregunta or ""))
+    texto = normal.encode("ascii", "ignore").decode("ascii").lower()
+    meses = (
+        "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|"
+        "octubre|noviembre|diciembre"
+    )
+    return bool(re.search(
+        rf"\b(?:hoy|ayer|anteayer|esta\s+semana|este\s+mes|este\s+ano|"
+        rf"semana\s+pasada|mes\s+pasado|ano\s+pasado|ultimos?\s+\d+\s+"
+        rf"(?:dias?|semanas?|meses?)|{meses}|20\d{{2}})\b|"
+        rf"\b\d{{1,2}}[/.-]\d{{1,2}}(?:[/.-]\d{{2,4}})?\b",
+        texto,
+    ))
+
+
 def _seleccionar_kpis(kpis: list, pregunta: str) -> list:
     """Elige KPIs relevantes sin depender del orden de filas en metadata."""
     if not _TOPE_KPIS_EN_PROMPT or len(kpis) <= _TOPE_KPIS_EN_PROMPT:
@@ -188,6 +205,8 @@ _SISTEMA = (
     "decidis UNA accion y devolves SOLO un JSON (sin markdown, sin ```), con la "
     "forma:\n"
     '{"accion":"usar_kpi|sql_libre|pedir_contexto|retar","kpi":"","sql":"","mensaje":""}\n'
+    "Si completa 'mensaje', use español profesional, cordial y breve; trate al "
+    "usuario de usted y no use jerga ni localismos.\n"
     "Reglas:\n"
     "- usar_kpi: un KPI del catalogo calza claro y tenes los parametros. Pone su "
     "id exacto en 'kpi' y deja 'sql' VACIO. La aplicacion ejecutara la formula_sql "
@@ -278,6 +297,17 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
     {'accion':'sql_libre'} para no bloquear el camino de datos de siempre.
     """
     if not config.BOT_KPIS or not kpis:
+        return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+
+    # Las formulas KPI actuales son SQL estatico: el planificador puede elegir
+    # una, pero no adaptarla. Si el usuario pide "hoy" y elige un KPI de ventas
+    # totales, ejecutar la formula canonica devuelve el historico completo. Una
+    # fecha explicita pasa a SQL libre, donde el filtro solicitado si se aplica.
+    if _tiene_periodo_explicito(pregunta):
+        logger.info(
+            "consulta con periodo explicito; se evita KPI SQL estatico y se "
+            "usa sql_libre"
+        )
         return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
 
     hist = ""

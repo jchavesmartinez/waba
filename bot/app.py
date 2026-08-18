@@ -52,31 +52,31 @@ app = FastAPI(title="FACHAVI — WhatsApp bot (Meta Cloud API)")
 # prendido hace tres meses" en algo que se ve en dos segundos.
 _AVISOS_ARRANQUE = config.revisar_arranque_bot()
 
-_SALUDO = "Hola 👋 Mandame tu consulta sobre los datos (ventas, inventario…)."
+_SALUDO = "Hola. Envíe su consulta sobre los datos (ventas, inventario…)."
 _MEDIA_NO_SOPORTADO = (
     "Entiendo mensajes de texto y notas de voz, pero todavía no leo el contenido "
-    "de fotos o archivos que me mandés. Escribime la consulta o agregala como "
+    "de fotos o archivos adjuntos. Escriba la consulta o agréguela como "
     "pie del archivo."
 )
 _AUDIO_NO_DISPONIBLE = (
-    "No pude procesar notas de voz en este momento. Escribime la consulta y la "
+    "No pude procesar notas de voz en este momento. Escriba la consulta y la "
     "atiendo igual."
 )
 _AUDIO_MUY_GRANDE = (
-    "La nota de voz es demasiado grande. Mandame una nota más corta o escribime "
+    "La nota de voz es demasiado grande. Envíe una nota más corta o escriba "
     "la consulta."
 )
 _AUDIO_NO_ENTENDIDO = (
-    "No logré entender esa nota de voz. Probá grabarla de nuevo, más cerca del "
-    "micrófono, o escribime la consulta."
+    "No logré entender esa nota de voz. Intente grabarla nuevamente, más cerca "
+    "del micrófono, o escriba la consulta."
 )
 _NO_REGISTRADO = (
     "Tu número no está registrado para consultar datos. "
-    "Contactá a la persona que administra este servicio."
+    "Contacte a la persona que administra este servicio."
 )
 _MUY_RAPIDO = (
-    "Estás mandando mensajes muy seguido y tengo que espaciarlos un toque. "
-    "Probá de nuevo en un minuto 🙂"
+    "Está enviando mensajes con demasiada frecuencia. Inténtelo nuevamente "
+    "en un minuto."
 )
 
 # Dedup: Meta reintenta el webhook si no ve un 200 a tiempo, y puede repetir un
@@ -167,8 +167,8 @@ def _atender(numero: str, texto: str, numero_origen: str = "") -> None:
         respuesta = responder(numero, texto) if texto else Respuesta(_SALUDO)
     except Exception as e:  # noqa: BLE001
         logger.exception("Error generando respuesta para %s: %s", numero, e)
-        respuesta = Respuesta("Tuve un problema procesando tu consulta. "
-                              "Probá de nuevo.")
+        respuesta = Respuesta("Tuve un problema procesando su consulta. "
+                              "Inténtelo nuevamente.")
 
     # Primero el texto y despues el archivo, en ese orden y en mensajes
     # separados. WhatsApp permite un caption en la imagen, pero son 1024 chars

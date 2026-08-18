@@ -37,6 +37,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import config
+from bot.tiempo import fecha_local
 from bot.salida import Adjunto
 
 logger = logging.getLogger("fachavi.bot.artefactos")
@@ -112,7 +113,7 @@ def nombre_archivo(base: str, extension: str) -> str:
     txt = unicodedata.normalize("NFKD", str(base or "consulta"))
     txt = txt.encode("ascii", "ignore").decode("ascii").lower()
     txt = re.sub(r"[^a-z0-9]+", "_", txt).strip("_")[:40] or "consulta"
-    return f"{txt}_{date.today().isoformat()}.{extension}"
+    return f"{txt}_{fecha_local().isoformat()}.{extension}"
 
 
 # --- Grafico -------------------------------------------------------------
@@ -353,7 +354,7 @@ def _pdf_reporte_legacy(columnas, filas, titulo: str = "", resumen: str = "",
                             title=titulo or "Reporte")
     estilos = getSampleStyleSheet()
     hist = [Paragraph(titulo or "Reporte de datos", estilos["Title"]),
-            Paragraph(date.today().strftime("Generado el %d/%m/%Y"),
+            Paragraph(fecha_local().strftime("Generado el %d/%m/%Y"),
                       estilos["Normal"]),
             Spacer(1, 12)]
 
@@ -502,7 +503,7 @@ def pdf_reporte(columnas, filas, titulo: str = "", resumen: str = "",
 
     hist = [
         Paragraph(escape(titulo or "Reporte de datos"), estilos["Title"]),
-        Paragraph(date.today().strftime("Generado el %d/%m/%Y"), cuerpo),
+        Paragraph(fecha_local().strftime("Generado el %d/%m/%Y"), cuerpo),
         Spacer(1, 10),
     ]
 

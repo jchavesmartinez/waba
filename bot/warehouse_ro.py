@@ -60,6 +60,13 @@ def _prep(cx, esquema: str, cliente_id: str = ""):
     # cuele con un INSERT/UPDATE, Postgres lo rechaza.
     cx.execute(text("SET TRANSACTION READ ONLY"))
     cx.execute(text(f"SET LOCAL statement_timeout = {int(config.BOT_TIMEOUT_MS)}"))
+    # CURRENT_DATE, date_trunc y las conversiones de timestamptz deben usar el
+    # dia del negocio. A las 18:00 de Costa Rica Render ya esta en el dia UTC
+    # siguiente; sin esto una consulta por "hoy" mira el dia equivocado.
+    cx.execute(
+        text("SELECT set_config('TimeZone', :zona, true)"),
+        {"zona": config.BOT_TIMEZONE},
+    )
     # Aisla al cliente: solo ve SUS esquemas. Sin 'public' ni los de otros
     # clientes. Son dos porque la capa semantica escribe aparte:
     #   semantic_<cliente>  tablas derivadas (listas para consumo)

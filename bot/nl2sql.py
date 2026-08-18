@@ -27,6 +27,7 @@ from sqlglot import exp
 
 import config
 import llm
+from bot.tiempo import fecha_local, nombre_zona
 
 logger = logging.getLogger("fachavi.bot.nl2sql")
 
@@ -114,13 +115,15 @@ def contexto_temporal() -> str:
     No es un problema de capacidad del modelo: adivinar el año sin referencia
     temporal es imposible por definicion, y un modelo mas caro adivina igual.
     """
-    hoy = date.today()
+    hoy = fecha_local()
     dias = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
     return (
         f"Fecha de hoy: {hoy.isoformat()} ({dias[hoy.weekday()]}). "
         f"Año en curso: {hoy.year}.\n"
+        f"Zona horaria del negocio: {nombre_zona()}.\n"
         "- Para fechas relativas ('hoy', 'ayer', 'este mes', 'el trimestre "
-        "pasado') usa CURRENT_DATE y aritmetica de intervalos, no fechas fijas.\n"
+        "pasado') usa CURRENT_DATE y aritmetica de intervalos. La sesion de "
+        "PostgreSQL ya usa la zona horaria del negocio.\n"
         "- Si el usuario da un dia y un mes SIN año ('el 2 de enero'), NO asumas "
         "el año en curso a ciegas: los datos pueden ser de otro periodo. Resolve "
         "el año contra la propia tabla, p.ej. filtrando por mes y dia y dejando "
@@ -259,10 +262,11 @@ def validar_sql(sql: str, tablas_permitidas) -> tuple[bool, str]:
 # --- Redaccion de la respuesta --------------------------------------------
 
 _SISTEMA_RESP = (
-    "Sos el asistente de datos de una empresa, respondiendo por WhatsApp. A partir "
-    "de la pregunta y del resultado de la consulta, escribi UNA respuesta breve, "
-    "clara y en español (tico, natural). Sin markdown pesado. Si el resultado viene "
-    "vacio, decilo con naturalidad. No inventes datos que no esten en el resultado.\n"
+    "Es el asistente de datos de una empresa y responde por WhatsApp. A partir "
+    "de la pregunta y del resultado de la consulta, escriba UNA respuesta breve, "
+    "clara y en español profesional y cordial. Trate al usuario de usted. No use "
+    "jerga ni localismos. Sin markdown pesado. Si el "
+    "resultado está vacío, indíquelo claramente. No invente datos.\n"
     "IMPORTANTE — que NO podes hacer:\n"
     "- Cada mensaje se responde por separado, con el resultado que se te da en ESTE "
     "turno. No podes dejar una consulta 'pendiente' ni ejecutar algo 'despues'.\n"
@@ -608,7 +612,7 @@ def _resultado_compacto(columnas, filas, unidad: str, max_caracteres: int = 3800
         usados += 1
     if usados < len(filas):
         lineas.append(
-            f"Hay {len(filas) - usados} registros más. Pedime el Excel para verlos completos."
+            f"Hay {len(filas) - usados} registros más. Solicite el Excel para verlos completos."
         )
     return "\n".join(lineas)
 
@@ -642,7 +646,7 @@ def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int = 8,
         lineas.append("• " + " | ".join(partes))
     if len(filas) > tope:
         lineas.append(
-            f"Hay {len(filas) - tope} registros más. Pedime el Excel para verlos completos."
+            f"Hay {len(filas) - tope} registros más. Solicite el Excel para verlos completos."
         )
     return "\n".join(lineas)
 
@@ -660,7 +664,7 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
     """
     if len(filas) == 1 and len(columnas) == 1 and str(filas[0][0]) == "NO_RESPONDIBLE":
         return ("No puedo responder eso con los datos habilitados para este "
-                "chat. Preguntame sobre ventas o inventario.")
+                "chat. Puede consultar sobre ventas o inventario.")
     columnas, filas, compacto = proyectar_columnas_solicitadas(
         pregunta, columnas, filas,
     )
