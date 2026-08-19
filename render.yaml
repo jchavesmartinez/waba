@@ -150,7 +150,7 @@ services:
       - key: GEMINI_MODELO
         value: gemini-3.6-flash
       - key: BOT_MODELO_KPIS
-        value: gemini-3.6-flash
+        value: gemini-3.5-flash-lite
 
   - type: web
     name: waba
@@ -186,11 +186,11 @@ services:
       - key: BOT_MODELO_SQL
         value: gemini-3.6-flash
       - key: BOT_MODELO_RESPUESTA
-        value: gemini-3.6-flash
+        value: gemini-3.5-flash-lite
       - key: BOT_MODELO_INTENCION
-        value: gemini-3.6-flash
+        value: gemini-3.5-flash-lite
       - key: BOT_MODELO_KPIS
-        value: gemini-3.6-flash
+        value: gemini-3.5-flash-lite
       # Tabla sin 'instruccion' en el catalogo: no = fail-closed (seguro).
       # C-05: en "si", TODAS las tablas sin documentar de TODOS los clientes
       # quedan consultables. El bot ahora deja una advertencia de nivel alto al
