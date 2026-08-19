@@ -75,6 +75,11 @@ _SISTEMA_META = (
     "logica de negocio (ej: 'dividi el stock entre el promedio diario de ventas "
     "de los ultimos 30 dias'). Puede citar los numeros ya mencionados. No diga que "
     "no los tiene ni que fueron inventados.\n"
+    "- Si preguntan QUE SIGNIFICA una metrica o como interpretar una comparacion, "
+    "responda directamente la duda conceptual y use el resultado anterior como "
+    "ejemplo. No repita la lista completa. Por ejemplo, una venta promedio por "
+    "transaccion puede superar el precio unitario cuando una transaccion incluye "
+    "varias unidades.\n"
     "- No puede CREAR numeros nuevos que no esten en el historial. "
     "Si solicitan un dato que ni el asistente ni el usuario mencionaron antes "
     "(por ejemplo: piden "
@@ -112,6 +117,20 @@ def _pregunta_solo_reloj(texto: str) -> bool:
         r"\s*(?:que\s+)?(?:dia|fecha|hora|ano)\s+(?:es\s+)?(?:hoy|actual)\s*",
         texto,
     )) or texto.strip() in {"en que ano estamos", "que hora es"}
+
+
+def _pregunta_explicativa(texto: str) -> bool:
+    """Distingue entender una métrica de volver a consultar sus valores."""
+    patrones = (
+        r"\b(?:que|cual)\s+formula\b",
+        r"\bcomo\s+(?:se\s+)?(?:calcula|calculo|calculaste|interpreta|interpreto)\b",
+        r"\b(?:que\s+significa|que\s+quiere\s+decir|a\s+que\s+se\s+refiere)\b",
+        r"\b(?:deberia|debe)\s+ser\b",
+        r"\bes\s+normal\s+que\b",
+        r"\bque\s+es\s+(?:el|la)?\s*(?:venta\s+promedio|ticket|margen|"
+        r"rentabilidad|runway|crecimiento|variacion|promedio)\b",
+    )
+    return any(re.search(patron, texto) for patron in patrones)
 
 
 def _referencia_temporal(texto: str) -> bool:
@@ -173,6 +192,11 @@ def clasificar(pregunta: str, historial=None) -> str:
     # fecha es una consulta. Esta distincion no se deja al modelo porque "hoy"
     # aparecia en ambos casos y enviaba ventas reales al camino sin warehouse.
     if _pregunta_solo_reloj(limpia):
+        return "meta"
+    # Preguntar qué significa una métrica o cómo interpretar el resultado no
+    # requiere ejecutar SQL otra vez. Resolverlo como conversación también
+    # evita responder con la misma lista de filas que el usuario acaba de ver.
+    if _pregunta_explicativa(limpia):
         return "meta"
     if _menciona_datos(limpia):
         return "datos"

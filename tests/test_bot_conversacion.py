@@ -86,6 +86,23 @@ def test_pregunta_exclusiva_sobre_fecha_actual_sigue_siendo_meta():
     assert intencion.clasificar("¿Qué día es hoy?", []) == "meta"
 
 
+def test_interpretar_venta_promedio_no_vuelve_a_consultar_las_filas():
+    historial = _historial_con_ventas_sql()
+    assert intencion.clasificar(
+        "Y la venta promedio por producto, deberia ser cercana al precio de venta?",
+        historial,
+    ) == "meta"
+    assert intencion.clasificar(
+        "Que formula usaste para la venta promedio?", historial,
+    ) == "meta"
+
+
+def test_pedir_valores_de_venta_promedio_sigue_siendo_consulta_de_datos():
+    assert intencion.clasificar(
+        "Dame la venta promedio de cada producto", [],
+    ) == "datos"
+
+
 def test_respuesta_meta_es_profesional_y_reintenta_si_se_corta(monkeypatch):
     llamadas = []
     respuestas = iter([
@@ -114,6 +131,7 @@ def test_respuesta_meta_es_profesional_y_reintenta_si_se_corta(monkeypatch):
     assert llamadas[1]["max_tokens"] > llamadas[0]["max_tokens"]
     assert "Trate al usuario de usted" in llamadas[0]["system"]
     assert "No use jerga" in llamadas[0]["system"]
+    assert "No repita la lista completa" in llamadas[0]["system"]
 
 
 def test_no_envia_fragmento_si_gemini_corta_tambien_el_reintento(monkeypatch):
