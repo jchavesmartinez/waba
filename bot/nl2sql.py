@@ -712,6 +712,60 @@ def _resultado_lista(columnas, filas, unidad: str, tope: int | None = None):
     return "\n".join(lineas)
 
 
+_PEDIDO_ANALITICO = re.compile(
+    r"\b(?:analiz[aeá]|analisis|análisis|patrones?|tendencias?|anomali[áa]s?|"
+    r"hallazgos?|insights?|aumentan?|suben?|crecen?|bajan?|disminuyen?|caen?|"
+    r"evoluci[oó]n|comportamiento|compar[ae]|versus|por qu[eé])\b",
+    re.IGNORECASE,
+)
+
+
+def _es_pedido_analitico(pregunta: str) -> bool:
+    return bool(_PEDIDO_ANALITICO.search(str(pregunta or "")))
+
+
+def _datos_para_analisis(columnas, filas, max_caracteres: int = 16000) -> str:
+    """Serializa resultados exactos con un límite de entrada predecible."""
+    lineas = ["\t".join(str(c) for c in columnas)]
+    for fila in filas:
+        linea = "\t".join(
+            _formatear_valor(valor, columna) for columna, valor in zip(columnas, fila)
+        )
+        if len("\n".join(lineas)) + len(linea) + 1 > max_caracteres:
+            break
+        lineas.append(linea)
+    return "\n".join(lineas)
+
+
+def _redactar_analisis(pregunta: str, columnas, filas, sql: str = "") -> str:
+    """Pide conclusiones al modelo usando solo cifras ya calculadas por SQL."""
+    sistema = (
+        "Es un analista de datos que responde por WhatsApp en español claro. "
+        "Responda primero la conclusión concreta que pide el usuario y después "
+        "presente de 2 a 5 hallazgos breves respaldados con cifras exactas del "
+        "resultado. Destaque tendencia, cambios relevantes y anomalías solo si "
+        "los datos las demuestran. Distinga hechos de hipótesis. No invente "
+        "causas, métricas, monedas ni datos. No copie todas las filas, no muestre "
+        "SQL y no sugiera pedir Excel. Use formato ligero de WhatsApp. Si el "
+        "resultado no permite llegar a una conclusión, dígalo claramente."
+    )
+    contenido = (
+        f"Pregunta: {pregunta}\n\n"
+        f"Resultado exacto de la consulta:\n{_datos_para_analisis(columnas, filas)}\n\n"
+        f"Contexto de cálculo (no mostrar al usuario): {sql}"
+    )
+    respuesta = llm.generar_texto(
+        config.BOT_MODELO_RESPUESTA,
+        contenido,
+        system=sistema,
+        max_tokens=900,
+        thinking_level="low",
+    )
+    if respuesta.truncada:
+        raise RuntimeError("El análisis fue truncado por el modelo.")
+    return respuesta.texto.strip()
+
+
 def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | None = None,
                               compacto: bool = False) -> str:
     """Presenta las celdas ejecutadas sin pedirle aritmetica ni datos al LLM."""
@@ -754,6 +808,11 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
     if len(filas) == 1 and len(columnas) == 1 and str(filas[0][0]) == "NO_RESPONDIBLE":
         return ("No puedo responder eso con los datos habilitados para este "
                 "chat. Puede consultar sobre ventas o inventario.")
+    if filas and _es_pedido_analitico(pregunta):
+        try:
+            return _redactar_analisis(pregunta, columnas, filas, sql=sql)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("No se pudo redactar el análisis; se usa salida exacta: %s", e)
     columnas, filas, compacto = proyectar_columnas_solicitadas(
         pregunta, columnas, filas,
     )

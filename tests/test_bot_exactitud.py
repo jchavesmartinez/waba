@@ -93,6 +93,50 @@ def test_ventas_usan_lista_movil_y_no_barras_verticales():
     assert "Solicite el Excel" not in texto
 
 
+def test_pregunta_de_tendencia_recibe_analisis_y_no_datos_crudos(monkeypatch):
+    capturado = {}
+
+    def generar(_modelo, contenido, **kwargs):
+        capturado["contenido"] = contenido
+        capturado.update(kwargs)
+        return SimpleNamespace(
+            texto=(
+                "📈 *Las ventas suben en el período, pero con alta variación.*\n\n"
+                "• El último mes supera al primero en 25%.\n"
+                "• Marzo tuvo la mayor caída mensual: 12%."
+            ),
+            truncada=False,
+        )
+
+    monkeypatch.setattr(nl2sql.llm, "generar_texto", generar)
+    texto = nl2sql.redactar_respuesta(
+        "Mes a mes, las ventas aumentan o bajan?",
+        ["mes", "total", "crecimiento_pct"],
+        [("2026-01", 100, None), ("2026-02", 140, 40), ("2026-03", 125, -10.7)],
+        sql="SELECT mes, total, crecimiento_pct FROM tendencia",
+    )
+
+    assert texto.startswith("📈 *Las ventas suben")
+    assert "Registro 1" not in texto
+    assert "2026-02\t140\t40%" in capturado["contenido"]
+    assert "no sugiera pedir Excel" in capturado["system"]
+
+
+def test_si_falla_el_analista_se_conservan_los_datos_exactos(monkeypatch):
+    def fallar(*_args, **_kwargs):
+        raise RuntimeError("modelo no disponible")
+
+    monkeypatch.setattr(nl2sql.llm, "generar_texto", fallar)
+    texto = nl2sql.redactar_respuesta(
+        "Analiza la tendencia de ventas",
+        ["mes", "total"],
+        [("2026-01", 100), ("2026-02", 140)],
+    )
+
+    assert "100" in texto and "140" in texto
+    assert "2 registros" in texto
+
+
 def test_una_sola_celda_se_devuelve_directa_sin_llm():
     texto = nl2sql.redactar_respuesta(
         "total", ["presupuesto_total"], [(5355326,)], unidad="colones",
