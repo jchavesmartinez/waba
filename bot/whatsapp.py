@@ -103,6 +103,30 @@ def _recortar(texto: str, tope: int | None = None) -> str:
     return texto[:corte].rstrip() + "…"
 
 
+def _fragmentar_texto(texto: str, tope: int | None = None) -> list[str]:
+    """Divide sin perder contenido, priorizando los saltos entre registros."""
+    tope = tope or config.WHATSAPP_MAX_CHARS
+    pendientes = str(texto or "").splitlines(keepends=True)
+    fragmentos = []
+    actual = ""
+    for linea in pendientes:
+        while len(linea) > tope:
+            if actual:
+                fragmentos.append(actual.rstrip())
+                actual = ""
+            corte = linea.rfind(" ", 0, tope + 1)
+            corte = corte if corte > 0 else tope
+            fragmentos.append(linea[:corte].rstrip())
+            linea = linea[corte:].lstrip()
+        if actual and len(actual) + len(linea) > tope:
+            fragmentos.append(actual.rstrip())
+            actual = ""
+        actual += linea
+    if actual.strip():
+        fragmentos.append(actual.rstrip())
+    return fragmentos or [""]
+
+
 def _post_mensaje(payload: dict, descripcion: str,
                   numero_origen: str = "") -> bool:
     """
@@ -162,14 +186,19 @@ def enviar_texto(numero_destino: str, texto: str,
     if not _hay_credenciales():
         return False
 
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": numero_destino,
-        "type": "text",
-        "text": {"preview_url": False, "body": _recortar(texto)},
-    }
-    return _post_mensaje(payload, "texto", numero_origen)
+    fragmentos = _fragmentar_texto(texto)
+    for numero, fragmento in enumerate(fragmentos, 1):
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": numero_destino,
+            "type": "text",
+            "text": {"preview_url": False, "body": fragmento},
+        }
+        descripcion = f"texto {numero}/{len(fragmentos)}"
+        if not _post_mensaje(payload, descripcion, numero_origen):
+            return False
+    return True
 
 
 # --- Adjuntos: subir y mandar --------------------------------------------

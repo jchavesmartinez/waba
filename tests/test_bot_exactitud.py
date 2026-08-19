@@ -71,6 +71,28 @@ def test_movimientos_muestran_total_solo_si_viene_del_sql():
     assert "2 movimientos · *USD 23,99*" in texto
 
 
+def test_ventas_usan_lista_movil_y_no_barras_verticales():
+    columnas = [
+        "fecha", "producto", "categoria", "cantidad", "precio_unitario",
+        "monto_total", "vendedor", "sucursal", "metodo_pago",
+    ]
+    filas = [
+        (datetime(2026, 7, 20), "Teclado Logitech K380", "Accesorios", 6,
+         28000, 151200, "Maria Jimenez", "San Jose", "Efectivo"),
+        (datetime(2026, 7, 20), "Memoria RAM 16GB", "Componentes", 2,
+         65000, 130000, "Luis Mora", "Heredia Centro", "SINPE"),
+    ]
+
+    texto = nl2sql.redactar_respuesta("ultimas ventas", columnas, filas)
+
+    assert texto.startswith("📋 *Producto*\n2 registros\n")
+    assert "• *Teclado Logitech K380*" in texto
+    assert "20 jul" in texto
+    assert "Monto total: 151.200" in texto
+    assert " | " not in texto
+    assert "Solicite el Excel" not in texto
+
+
 def test_una_sola_celda_se_devuelve_directa_sin_llm():
     texto = nl2sql.redactar_respuesta(
         "total", ["presupuesto_total"], [(5355326,)], unidad="colones",

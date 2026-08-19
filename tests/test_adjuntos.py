@@ -213,6 +213,17 @@ def test_texto_se_recorta_a_4096():
     assert len(whatsapp._recortar("x" * 9000)) <= 4096
 
 
+def test_texto_largo_se_fragmenta_sin_perder_registros():
+    texto = "\n".join(f"Registro {i}: " + "x" * 80 for i in range(100))
+    partes = whatsapp._fragmentar_texto(texto, 500)
+
+    assert len(partes) > 1
+    assert all(len(parte) <= 500 for parte in partes)
+    reconstruido = "\n".join(partes)
+    assert "Registro 0:" in reconstruido
+    assert "Registro 99:" in reconstruido
+
+
 # --- Nombres de archivo --------------------------------------------------
 
 def test_nombre_de_archivo_sin_tildes_ni_espacios():

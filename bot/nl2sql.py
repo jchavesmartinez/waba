@@ -596,7 +596,7 @@ def _presupuesto_formateado(columnas, filas, unidad: str):
     return "\n".join(lineas)
 
 
-def _resultado_compacto(columnas, filas, unidad: str, max_caracteres: int = 3800) -> str:
+def _resultado_compacto(columnas, filas, unidad: str, max_caracteres: int | None = None) -> str:
     """Tabla compacta para una lista de columnas pedida expresamente."""
     lineas = ["*" + " | ".join(_nombre_legible(c) for c in columnas) + "*"]
     usados = 0
@@ -606,7 +606,7 @@ def _resultado_compacto(columnas, filas, unidad: str, max_caracteres: int = 3800
             for columna, valor in zip(columnas, fila)
         )
         reserva = 80
-        if len("\n".join(lineas)) + len(linea) + reserva > max_caracteres:
+        if max_caracteres and len("\n".join(lineas)) + len(linea) + reserva > max_caracteres:
             break
         lineas.append(linea)
         usados += 1
@@ -636,7 +636,7 @@ def _fecha_corta(valor) -> str:
     return f"{valor.day} {meses[valor.month - 1]}"
 
 
-def _resultado_movimientos(columnas, filas, unidad: str, tope: int):
+def _resultado_movimientos(columnas, filas, unidad: str, tope: int | None = None):
     """Presenta cargos/movimientos sin repetir metadatos en cada renglón."""
     idx = {str(c).strip().lower(): i for i, c in enumerate(columnas)}
     i_desc = _buscar_columna(idx, "descripcion", "descripción", "comercio")
@@ -664,18 +664,55 @@ def _resultado_movimientos(columnas, filas, unidad: str, tope: int):
         resumen += f" · *{_formatear_valor(filas[0][i_total], columnas[i_total], unidad)}*"
 
     lineas = [f"💳 *{titulo}*", resumen, ""]
-    for fila in filas[:tope]:
+    for fila in filas[:tope] if tope else filas:
         descripcion = str(fila[i_desc]).strip()
         monto = _formatear_valor(fila[i_monto], columnas[i_monto], unidad)
         fecha = _fecha_corta(fila[i_fecha])
         lineas.append(f"• *{descripcion}* — {monto} · {fecha}")
-    if len(filas) > tope:
+    if tope and len(filas) > tope:
         restantes = len(filas) - tope
         lineas.extend(("", f"Hay {restantes} movimientos más. Solicite el Excel para verlos completos."))
     return "\n".join(lineas)
 
 
-def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int = 8,
+def _resultado_lista(columnas, filas, unidad: str, tope: int | None = None):
+    """Formato móvil común para cualquier tabla con varias filas."""
+    idx = {str(c).strip().lower(): i for i, c in enumerate(columnas)}
+    i_fecha = _buscar_columna(idx, "fecha")
+    i_principal = _buscar_columna(
+        idx, "producto", "concepto", "nombre", "descripcion", "descripción",
+        "comercio", "cliente", "sucursal", "categoria", "categoría",
+    )
+    titulo = _nombre_legible(columnas[i_principal]) if i_principal is not None else "Resultados"
+    sustantivo = "registro" if len(filas) == 1 else "registros"
+    lineas = [f"📋 *{titulo}*", f"{len(filas)} {sustantivo}", ""]
+
+    seleccion = filas[:tope] if tope else filas
+    for numero, fila in enumerate(seleccion, 1):
+        encabezado = (
+            f"Registro {numero}" if i_principal is None else
+            _formatear_valor(fila[i_principal], columnas[i_principal], unidad)
+        )
+        extras = []
+        for posicion, (columna, valor) in enumerate(zip(columnas, fila)):
+            if posicion == i_principal:
+                continue
+            if posicion == i_fecha:
+                extras.append(_fecha_corta(valor))
+            else:
+                extras.append(
+                    f"{_nombre_legible(columna)}: "
+                    f"{_formatear_valor(valor, columna, unidad)}"
+                )
+        lineas.append(f"• *{encabezado}*")
+        if extras:
+            lineas.append("  " + " · ".join(extras))
+    if tope and len(filas) > tope:
+        lineas.extend(("", f"Se omitieron {len(filas) - tope} registros."))
+    return "\n".join(lineas)
+
+
+def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | None = None,
                               compacto: bool = False) -> str:
     """Presenta las celdas ejecutadas sin pedirle aritmetica ni datos al LLM."""
     if not filas:
@@ -699,19 +736,9 @@ def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int = 8,
         ]
         return "\n".join(partes)
 
-    lineas = [f"*Resultado exacto ({len(filas)} registros):*"]
-    for fila in filas[:tope]:
-        partes = [
-            f"{_nombre_legible(col)}: {_formatear_valor(valor, col, unidad)}"
-            for col, valor in zip(columnas, fila)
-        ]
-        lineas.append("• " + " | ".join(partes))
-    if len(filas) > tope:
-        lineas.append(
-            f"Hay {len(filas) - tope} registros más. Solicite el Excel para verlos completos."
-        )
-    return "\n".join(lineas)
-
+    # Todas las tablas comparten la misma presentación móvil; no se limita la
+    # cantidad aquí porque WhatsApp divide el texto largo en varios mensajes.
+    return _resultado_lista(columnas, filas, unidad, tope)
 
 def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
                        unidad: str = "") -> str:

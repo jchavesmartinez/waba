@@ -202,7 +202,7 @@ services:
       # declaradas, asi que nadie que mirara el panel sabia que existian ni que
       # se podian ajustar.
       - key: BOT_MAX_FILAS
-        value: "200"
+        value: "500"
       - key: BOT_TIMEOUT_MS
         value: "8000"
       - key: WHATSAPP_MAX_CHARS

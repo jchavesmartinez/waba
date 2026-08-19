@@ -231,7 +231,7 @@ BOT_MODELO_RESPUESTA = os.environ.get(
 BOT_MAX_TOKENS_SQL = int(os.environ.get("BOT_MAX_TOKENS_SQL", "1200"))
 
 # Tope duro de filas que el bot trae del warehouse por consulta.
-BOT_MAX_FILAS = int(os.environ.get("BOT_MAX_FILAS", "200"))
+BOT_MAX_FILAS = int(os.environ.get("BOT_MAX_FILAS", "500"))
 
 # Corta consultas que se pasen de tiempo (proteccion del warehouse).
 BOT_TIMEOUT_MS = int(os.environ.get("BOT_TIMEOUT_MS", "8000"))
