@@ -130,7 +130,8 @@ def _menciona_datos(texto: str) -> bool:
     return bool(re.search(
         r"\b(?:ventas?|vendid[oa]s?|facturacion|ingresos?|gastos?|presupuesto|"
         r"inventario|stock|productos?|transacciones?|montos?|saldos?|deudas?|"
-        r"clientes?|proveedores?|categorias?|conceptos?|utilidad)\b",
+        r"clientes?|proveedores?|categorias?|conceptos?|utilidad|datos?|cifras?|"
+        r"variaciones?|porcentajes?)\b",
         texto,
     ))
 

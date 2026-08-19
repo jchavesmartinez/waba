@@ -557,7 +557,7 @@ def _formatear_valor(valor, columna: str = "", unidad: str = "") -> str:
     nombre = str(columna or "").lower()
     unidad_l = str(unidad or "").lower()
     texto = _formatear_numero(numero)
-    if any(x in nombre for x in ("pct", "porcentaje", "%")):
+    if any(x in nombre for x in ("pct", "porcentaje", "porcentual", "%")):
         return f"{texto}%"
     es_conteo = any(x in nombre for x in (
         "cantidad", "unidades", "movimientos", "registros", "pendientes",
@@ -698,6 +698,60 @@ def _resultado_movimientos(columnas, filas, unidad: str, tope: int | None = None
     return "\n".join(lineas)
 
 
+def _resultado_serie_temporal(columnas, filas, unidad: str):
+    """Lista compacta para variaciones mensuales o semanales."""
+    idx = {str(c).strip().lower(): i for i, c in enumerate(columnas)}
+    i_variacion = _buscar_columna(
+        idx, "variacion_pct", "variacion_porcentual", "variacion porcentual",
+        "crecimiento_pct",
+    )
+    i_mes = next((p for n, p in idx.items() if n == "mes"), None)
+    i_anio = next((p for n, p in idx.items() if n in ("anio", "año")), None)
+    i_fecha = _buscar_columna(idx, "fecha", "semana", "periodo")
+    if i_variacion is None or (i_mes is None and i_fecha is None):
+        return None
+
+    i_total = _buscar_columna(idx, "total_ventas", "total ventas", "monto_total", "total")
+    i_diferencia = _buscar_columna(idx, "diferencia_monto", "diferencia monto")
+    meses = ("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
+
+    def periodo(fila):
+        if i_mes is not None:
+            try:
+                etiqueta = meses[int(fila[i_mes]) - 1]
+            except (TypeError, ValueError, IndexError):
+                etiqueta = str(fila[i_mes])
+            if i_anio is not None:
+                etiqueta += f" {int(fila[i_anio])}"
+            return etiqueta
+        valor = fila[i_fecha]
+        if isinstance(valor, (date, datetime)):
+            return f"{meses[valor.month - 1]} {valor.year}"
+        return str(valor)
+
+    lineas = ["📊 *Variación por período*", f"{len(filas)} períodos", ""]
+    for fila in filas:
+        variacion = _formatear_valor(
+            fila[i_variacion], columnas[i_variacion], unidad,
+        )
+        total = (
+            _formatear_valor(fila[i_total], columnas[i_total], unidad)
+            if i_total is not None else ""
+        )
+        encabezado = f"• *{periodo(fila)}*"
+        if total:
+            encabezado += f" — {total}"
+        lineas.append(encabezado)
+        detalle = f"  Variación: {variacion}"
+        if i_diferencia is not None and fila[i_diferencia] is not None:
+            detalle += (
+                f" · Diferencia: "
+                f"{_formatear_valor(fila[i_diferencia], columnas[i_diferencia], unidad)}"
+            )
+        lineas.append(detalle)
+    return "\n".join(lineas)
+
+
 def _resultado_lista(columnas, filas, unidad: str, tope: int | None = None):
     """Formato móvil común para cualquier tabla con varias filas."""
     idx = {str(c).strip().lower(): i for i, c in enumerate(columnas)}
@@ -770,7 +824,9 @@ def _redactar_analisis(pregunta: str, columnas, filas, sql: str = "") -> str:
         "los datos las demuestran. Distinga hechos de hipótesis. No invente "
         "causas, métricas, monedas ni datos. No copie todas las filas, no muestre "
         "SQL y no sugiera pedir Excel. Use formato ligero de WhatsApp. Si el "
-        "resultado no permite llegar a una conclusión, dígalo claramente."
+        "resultado no permite llegar a una conclusión, dígalo claramente. "
+        "Use asteriscos simples únicamente en títulos cortos; no encierre cifras "
+        "ni oraciones completas entre asteriscos y nunca use asteriscos dobles."
     )
     contenido = (
         f"Pregunta: {pregunta}\n\n"
@@ -794,7 +850,7 @@ def _redactar_analisis(pregunta: str, columnas, filas, sql: str = "") -> str:
         )
     if respuesta.truncada:
         raise RuntimeError("El análisis fue truncado dos veces por el modelo.")
-    return respuesta.texto.strip()
+    return respuesta.texto.strip().replace("**", "*")
 
 
 def _analisis_tendencia_local(columnas, filas, unidad: str = "") -> str | None:
@@ -861,6 +917,10 @@ def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | Non
     movimientos = _resultado_movimientos(columnas, filas, unidad, tope)
     if movimientos:
         return movimientos
+
+    serie = _resultado_serie_temporal(columnas, filas, unidad)
+    if serie:
+        return serie
 
     if len(filas) == 1:
         partes = [

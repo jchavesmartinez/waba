@@ -115,6 +115,43 @@ def test_pedir_excel_con_damelo_reutiliza_el_ultimo_sql():
     assert respuesta.texto == "Listo. Le adjunto el Excel con 44 registros."
 
 
+def test_pedir_datos_usados_repite_exactamente_la_consulta_del_analisis():
+    sql_analisis = (
+        "SELECT DATE_TRUNC('month', fecha_transaccion) AS mes, SUM(monto) AS total "
+        "FROM transacciones GROUP BY 1 ORDER BY 1"
+    )
+    historial = [
+        {"rol": "user", "contenido": "Las ventas suben o bajan mes a mes?"},
+        {
+            "rol": "assistant",
+            "contenido": "Las ventas fluctúan mes a mes.",
+            "sql": sql_analisis,
+        },
+    ]
+    ejecutado = {}
+
+    def _ejecutar(_cliente, sql, limite=None):
+        ejecutado.update(sql=sql, limite=limite)
+        return ["mes", "total"], [("2026-01", 100), ("2026-02", 140)]
+
+    with (
+        patch.object(R.catalogo, "construir_contexto", return_value=CTX),
+        patch.object(R.kpis, "cargar_kpis", return_value=[]),
+        patch.object(
+            R.kpis, "planificar",
+            side_effect=AssertionError("debe reutilizar el SQL anterior"),
+        ),
+        patch.object(R.warehouse_ro, "ejecutar", side_effect=_ejecutar),
+    ):
+        respuesta = R._responder_datos(
+            CLIENTE, "50600000000", "Me das los datos que usaste por favor", historial,
+            fmt_solicitado=formato.TEXTO,
+        )
+
+    assert ejecutado["sql"] == sql_analisis
+    assert "100" in respuesta.texto and "140" in respuesta.texto
+
+
 def test_si_a_oferta_de_detalle_fuerza_desglose_y_no_repite_resumen():
     historial = [
         {"rol": "user", "contenido": "Cuantos gastos sin clasificar hay?"},

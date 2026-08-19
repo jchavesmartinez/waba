@@ -117,6 +117,15 @@ def _ultimo_asistente(historial: list) -> str:
     )
 
 
+def _es_pedido_datos_usados(pregunta: str) -> bool:
+    texto = nl2sql._normalizar_para_columnas(pregunta)
+    return bool(re.search(
+        r"\b(?:datos|cifras|valores)\b.*\b(?:usaste|utilizaste|ocupaste|analizaste)\b|"
+        r"\b(?:datos|cifras|valores)\b.*\b(?:del|detras del|detrás del)\b.*\banalisis\b",
+        texto,
+    ))
+
+
 def _confirmacion_de_detalle(pregunta: str, historial: list) -> tuple[str, bool]:
     """Convierte un "si" a la oferta de detalle en una orden no ambigua."""
     texto = (pregunta or "").strip().lower()
@@ -280,9 +289,10 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         formato.es_pedido_solo_formato(pregunta)
         or fmt_explicito == formato.TEXTO
     )
+    seguimiento_datos = _es_pedido_datos_usados(pregunta) and bool(historial)
     sql_reutilizado = (
         _ultimo_sql_seguro(historial, ctx.tablas_reales)
-        if seguimiento_archivo else ""
+        if seguimiento_archivo or seguimiento_datos else ""
     )
     pregunta_efectiva, confirma_detalle = _confirmacion_de_detalle(
         pregunta, historial,

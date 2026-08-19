@@ -93,6 +93,28 @@ def test_ventas_usan_lista_movil_y_no_barras_verticales():
     assert "Solicite el Excel" not in texto
 
 
+def test_variaciones_mensuales_se_presentan_como_serie_compacta():
+    columnas = [
+        "anio", "mes", "total_ventas", "diferencia_monto", "variacion_porcentual",
+    ]
+    filas = [
+        (2026, 1, 40621000, None, None),
+        (2026, 2, 37851900, -2769100, -6.82),
+        (2026, 3, 60135900, 22284000, 58.87),
+    ]
+
+    texto = nl2sql.redactar_respuesta(
+        "Dame las variaciones mensuales de ventas totales en porcentaje",
+        columnas,
+        filas,
+    )
+
+    assert texto.startswith("📊 *Variación por período*\n3 períodos\n")
+    assert "• *Feb 2026* — 37.851.900" in texto
+    assert "Variación: -6,82% · Diferencia: -2.769.100" in texto
+    assert "Registro 1" not in texto
+
+
 def test_pregunta_de_tendencia_recibe_analisis_y_no_datos_crudos(monkeypatch):
     capturado = {}
 

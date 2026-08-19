@@ -44,6 +44,17 @@ def test_esas_es_referencia_al_ultimo_resultado_de_datos():
     assert intencion.clasificar("esas", historial) == "datos"
 
 
+def test_pedir_los_datos_usados_no_se_clasifica_como_conversacion():
+    historial = [{
+        "rol": "assistant",
+        "contenido": "Las ventas fluctúan mes a mes.",
+        "sql": "SELECT mes, total FROM ventas_mensuales",
+    }]
+    assert intencion.clasificar(
+        "Me das los datos que usaste por favor", historial,
+    ) == "datos"
+
+
 def _historial_con_ventas_sql():
     return [
         {"rol": "user", "contenido": "Cuáles fueron las ventas totales de hoy"},
