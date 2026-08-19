@@ -617,6 +617,64 @@ def _resultado_compacto(columnas, filas, unidad: str, max_caracteres: int = 3800
     return "\n".join(lineas)
 
 
+def _buscar_columna(idx, *fragmentos):
+    """Devuelve la primera columna cuyo nombre contiene uno de los fragmentos."""
+    for nombre, posicion in idx.items():
+        if any(fragmento in nombre for fragmento in fragmentos):
+            return posicion
+    return None
+
+
+def _fecha_corta(valor) -> str:
+    """Fecha breve y natural para listas que se leen en un teléfono."""
+    if not isinstance(valor, (date, datetime)):
+        return str(valor)
+    meses = (
+        "ene", "feb", "mar", "abr", "may", "jun",
+        "jul", "ago", "sep", "oct", "nov", "dic",
+    )
+    return f"{valor.day} {meses[valor.month - 1]}"
+
+
+def _resultado_movimientos(columnas, filas, unidad: str, tope: int):
+    """Presenta cargos/movimientos sin repetir metadatos en cada renglón."""
+    idx = {str(c).strip().lower(): i for i, c in enumerate(columnas)}
+    i_desc = _buscar_columna(idx, "descripcion", "descripción", "comercio")
+    i_monto = _buscar_columna(idx, "monto", "importe")
+    i_fecha = _buscar_columna(idx, "fecha")
+    if None in (i_desc, i_monto, i_fecha):
+        return None
+
+    i_categoria = _buscar_columna(idx, "categoria", "categoría")
+    i_titular = _buscar_columna(idx, "titular")
+    i_total = _buscar_columna(idx, "total_general", "monto_total", "total_monto")
+
+    def valor_comun(posicion):
+        if posicion is None:
+            return ""
+        valores = {str(fila[posicion]).strip() for fila in filas if fila[posicion] not in (None, "")}
+        return next(iter(valores)) if len(valores) == 1 else ""
+
+    categoria = valor_comun(i_categoria)
+    titular = valor_comun(i_titular)
+    titulo = " · ".join(x for x in (categoria, titular) if x) or "Movimientos"
+    sustantivo = "movimiento" if len(filas) == 1 else "movimientos"
+    resumen = f"{len(filas)} {sustantivo}"
+    if i_total is not None:
+        resumen += f" · *{_formatear_valor(filas[0][i_total], columnas[i_total], unidad)}*"
+
+    lineas = [f"💳 *{titulo}*", resumen, ""]
+    for fila in filas[:tope]:
+        descripcion = str(fila[i_desc]).strip()
+        monto = _formatear_valor(fila[i_monto], columnas[i_monto], unidad)
+        fecha = _fecha_corta(fila[i_fecha])
+        lineas.append(f"• *{descripcion}* — {monto} · {fecha}")
+    if len(filas) > tope:
+        restantes = len(filas) - tope
+        lineas.extend(("", f"Hay {restantes} movimientos más. Solicite el Excel para verlos completos."))
+    return "\n".join(lineas)
+
+
 def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int = 8,
                               compacto: bool = False) -> str:
     """Presenta las celdas ejecutadas sin pedirle aritmetica ni datos al LLM."""
@@ -629,6 +687,10 @@ def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int = 8,
     presupuesto = _presupuesto_formateado(columnas, filas, unidad)
     if presupuesto:
         return presupuesto
+
+    movimientos = _resultado_movimientos(columnas, filas, unidad, tope)
+    if movimientos:
+        return movimientos
 
     if len(filas) == 1:
         partes = [

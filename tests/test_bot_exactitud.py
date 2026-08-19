@@ -1,6 +1,7 @@
 """Regresiones: el texto y el Excel deben compartir una sola verdad numerica."""
 
 from types import SimpleNamespace
+from datetime import datetime
 import pandas as pd
 
 from bot import intencion, kpis, nl2sql
@@ -35,6 +36,39 @@ def test_resultado_generico_no_inventa_un_total_que_sql_no_trajo():
     )
     assert "₡100" in texto and "₡200" in texto
     assert "₡300" not in texto
+
+
+def test_movimientos_se_agrupan_para_leerse_bien_en_whatsapp():
+    columnas = ["fecha", "descripcion", "monto_usd", "titular", "categoria"]
+    filas = [
+        (datetime(2026, 8, 17, 15, 25), "GOOGLE SERVICES", 10, "Aline", "Suscripciones"),
+        (datetime(2026, 8, 15, 15, 46), "DISNEY PLUS", 13.99, "Aline", "Suscripciones"),
+    ]
+
+    texto = nl2sql.redactar_respuesta(
+        "Que conforma el total de suscripciones?", columnas, filas, unidad="usd",
+    )
+
+    assert texto.startswith("💳 *Suscripciones · Aline*\n2 movimientos\n")
+    assert "• *GOOGLE SERVICES* — USD 10 · 17 ago" in texto
+    assert "• *DISNEY PLUS* — USD 13,99 · 15 ago" in texto
+    assert "Categoria:" not in texto
+    assert " | " not in texto
+    assert "USD 23,99" not in texto
+
+
+def test_movimientos_muestran_total_solo_si_viene_del_sql():
+    columnas = [
+        "fecha", "descripcion", "monto_usd", "titular", "categoria", "total_general",
+    ]
+    filas = [
+        (datetime(2026, 8, 17), "GOOGLE SERVICES", 10, "Aline", "Suscripciones", 23.99),
+        (datetime(2026, 8, 15), "DISNEY PLUS", 13.99, "Aline", "Suscripciones", 23.99),
+    ]
+
+    texto = nl2sql.redactar_respuesta("detalle", columnas, filas, unidad="usd")
+
+    assert "2 movimientos · *USD 23,99*" in texto
 
 
 def test_una_sola_celda_se_devuelve_directa_sin_llm():
