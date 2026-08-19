@@ -259,6 +259,29 @@ def validar_sql(sql: str, tablas_permitidas) -> tuple[bool, str]:
     return True, ""
 
 
+def validar_granularidad(pregunta: str, sql: str) -> tuple[bool, str]:
+    """Impide ejecutar una agrupación temporal distinta de la solicitada."""
+    texto = _normalizar_para_columnas(pregunta)
+    consulta = str(sql or "").lower()
+    pide_mes = bool(re.search(
+        r"\b(?:mes\s+a\s+mes|por\s+mes|mensual(?:mente)?)\b", texto,
+    ))
+    pide_semana = bool(re.search(
+        r"\b(?:semana\s+a\s+semana|por\s+semana|semanal(?:mente)?)\b", texto,
+    ))
+    usa_semana = bool(re.search(
+        r"date_trunc\s*\(\s*['\"]week['\"]|\bsemana\b|\bas\s+sem\b", consulta,
+    ))
+    usa_mes = bool(re.search(
+        r"date_trunc\s*\(\s*['\"]month['\"]|\bmensual\b|\bas\s+mes\b", consulta,
+    ))
+    if pide_mes and usa_semana:
+        return False, "El usuario pidió resultados mes a mes, no por semana."
+    if pide_semana and usa_mes:
+        return False, "El usuario pidió resultados semana a semana, no por mes."
+    return True, ""
+
+
 # --- Redaccion de la respuesta --------------------------------------------
 
 _SISTEMA_RESP = (
@@ -758,12 +781,68 @@ def _redactar_analisis(pregunta: str, columnas, filas, sql: str = "") -> str:
         config.BOT_MODELO_RESPUESTA,
         contenido,
         system=sistema,
-        max_tokens=900,
-        thinking_level="low",
+        max_tokens=1200,
+        thinking_level="minimal",
     )
     if respuesta.truncada:
-        raise RuntimeError("El análisis fue truncado por el modelo.")
+        respuesta = llm.generar_texto(
+            config.BOT_MODELO_RESPUESTA,
+            contenido,
+            system=sistema + " Entregue una respuesta completa y muy concisa.",
+            max_tokens=2400,
+            thinking_level="minimal",
+        )
+    if respuesta.truncada:
+        raise RuntimeError("El análisis fue truncado dos veces por el modelo.")
     return respuesta.texto.strip()
+
+
+def _analisis_tendencia_local(columnas, filas, unidad: str = "") -> str | None:
+    """Conclusión numérica segura cuando el redactor analítico no responde."""
+    if len(filas) < 2:
+        return None
+    nombres = [str(c).strip().lower() for c in columnas]
+    candidatos = []
+    for i, nombre in enumerate(nombres):
+        if any(x in nombre for x in ("pct", "porcentaje", "anterior", "cantidad")):
+            continue
+        if any(x in nombre for x in ("total_ventas", "total ventas", "monto", "total", "ventas")):
+            candidatos.append(i)
+    i_valor = next(
+        (i for i in candidatos if all(_numero_decimal(f[i]) is not None for f in filas)),
+        None,
+    )
+    if i_valor is None:
+        return None
+
+    valores = [_numero_decimal(f[i_valor]) for f in filas]
+    subidas = sum(b > a for a, b in zip(valores, valores[1:]))
+    bajadas = sum(b < a for a, b in zip(valores, valores[1:]))
+    iguales = len(valores) - 1 - subidas - bajadas
+    primero, ultimo = valores[0], valores[-1]
+    if subidas and bajadas:
+        conclusion = "No hay una subida o bajada constante: las ventas fluctúan."
+    elif subidas and not bajadas:
+        conclusion = "Las ventas muestran una tendencia ascendente."
+    elif bajadas and not subidas:
+        conclusion = "Las ventas muestran una tendencia descendente."
+    else:
+        conclusion = "Las ventas se mantuvieron sin cambios."
+
+    comparacion = ""
+    if primero:
+        cambio = (ultimo - primero) / abs(primero) * Decimal("100")
+        signo = "+" if cambio > 0 else ""
+        comparacion = f" En el período completo, el cambio fue de {signo}{_formatear_numero(cambio)}%."
+    lineas = [f"📈 *{conclusion}*", comparacion.strip(), ""]
+    lineas.append(f"• Subieron en {subidas} períodos y bajaron en {bajadas}.")
+    if iguales:
+        lineas.append(f"• Se mantuvieron iguales en {iguales} períodos.")
+    lineas.append(
+        f"• Primer valor: {_formatear_valor(primero, columnas[i_valor], unidad)}; "
+        f"último valor: {_formatear_valor(ultimo, columnas[i_valor], unidad)}."
+    )
+    return "\n".join(x for x in lineas if x)
 
 
 def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | None = None,
@@ -812,7 +891,10 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
         try:
             return _redactar_analisis(pregunta, columnas, filas, sql=sql)
         except Exception as e:  # noqa: BLE001
-            logger.warning("No se pudo redactar el análisis; se usa salida exacta: %s", e)
+            logger.warning("No se pudo redactar el análisis con IA: %s", e)
+            tendencia = _analisis_tendencia_local(columnas, filas, unidad)
+            if tendencia:
+                return tendencia
     columnas, filas, compacto = proyectar_columnas_solicitadas(
         pregunta, columnas, filas,
     )

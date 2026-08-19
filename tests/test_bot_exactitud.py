@@ -122,7 +122,7 @@ def test_pregunta_de_tendencia_recibe_analisis_y_no_datos_crudos(monkeypatch):
     assert "no sugiera pedir Excel" in capturado["system"]
 
 
-def test_si_falla_el_analista_se_conservan_los_datos_exactos(monkeypatch):
+def test_si_falla_el_analista_se_da_una_conclusion_numerica_local(monkeypatch):
     def fallar(*_args, **_kwargs):
         raise RuntimeError("modelo no disponible")
 
@@ -133,8 +133,28 @@ def test_si_falla_el_analista_se_conservan_los_datos_exactos(monkeypatch):
         [("2026-01", 100), ("2026-02", 140)],
     )
 
-    assert "100" in texto and "140" in texto
-    assert "2 registros" in texto
+    assert "tendencia ascendente" in texto
+    assert "+40%" in texto
+    assert "Primer valor: 100; último valor: 140" in texto
+
+
+def test_mes_a_mes_rechaza_sql_semanal():
+    ok, motivo = nl2sql.validar_granularidad(
+        "Dime, mes a mes, las ventas aumentan o bajan?",
+        "SELECT DATE_TRUNC('week', fecha) AS sem, SUM(total) FROM ventas GROUP BY 1",
+    )
+
+    assert ok is False
+    assert "mes a mes" in motivo
+
+
+def test_mes_a_mes_acepta_sql_mensual():
+    ok, motivo = nl2sql.validar_granularidad(
+        "Dime, mes a mes, las ventas aumentan o bajan?",
+        "SELECT DATE_TRUNC('month', fecha) AS mes, SUM(total) FROM ventas GROUP BY 1",
+    )
+
+    assert (ok, motivo) == (True, "")
 
 
 def test_una_sola_celda_se_devuelve_directa_sin_llm():

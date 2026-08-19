@@ -341,6 +341,8 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         logger.info("[%s] SQL derivado del KPI '%s': %s",
                     cid, plan.get("kpi"), " ".join(sql.split()))
         ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
+        if ok:
+            ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
         if not ok:
             logger.info("[%s] SQL de KPI '%s' invalido (%s); cae a sql_libre",
                         cid, plan.get("kpi"), motivo)
@@ -351,12 +353,16 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             pregunta_efectiva, ctx.schema_text, historial=historial,
         )
         ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
+        if ok:
+            ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
         if not ok:
             logger.info("[%s] SQL rechazado (%s); reintento. sql=%s", cid, motivo, sql)
             sql = nl2sql.generar_sql(pregunta_efectiva, ctx.schema_text,
                                      correccion=motivo, sql_previo=sql,
                                      historial=historial)
             ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
+            if ok:
+                ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
             if not ok:
                 logger.warning("[%s] SQL invalido tras reintento (%s): %s", cid, motivo, sql)
                 return Respuesta(_NO_SEGURO)
