@@ -89,6 +89,7 @@ def test_ventas_usan_lista_movil_y_no_barras_verticales():
     assert "• *Teclado Logitech K380*" in texto
     assert "20 jul" in texto
     assert "Monto total: 151.200" in texto
+    assert "Metodo pago: Efectivo\n\n• *Memoria RAM 16GB*" in texto
     assert " | " not in texto
     assert "Solicite el Excel" not in texto
 
@@ -112,6 +113,7 @@ def test_variaciones_mensuales_se_presentan_como_serie_compacta():
     assert texto.startswith("📊 *Variación por período*\n3 períodos\n")
     assert "• *Feb 2026* — 37.851.900" in texto
     assert "Variación: -6,82% · Diferencia: -2.769.100" in texto
+    assert "Diferencia: -2.769.100\n\n• *Mar 2026*" in texto
     assert "Registro 1" not in texto
 
 

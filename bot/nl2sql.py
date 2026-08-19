@@ -632,12 +632,13 @@ def _resultado_compacto(columnas, filas, unidad: str, max_caracteres: int | None
         if max_caracteres and len("\n".join(lineas)) + len(linea) + reserva > max_caracteres:
             break
         lineas.append(linea)
+        lineas.append("")
         usados += 1
     if usados < len(filas):
         lineas.append(
             f"Hay {len(filas) - usados} registros más. Solicite el Excel para verlos completos."
         )
-    return "\n".join(lineas)
+    return "\n".join(lineas).rstrip()
 
 
 def _buscar_columna(idx, *fragmentos):
@@ -692,10 +693,11 @@ def _resultado_movimientos(columnas, filas, unidad: str, tope: int | None = None
         monto = _formatear_valor(fila[i_monto], columnas[i_monto], unidad)
         fecha = _fecha_corta(fila[i_fecha])
         lineas.append(f"• *{descripcion}* — {monto} · {fecha}")
+        lineas.append("")
     if tope and len(filas) > tope:
         restantes = len(filas) - tope
         lineas.extend(("", f"Hay {restantes} movimientos más. Solicite el Excel para verlos completos."))
-    return "\n".join(lineas)
+    return "\n".join(lineas).rstrip()
 
 
 def _resultado_serie_temporal(columnas, filas, unidad: str):
@@ -749,7 +751,8 @@ def _resultado_serie_temporal(columnas, filas, unidad: str):
                 f"{_formatear_valor(fila[i_diferencia], columnas[i_diferencia], unidad)}"
             )
         lineas.append(detalle)
-    return "\n".join(lineas)
+        lineas.append("")
+    return "\n".join(lineas).rstrip()
 
 
 def _resultado_lista(columnas, filas, unidad: str, tope: int | None = None):
@@ -784,9 +787,10 @@ def _resultado_lista(columnas, filas, unidad: str, tope: int | None = None):
         lineas.append(f"• *{encabezado}*")
         if extras:
             lineas.append("  " + " · ".join(extras))
+        lineas.append("")
     if tope and len(filas) > tope:
         lineas.extend(("", f"Se omitieron {len(filas) - tope} registros."))
-    return "\n".join(lineas)
+    return "\n".join(lineas).rstrip()
 
 
 _PEDIDO_ANALITICO = re.compile(
