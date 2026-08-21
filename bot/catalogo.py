@@ -168,6 +168,34 @@ class Contexto:
     error_lectura: bool = False
 
 
+def nombres_habilitados(ctx: Contexto) -> list[str]:
+    """Nombres lógicos, legibles y únicos de las tablas permitidas."""
+    nombres = []
+    vistos = set()
+    for tabla in getattr(ctx, "permitidas", []) or []:
+        nombre = str(getattr(tabla, "tabla_logica", "") or "").strip()
+        nombre = " ".join(nombre.replace("_", " ").split())
+        clave = nombre.lower()
+        if nombre and clave not in vistos:
+            vistos.add(clave)
+            nombres.append(nombre)
+    return nombres
+
+
+def resumir_habilitados(ctx: Contexto, tope: int = 8) -> str:
+    """Lista breve para mensajes al usuario, derivada solo del catálogo."""
+    nombres = nombres_habilitados(ctx)
+    if not nombres:
+        return ""
+    limite = max(1, int(tope))
+    visibles = nombres[:limite]
+    if len(nombres) > limite:
+        return ", ".join(visibles) + " y otras tablas habilitadas"
+    if len(visibles) == 1:
+        return visibles[0]
+    return ", ".join(visibles[:-1]) + " y " + visibles[-1]
+
+
 def _leer_filas_catalogo(cliente: dict) -> tuple[list, bool, bool]:
     """
     Devuelve (filas, hay_columna_instruccion, hubo_error). Robusto a un

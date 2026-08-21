@@ -52,7 +52,7 @@ app = FastAPI(title="FACHAVI — WhatsApp bot (Meta Cloud API)")
 # prendido hace tres meses" en algo que se ve en dos segundos.
 _AVISOS_ARRANQUE = config.revisar_arranque_bot()
 
-_SALUDO = "Hola. Envíe su consulta sobre los datos (ventas, inventario…)."
+_SALUDO = "Hola. Envíe su consulta sobre los datos habilitados para su empresa."
 _MEDIA_NO_SOPORTADO = (
     "Entiendo mensajes de texto y notas de voz, pero todavía no leo el contenido "
     "de fotos o archivos adjuntos. Escriba la consulta o agréguela como "

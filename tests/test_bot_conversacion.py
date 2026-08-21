@@ -2,7 +2,8 @@
 
 from types import SimpleNamespace
 
-from bot import intencion, nl2sql
+from bot import catalogo, intencion, nl2sql
+from bot import responder as R
 
 
 def test_una_respuesta_literal_inventada_no_cuenta_como_consulta():
@@ -103,6 +104,44 @@ def test_pedir_valores_de_venta_promedio_sigue_siendo_consulta_de_datos():
     ) == "datos"
 
 
+def test_temas_del_bot_salen_de_las_tablas_habilitadas_del_catalogo():
+    ctx = SimpleNamespace(permitidas=[
+        SimpleNamespace(tabla_logica="excursiones"),
+        SimpleNamespace(tabla_logica="asignaciones_transporte"),
+        SimpleNamespace(tabla_logica="pagos"),
+    ])
+
+    assert catalogo.nombres_habilitados(ctx) == [
+        "excursiones", "asignaciones transporte", "pagos",
+    ]
+    assert catalogo.resumir_habilitados(ctx) == (
+        "excursiones, asignaciones transporte y pagos"
+    )
+    assert R._saludo(catalogo.resumir_habilitados(ctx)) == (
+        "Hola. Soy su asistente de datos. Puede consultarme sobre excursiones, "
+        "asignaciones transporte y pagos."
+    )
+
+
+def test_una_tabla_habilitada_clasifica_el_tema_sin_vocabulario_fijo():
+    assert intencion.clasificar(
+        "¿De qué mes son las excursiones?", [],
+        tablas_habilitadas=["excursiones", "reservas"],
+    ) == "datos"
+
+
+def test_no_respondible_menciona_los_temas_del_catalogo():
+    texto = nl2sql.redactar_respuesta(
+        "¿Cuál fue la temperatura?",
+        ["nota"],
+        [("NO_RESPONDIBLE",)],
+        temas_habilitados="excursiones, reservas y pagos",
+    )
+
+    assert "excursiones, reservas y pagos" in texto
+    assert "ventas o inventario" not in texto
+
+
 def test_respuesta_meta_es_profesional_y_reintenta_si_se_corta(monkeypatch):
     llamadas = []
     respuestas = iter([
@@ -123,7 +162,10 @@ def test_respuesta_meta_es_profesional_y_reintenta_si_se_corta(monkeypatch):
         return next(respuestas)
 
     monkeypatch.setattr(intencion.llm, "generar_texto", generar)
-    texto = intencion.responder_conversacional("Repita la explicación", [])
+    texto = intencion.responder_conversacional(
+        "Repita la explicación", [],
+        temas_habilitados="excursiones, reservas y pagos",
+    )
 
     assert texto == "La respuesta completa es esta."
     assert len(llamadas) == 2
@@ -132,6 +174,7 @@ def test_respuesta_meta_es_profesional_y_reintenta_si_se_corta(monkeypatch):
     assert "Trate al usuario de usted" in llamadas[0]["system"]
     assert "No use jerga" in llamadas[0]["system"]
     assert "No repita la lista completa" in llamadas[0]["system"]
+    assert "TEMAS HABILITADOS: excursiones, reservas y pagos" in llamadas[0]["system"]
 
 
 def test_no_envia_fragmento_si_gemini_corta_tambien_el_reintento(monkeypatch):

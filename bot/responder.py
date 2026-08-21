@@ -80,11 +80,16 @@ _ADJUNTO_FALLO = (
     "solicítelo nuevamente.)"
 )
 _OLVIDADO = "Listo. Borré el historial de esta conversación. Podemos empezar de cero."
-_SALUDO = (
-    "Hola. Soy su asistente de datos. Puede consultarme sobre ventas o "
-    "inventario; por ejemplo: «¿Cuál fue el producto más vendido?» o "
-    "«¿Cuánto vendimos ayer?»."
-)
+
+
+def _mensaje_capacidades(temas: str) -> str:
+    if temas:
+        return f"Puede consultarme sobre {temas}."
+    return "Puede consultarme sobre los datos habilitados para su empresa."
+
+
+def _saludo(temas: str) -> str:
+    return f"Hola. Soy su asistente de datos. {_mensaje_capacidades(temas)}"
 
 # Comandos para borrar la memoria del propio numero.
 #
@@ -218,32 +223,47 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     # La memoria es best-effort: si falla, seguimos sin historial.
     historial = memoria.cargar_historial(cliente, numero)
 
+    # Se carga una sola vez y se reutiliza para gobernanza, clasificación y
+    # mensajes. Así el bot describe las tablas realmente habilitadas para este
+    # cliente, sin una lista fija de ventas/inventario ni una segunda lectura.
+    ctx = catalogo.construir_contexto(cliente)
+    tablas_habilitadas = catalogo.nombres_habilitados(ctx)
+    temas_habilitados = catalogo.resumir_habilitados(ctx)
+
     # Un pedido de archivo es una accion de datos aunque el texto sea tan corto
     # como "en PDF" o "si, ese". Resolverlo antes evita gastar una llamada en
     # clasificarlo como charla y perder el resultado al que hace referencia.
     fmt_solicitado = formato.detectar_con_contexto(pregunta, historial)
     intent = (
         "datos" if fmt_solicitado != formato.TEXTO
-        else intencion.clasificar(pregunta, historial)
+        else intencion.clasificar(
+            pregunta, historial, tablas_habilitadas=tablas_habilitadas,
+        )
     )
     logger.info("[%s] intencion=%s", cid, intent)
 
     if intent == "saludo":
-        respuesta = Respuesta(_SALUDO)
+        respuesta = Respuesta(_saludo(temas_habilitados))
     elif intent == "meta":
         # Pregunta sobre la conversacion: se responde con el historial, sin base.
         try:
             respuesta = Respuesta(
-                intencion.responder_conversacional(pregunta, historial)
+                intencion.responder_conversacional(
+                    pregunta, historial,
+                    temas_habilitados=temas_habilitados,
+                )
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[%s] error respondiendo meta: %s", cid, e)
-            respuesta = Respuesta("No pude procesar eso. Puede hacer una consulta "
-                                  "sobre sus datos de ventas o inventario.")
+            respuesta = Respuesta(
+                "No pude procesar eso. "
+                + _mensaje_capacidades(temas_habilitados)
+            )
     else:  # "datos"
         respuesta = _responder_datos(
             cliente, numero, pregunta, historial,
             fmt_solicitado=fmt_solicitado,
+            ctx=ctx,
         )
 
     # Guardar el intercambio para dar continuidad a los proximos mensajes.
@@ -262,10 +282,11 @@ def responder(numero: str, pregunta: str) -> Respuesta:
 
 
 def _responder_datos(cliente: dict, numero: str, pregunta: str,
-                     historial: list, fmt_solicitado: str | None = None) -> Respuesta:
+                     historial: list, fmt_solicitado: str | None = None,
+                     ctx=None) -> Respuesta:
     cid = cliente["cliente_id"]
 
-    ctx = catalogo.construir_contexto(cliente)
+    ctx = ctx or catalogo.construir_contexto(cliente)
     if ctx.error_lectura:
         logger.error("[%s] no se pudo leer el catalogo; no se responde con datos", cid)
         return Respuesta(_SIN_CATALOGO)
@@ -412,6 +433,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             texto = nl2sql.redactar_respuesta(
                 pregunta, columnas, muestra, historial=historial, sql=sql,
                 unidad=unidad_kpi,
+                temas_habilitados=catalogo.resumir_habilitados(ctx),
             )
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error redactando respuesta: %s", cid, e)

@@ -88,8 +88,9 @@ _SISTEMA_META = (
     "- Resumen: citar el historial como historial = OK. Defender una cifra no "
     "verificada o inventar datos nuevos = PROHIBIDO.\n"
     "\n"
-    "- Si preguntan qué puede hacer, explique brevemente que responde consultas sobre los "
-    "datos de ventas/inventario que tengan habilitados, con un par de ejemplos. "
+    "- Si preguntan qué puede hacer, use la lista TEMAS HABILITADOS agregada al "
+    "final del sistema. Explique brevemente que responde consultas sobre esos "
+    "datos, con un par de ejemplos pertinentes. "
     "Mencione que además puede enviar el resultado como GRAFICO, EXCEL o PDF.\n"
     "- NUNCA diga que no puede generar archivos ni que los copien a mano: si el "
     "usuario pide un Excel, un grafico o un PDF, lo unico que tiene que hacer es "
@@ -154,6 +155,16 @@ def _menciona_datos(texto: str) -> bool:
         texto,
     ))
 
+
+def _menciona_tabla_habilitada(texto: str, tablas_habilitadas=None) -> bool:
+    """True cuando la pregunta nombra una tabla autorizada por `_catalogo`."""
+    for tabla in tablas_habilitadas or []:
+        nombre = _normalizar(str(tabla)).replace("_", " ")
+        nombre = " ".join(nombre.split())
+        if nombre and re.search(rf"\b{re.escape(nombre)}\b", texto):
+            return True
+    return False
+
 # Verbos de accion que SIEMPRE son 'datos', aunque el contexto parezca meta.
 # Atajo sin LLM: evita que "calcula el crecimiento quincenal" vaya a meta.
 _VERBOS_DATOS = (
@@ -179,7 +190,7 @@ def _historial_texto(historial, tope=8) -> str:
     return "\n".join(f"{etq.get(t['rol'], t['rol'])}: {t['contenido']}" for t in ult)
 
 
-def clasificar(pregunta: str, historial=None) -> str:
+def clasificar(pregunta: str, historial=None, tablas_habilitadas=None) -> str:
     """Devuelve 'datos' | 'meta' | 'saludo'. Ante error o duda, 'datos'."""
     if not config.BOT_INTENCION:
         return "datos"
@@ -198,6 +209,8 @@ def clasificar(pregunta: str, historial=None) -> str:
     # evita responder con la misma lista de filas que el usuario acaba de ver.
     if _pregunta_explicativa(limpia):
         return "meta"
+    if _menciona_tabla_habilitada(limpia, tablas_habilitadas):
+        return "datos"
     if _menciona_datos(limpia):
         return "datos"
 
@@ -247,6 +260,8 @@ def clasificar(pregunta: str, historial=None) -> str:
     try:
         contenido = (
             f"Conversacion reciente:\n{_historial_texto(historial)}\n\n"
+            f"Tablas habilitadas por el catalogo:\n"
+            f"{', '.join(tablas_habilitadas or []) or '(ninguna)'}\n\n"
             f"Ultimo mensaje del usuario:\n{pregunta}\n\n"
             "Etiqueta (datos/meta/saludo):"
         )
@@ -272,13 +287,19 @@ def clasificar(pregunta: str, historial=None) -> str:
         return "datos"
 
 
-def responder_conversacional(pregunta: str, historial=None) -> str:
+def responder_conversacional(pregunta: str, historial=None,
+                             temas_habilitados: str = "") -> str:
     """Responde una pregunta 'meta' usando SOLO el historial. Sin tocar la base."""
     from bot.nl2sql import (_historial_a_messages, contexto_temporal,
                             limpiar_arte_ascii)
     messages = _historial_a_messages(historial)
     messages.append({"role": "user", "content": pregunta})
-    sistema = _SISTEMA_META + "\n\n" + contexto_temporal()
+    temas = temas_habilitados or "los datos habilitados para esta empresa"
+    sistema = (
+        _SISTEMA_META
+        + f"\n\nTEMAS HABILITADOS: {temas}."
+        + "\n\n" + contexto_temporal()
+    )
     resp = llm.generar_texto(
         config.BOT_MODELO_RESPUESTA,
         messages,

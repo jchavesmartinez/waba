@@ -938,7 +938,7 @@ def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | Non
     return _resultado_lista(columnas, filas, unidad, tope)
 
 def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
-                       unidad: str = "") -> str:
+                       unidad: str = "", temas_habilitados: str = "") -> str:
     """
     Convierte el SELECT en texto sin permitir una segunda interpretacion numerica.
 
@@ -949,8 +949,11 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
     el archivo.
     """
     if len(filas) == 1 and len(columnas) == 1 and str(filas[0][0]) == "NO_RESPONDIBLE":
-        return ("No puedo responder eso con los datos habilitados para este "
-                "chat. Puede consultar sobre ventas o inventario.")
+        temas = temas_habilitados or "los datos habilitados para su empresa"
+        return (
+            "No puedo responder esa consulta con los datos habilitados para "
+            f"este chat. Puede consultarme sobre {temas}."
+        )
     if filas and _es_pedido_analitico(pregunta):
         try:
             return _redactar_analisis(pregunta, columnas, filas, sql=sql)
