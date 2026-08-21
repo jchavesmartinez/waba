@@ -33,6 +33,7 @@ Limites de Meta que importan aca:
 import logging
 import mimetypes
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -54,6 +55,14 @@ _TIMEOUT_MEDIA = httpx.Timeout(60.0, connect=10.0)
 # vencido o numero fuera de la ventana de 24 h no mejoran esperando.
 _REINTENTOS = 3
 _ESPERA_BASE_SEG = 1.5
+
+
+@dataclass(frozen=True)
+class EnvioAdjunto:
+    """Identificadores necesarios para confirmar la entrega posteriormente."""
+
+    message_id: str
+    media_id: str
 
 
 def _url(recurso: str = "messages", numero_origen: str = "") -> str:
@@ -127,8 +136,8 @@ def _fragmentar_texto(texto: str, tope: int | None = None) -> list[str]:
     return fragmentos or [""]
 
 
-def _post_mensaje(payload: dict, descripcion: str,
-                  numero_origen: str = "") -> bool:
+def _post_mensaje_id(payload: dict, descripcion: str,
+                     numero_origen: str = "") -> str:
     """
     Manda un payload a /messages con la politica de reintentos de arriba.
 
@@ -150,13 +159,24 @@ def _post_mensaje(payload: dict, descripcion: str,
                 logger.error("No se pudo enviar %s a %s tras %d intentos; el usuario "
                              "no va a recibir respuesta.", descripcion, destino,
                              _REINTENTOS)
-                return False
+                return ""
             time.sleep(_ESPERA_BASE_SEG * intento)
             continue
 
         if r.status_code < 400:
-            logger.info("Enviado %s a %s (%s)", descripcion, destino, r.status_code)
-            return True
+            mensajes = (r.json() or {}).get("messages") or []
+            message_id = str(
+                (mensajes[0] if mensajes else {}).get("id", "") or ""
+            ).strip()
+            if not message_id:
+                logger.error(
+                    "Meta aceptó %s para %s pero no devolvió message_id: %s",
+                    descripcion, destino, r.text[:300],
+                )
+                return ""
+            logger.info("Enviado %s a %s (%s, message_id=%s)",
+                        descripcion, destino, r.status_code, message_id)
+            return message_id
 
         # El cuerpo de error de Meta trae el motivo (token vencido, numero fuera
         # de la ventana de 24 h, phone_number_id malo, etc.). Va al log completo.
@@ -168,10 +188,16 @@ def _post_mensaje(payload: dict, descripcion: str,
             r.text[:500],
         )
         if not recuperable or intento == _REINTENTOS:
-            return False
+            return ""
         time.sleep(_ESPERA_BASE_SEG * intento)
 
-    return False
+    return ""
+
+
+def _post_mensaje(payload: dict, descripcion: str,
+                  numero_origen: str = "") -> bool:
+    """Compatibilidad para textos: True significa aceptado, no entregado."""
+    return bool(_post_mensaje_id(payload, descripcion, numero_origen))
 
 
 def enviar_texto(numero_destino: str, texto: str,
@@ -262,7 +288,7 @@ def subir_media(contenido: bytes, nombre: str, mime: str,
 
 
 def enviar_imagen(numero_destino: str, media_id: str, caption: str = "",
-                  numero_origen: str = "") -> bool:
+                  numero_origen: str = "") -> str:
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -272,11 +298,11 @@ def enviar_imagen(numero_destino: str, media_id: str, caption: str = "",
     }
     if caption:
         payload["image"]["caption"] = _recortar(caption, _tope_caption())
-    return _post_mensaje(payload, "imagen", numero_origen)
+    return _post_mensaje_id(payload, "imagen", numero_origen)
 
 
 def enviar_documento(numero_destino: str, media_id: str, nombre: str,
-                     caption: str = "", numero_origen: str = "") -> bool:
+                     caption: str = "", numero_origen: str = "") -> str:
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -289,13 +315,13 @@ def enviar_documento(numero_destino: str, media_id: str, nombre: str,
     }
     if caption:
         payload["document"]["caption"] = _recortar(caption, _tope_caption())
-    return _post_mensaje(payload, "documento", numero_origen)
+    return _post_mensaje_id(payload, "documento", numero_origen)
 
 
 def enviar_adjunto(numero_destino: str, adjunto,
-                   numero_origen: str = "") -> bool:
+                   numero_origen: str = "") -> EnvioAdjunto | None:
     """
-    Sube y manda un bot.salida.Adjunto de una. Devuelve True si llego.
+    Sube y manda un adjunto. Devuelve los IDs si Meta aceptó el mensaje.
 
     Si la subida falla no se intenta mandar el mensaje: sin media_id no hay nada
     que enviar y el POST devolveria un 400 que no explica la causa real.
@@ -303,12 +329,29 @@ def enviar_adjunto(numero_destino: str, adjunto,
     media_id = subir_media(adjunto.contenido, adjunto.nombre, adjunto.mime,
                            numero_origen)
     if not media_id:
-        return False
+        return None
     if adjunto.tipo == "image":
-        return enviar_imagen(numero_destino, media_id, adjunto.caption,
-                             numero_origen)
-    return enviar_documento(numero_destino, media_id, adjunto.nombre,
-                            adjunto.caption, numero_origen)
+        message_id = enviar_imagen(
+            numero_destino, media_id, adjunto.caption, numero_origen,
+        )
+    else:
+        message_id = enviar_documento(
+            numero_destino, media_id, adjunto.nombre,
+            adjunto.caption, numero_origen,
+        )
+    if not message_id:
+        return None
+    return EnvioAdjunto(message_id=message_id, media_id=media_id)
+
+
+def reintentar_adjunto(numero_destino: str, media_id: str, tipo: str,
+                       nombre: str, numero_origen: str = "") -> str:
+    """Reenvía un media_id existente sin volver a subir los bytes."""
+    if tipo == "image":
+        return enviar_imagen(numero_destino, media_id,
+                             numero_origen=numero_origen)
+    return enviar_documento(numero_destino, media_id, nombre,
+                            numero_origen=numero_origen)
 
 
 def descargar_media(media_id: str) -> tuple[bytes, str]:

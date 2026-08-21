@@ -363,6 +363,16 @@ BOT_ADJUNTO_PDF_MAX_FILAS = int(os.environ.get("BOT_ADJUNTO_PDF_MAX_FILAS", "60"
 # una red movil tica es una descarga que el cliente no va a completar.
 BOT_ADJUNTO_MAX_MB = float(os.environ.get("BOT_ADJUNTO_MAX_MB", "4.5"))
 
+# Un 200 de /messages solo significa "aceptado". Si el webhook posterior trae
+# status=failed, se reutiliza el media_id y se intenta enviar una vez más. El
+# reclamo vive en Neon para que dos workers no dupliquen el reintento.
+BOT_ADJUNTO_REINTENTOS_ENTREGA = int(os.environ.get(
+    "BOT_ADJUNTO_REINTENTOS_ENTREGA", "1",
+))
+BOT_ADJUNTO_ENTREGAS_TTL_DIAS = int(os.environ.get(
+    "BOT_ADJUNTO_ENTREGAS_TTL_DIAS", "30",
+))
+
 # PDF: agrega reportlab al build. Ponelo en "no" si no lo vas a usar y preferis
 # un contenedor mas liviano; los pedidos de PDF se sirven como Excel.
 BOT_ADJUNTO_PDF = _es_si(os.environ.get("BOT_ADJUNTO_PDF", "si"))

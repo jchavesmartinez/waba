@@ -36,7 +36,7 @@ from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 import config
 import registry
-from bot import audio, whatsapp
+from bot import audio, entregas, whatsapp
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -177,8 +177,14 @@ def _atender(numero: str, texto: str, numero_origen: str = "") -> None:
     if respuesta.texto:
         whatsapp.enviar_texto(numero, respuesta.texto, numero_origen)
 
+    try:
+        cliente = registry.resolver(numero) if respuesta.adjuntos else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("No se pudo resolver cliente para seguir adjuntos: %s", e)
+        cliente = None
     for adj in respuesta.adjuntos:
-        if not whatsapp.enviar_adjunto(numero, adj, numero_origen):
+        envio = whatsapp.enviar_adjunto(numero, adj, numero_origen)
+        if not envio:
             # Subir o mandar el archivo fallo, pero el texto ya salio. Se avisa
             # para que el usuario no quede esperando un archivo que no llega.
             whatsapp.enviar_texto(
@@ -187,6 +193,86 @@ def _atender(numero: str, texto: str, numero_origen: str = "") -> None:
                 "datos). Pedímelo de nuevo en un momento.",
                 numero_origen,
             )
+            continue
+        if not cliente:
+            logger.warning(
+                "Adjunto %s aceptado, pero no se pudo resolver el cliente para "
+                "seguir su entrega.", adj.nombre,
+            )
+            continue
+        pendiente = entregas.registrar(
+            cliente, numero, numero_origen,
+            envio.message_id, envio.media_id,
+            adj.tipo, adj.nombre, adj.mime,
+        )
+        if pendiente:
+            _reintentar_entrega(cliente, pendiente)
+
+
+def _reintentar_entrega(cliente: dict, pendiente: entregas.Reintento) -> None:
+    """Ejecuta el único reintento reclamado transaccionalmente en Neon."""
+    nuevo_id = whatsapp.reintentar_adjunto(
+        pendiente.numero, pendiente.media_id, pendiente.tipo,
+        pendiente.nombre, pendiente.phone_number_id,
+    )
+    if not nuevo_id:
+        entregas.vincular_reintento(
+            cliente, pendiente.message_id, "",
+            error="Meta rechazó el reintento inmediato del adjunto",
+        )
+        whatsapp.enviar_texto(
+            pendiente.numero,
+            f"No pude entregar el archivo {pendiente.nombre}. "
+            "Inténtelo nuevamente en un momento.",
+            pendiente.phone_number_id,
+        )
+        return
+
+    entregas.vincular_reintento(
+        cliente, pendiente.message_id, nuevo_id,
+    )
+    segundo = entregas.registrar(
+        cliente, pendiente.numero, pendiente.phone_number_id,
+        nuevo_id, pendiente.media_id, pendiente.tipo,
+        pendiente.nombre, pendiente.mime,
+        intentos=pendiente.intentos + 1,
+        reintento_de=pendiente.message_id,
+    )
+    # En la carrera extrema donde el segundo status llegó antes del registro,
+    # registrar() puede devolver ya el fallo reclamado. No debería haber un
+    # tercer envío: la política permite solo un reintento.
+    if segundo:
+        logger.warning("Se descartó un reintento adicional de %s", nuevo_id)
+
+
+def _procesar_estado_salida(estado: dict, numero_origen: str = "") -> None:
+    """Procesa sent/delivered/read/failed recibidos de Meta."""
+    numero = str(estado.get("recipient_id", "") or "").strip()
+    if not numero:
+        logger.warning("Status de WhatsApp sin recipient_id: %s", estado)
+        return
+    try:
+        cliente = registry.resolver(numero)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("No se pudo resolver cliente para status de %s: %s",
+                       numero, e)
+        return
+    if not cliente:
+        logger.warning("Status de adjunto para número no registrado: %s", numero)
+        return
+
+    resultado = entregas.actualizar_estado(cliente, estado)
+    if not resultado:
+        return
+    if resultado.reintento:
+        _reintentar_entrega(cliente, resultado.reintento)
+    elif resultado.fallo_final:
+        whatsapp.enviar_texto(
+            resultado.numero,
+            f"No pude entregar el archivo {resultado.nombre} después de "
+            "reintentarlo. Solicítelo nuevamente en un momento.",
+            numero_origen,
+        )
 
 
 def _atender_audio(numero: str, media_id: str, mime_webhook: str = "",
@@ -272,14 +358,16 @@ async def webhook(request: Request, tareas: BackgroundTasks):
         return Response(status_code=200)  # 200 igual: no queremos reintentos
 
     # Estructura: object=whatsapp_business_account -> entry[] -> changes[] ->
-    # value{ messages[], statuses[], ... }. Los 'statuses' (entregado/leido) y
-    # cualquier value sin 'messages' se ignoran en silencio.
+    # value{ messages[], statuses[], ... }. Los statuses confirman de forma
+    # asíncrona si un adjunto fue enviado, entregado, leído o falló.
     for entry in data.get("entry", []):
         for cambio in entry.get("changes", []):
             valor = cambio.get("value", {})
             # De que numero NUESTRO llego el mensaje. Se usa para responder por
             # el mismo, en vez de por el de la variable de entorno.
             origen = (valor.get("metadata") or {}).get("phone_number_id", "")
+            for estado in valor.get("statuses", []) or []:
+                tareas.add_task(_procesar_estado_salida, estado, origen)
             for msg in valor.get("messages", []) or []:
                 msg_id = msg.get("id", "")
                 if _ya_procesado(msg_id):
