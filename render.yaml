@@ -255,6 +255,45 @@ services:
       # Usa el pie de una foto/archivo entrante como pregunta.
       - key: BOT_MEDIA_ENTRANTE
         value: "si"
+      # --- Correo saliente con la cuenta Gmail de cada usuario (OAuth) ---
+      # Conserva los archivos en el esquema privado _bot durante 72 h. El bot
+      # siempre muestra destinatario/asunto/texto y exige un "si" separado.
+      - key: BOT_EMAIL
+        value: "si"
+      - key: BOT_EMAIL_ARTEFACTO_TTL_HORAS
+        value: "72"
+      - key: BOT_EMAIL_CONFIRMACION_MINUTOS
+        value: "30"
+      - key: BOT_EMAIL_MAX_ADJUNTO_MB
+        value: "25"
+      - key: BOT_EMAIL_TIMEOUT_SEGUNDOS
+        value: "30"
+      - key: BOT_EMAIL_MAX_POR_HORA
+        value: "10"
+      - key: BOT_EMAIL_MAX_POR_DIA
+        value: "50"
+      - key: OAUTH_ENLACE_TTL_MINUTOS
+        value: "10"
+      - key: OAUTH_HTTP_TIMEOUT_SEGUNDOS
+        value: "30"
+      # URL publica del servicio, sin barra final (ideal: app.fachavi.com).
+      - key: APP_PUBLIC_URL
+        sync: false
+      - key: APP_TERMS_URL
+        sync: false
+      - key: APP_PRIVACY_URL
+        sync: false
+      - key: APP_TERMS_VERSION
+        value: "2026-08"
+      # Credenciales del OAuth Client tipo Web application en Google Cloud.
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
+      # Secreto aleatorio largo (minimo 32 caracteres); cifra refresh tokens y
+      # firma enlaces de conexion. Rotarlo invalida las conexiones existentes.
+      - key: OAUTH_TOKEN_KEY
+        sync: false
       # --- Notas de voz entrantes ---
       # Gemini transcribe el audio y luego procesa el texto con el mismo flujo.
       - key: BOT_AUDIO_ENTRANTE

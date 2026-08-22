@@ -5,6 +5,7 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1                # llamada saliente al Graph API de Meta (enviar msg)
+cryptography==50.0.0          # AES-GCM para cifrar refresh tokens de Google OAuth
 google-genai==2.14.0         # Gemini en Vertex AI: intencion, KPIs, SQL y voz
 sqlglot==30.14.0             # valida el SQL generado antes de ejecutarlo
 imageio-ffmpeg==0.6.0        # binario ffmpeg: convierte OGG/Opus de WhatsApp

@@ -31,12 +31,15 @@ import logging
 import threading
 import time
 from collections import OrderedDict, deque
+from html import escape
+from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 import config
 import registry
-from bot import audio, entregas, whatsapp
+from bot import audio, correo, entregas, whatsapp
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -341,6 +344,88 @@ def verificar(request: Request):
 
     logger.warning("Verificacion de webhook fallida (token no coincide).")
     return Response(content="forbidden", status_code=403)
+
+
+@app.get("/oauth/google/iniciar", response_class=HTMLResponse)
+def oauth_google_iniciar(token: str = ""):
+    """Aviso propio de privacidad/terminos antes de entrar al consentimiento Google."""
+    if not token or not correo.validar_enlace_oauth(token):
+        return HTMLResponse(
+            "<h1>Enlace inválido o vencido</h1><p>Solicite uno nuevo desde WhatsApp.</p>",
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
+    html = f"""
+    <!doctype html><html lang="es"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Conectar Gmail con Fachavi</title></head>
+    <body style="font-family:system-ui;max-width:620px;margin:48px auto;padding:0 20px;line-height:1.5">
+      <h1>Conectar Gmail con Fachavi</h1>
+      <p>Fachavi solicitará únicamente permiso para enviar los correos que usted
+      confirme desde WhatsApp. No podrá leer ni eliminar mensajes de su bandeja.</p>
+      <p>El refresh token se almacenará cifrado y puede revocar la conexión en
+      cualquier momento escribiendo <b>desconectar mi correo</b>.</p>
+      <form method="post" action="/oauth/google/autorizar">
+        <input type="hidden" name="token" value="{escape(token)}">
+        <label><input type="checkbox" name="acepto" value="si" required>
+        Acepto los <a href="{escape(config.APP_TERMS_URL)}" target="_blank">Términos</a>
+        y la <a href="{escape(config.APP_PRIVACY_URL)}" target="_blank">Política de privacidad</a>.</label>
+        <p><button type="submit" style="background:#1769e0;color:white;border:0;
+        padding:12px 18px;border-radius:8px;font-weight:600">Continuar con Google</button></p>
+      </form>
+      <small>Este enlace es personal, de un solo uso y vence pronto.</small>
+    </body></html>
+    """
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/oauth/google/autorizar")
+async def oauth_google_autorizar(request: Request):
+    formulario = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+    token = (formulario.get("token") or [""])[0]
+    acepto = (formulario.get("acepto") or [""])[0]
+    if acepto != "si":
+        return HTMLResponse(
+            "<h1>Debe aceptar los términos para continuar</h1>",
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
+    destino = correo.url_autorizacion_google(token)
+    if not destino:
+        return HTMLResponse(
+            "<h1>Enlace inválido o vencido</h1><p>Solicite uno nuevo desde WhatsApp.</p>",
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
+    return RedirectResponse(destino, status_code=302,
+                            headers={"Cache-Control": "no-store"})
+
+
+@app.get("/oauth/google/callback", response_class=HTMLResponse)
+def oauth_google_callback(state: str = "", code: str = "", error: str = ""):
+    if error or not state or not code:
+        return HTMLResponse(
+            "<h1>Conexión cancelada</h1><p>No se concedió acceso a Gmail.</p>",
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        resultado = correo.completar_oauth_google(state, code)
+        whatsapp.enviar_texto(
+            resultado.numero,
+            f"✅ Gmail conectado: {resultado.correo}. Ya puede pedirme que envíe un archivo por correo.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("No se pudo completar Google OAuth: %s", exc)
+        return HTMLResponse(
+            "<h1>No se pudo conectar Gmail</h1><p>El enlace pudo vencer o Google no concedió el permiso. Solicite otro desde WhatsApp.</p>",
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
+    return HTMLResponse(
+        f"<h1>Gmail conectado</h1><p>La cuenta <b>{escape(resultado.correo)}</b> quedó conectada. Puede cerrar esta ventana y volver a WhatsApp.</p>",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/webhook")

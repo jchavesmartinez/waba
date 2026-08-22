@@ -389,6 +389,42 @@ BOT_ADJUNTO_CSV = _es_si(os.environ.get("BOT_ADJUNTO_CSV", "no"))
 BOT_MEDIA_ENTRANTE = _es_si(os.environ.get("BOT_MEDIA_ENTRANTE", "si"))
 
 # --------------------------------------------------------------------------
+# CORREO SALIENTE: cada numero conecta su propia cuenta mediante Google OAuth.
+# Los archivos se guardan temporalmente en el esquema privado _bot y solo
+# salen tras una confirmacion separada del mismo numero.
+# --------------------------------------------------------------------------
+BOT_EMAIL = _es_si(os.environ.get("BOT_EMAIL", "no"))
+APP_PUBLIC_URL = (
+    os.environ.get("APP_PUBLIC_URL", "").strip().rstrip("/")
+    or os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+)
+APP_TERMS_URL = os.environ.get("APP_TERMS_URL", "").strip()
+APP_PRIVACY_URL = os.environ.get("APP_PRIVACY_URL", "").strip()
+APP_TERMS_VERSION = os.environ.get("APP_TERMS_VERSION", "2026-08").strip()
+GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+OAUTH_TOKEN_KEY = os.environ.get("OAUTH_TOKEN_KEY", "").strip()
+GOOGLE_OAUTH_REDIRECT_URI = (
+    f"{APP_PUBLIC_URL}/oauth/google/callback" if APP_PUBLIC_URL else ""
+)
+OAUTH_ENLACE_TTL_MINUTOS = int(os.environ.get("OAUTH_ENLACE_TTL_MINUTOS", "10"))
+OAUTH_HTTP_TIMEOUT_SEGUNDOS = int(os.environ.get("OAUTH_HTTP_TIMEOUT_SEGUNDOS", "30"))
+BOT_EMAIL_ARTEFACTO_TTL_HORAS = int(os.environ.get(
+    "BOT_EMAIL_ARTEFACTO_TTL_HORAS", "72",
+))
+BOT_EMAIL_CONFIRMACION_MINUTOS = int(os.environ.get(
+    "BOT_EMAIL_CONFIRMACION_MINUTOS", "30",
+))
+BOT_EMAIL_MAX_ADJUNTO_MB = float(os.environ.get(
+    "BOT_EMAIL_MAX_ADJUNTO_MB", "25",
+))
+BOT_EMAIL_TIMEOUT_SEGUNDOS = int(os.environ.get(
+    "BOT_EMAIL_TIMEOUT_SEGUNDOS", "30",
+))
+BOT_EMAIL_MAX_POR_HORA = int(os.environ.get("BOT_EMAIL_MAX_POR_HORA", "10"))
+BOT_EMAIL_MAX_POR_DIA = int(os.environ.get("BOT_EMAIL_MAX_POR_DIA", "50"))
+
+# --------------------------------------------------------------------------
 # NOTAS DE VOZ ENTRANTES: se descargan desde Meta, se transcriben y el texto
 # resultante entra al MISMO flujo de permisos, memoria, KPIs y text-to-SQL.
 # El audio original solo existe en memoria y en un directorio temporal durante
@@ -531,6 +567,33 @@ def revisar_arranque_bot() -> list:
                 "BOT_AUDIO_ENTRANTE=si pero falta imageio-ffmpeg: WhatsApp "
                 "entrega las notas en OGG/Opus y no se podran convertir. "
                 "Reinstala requirements-bot.txt."
+            )
+
+    if BOT_EMAIL:
+        faltan_oauth = [nombre for nombre, valor in (
+            ("APP_PUBLIC_URL", APP_PUBLIC_URL),
+            ("APP_TERMS_URL", APP_TERMS_URL),
+            ("APP_PRIVACY_URL", APP_PRIVACY_URL),
+            ("GOOGLE_OAUTH_CLIENT_ID", GOOGLE_OAUTH_CLIENT_ID),
+            ("GOOGLE_OAUTH_CLIENT_SECRET", GOOGLE_OAUTH_CLIENT_SECRET),
+            ("OAUTH_TOKEN_KEY", OAUTH_TOKEN_KEY),
+        ) if not valor]
+        if faltan_oauth:
+            avisos.append(
+                "BOT_EMAIL=si pero faltan variables de Google OAuth: "
+                + ", ".join(faltan_oauth) + "."
+            )
+        if OAUTH_TOKEN_KEY and len(OAUTH_TOKEN_KEY) < 32:
+            avisos.append(
+                "OAUTH_TOKEN_KEY tiene menos de 32 caracteres; use un secreto "
+                "aleatorio largo para cifrar refresh tokens."
+            )
+        try:
+            __import__("cryptography")
+        except ImportError:
+            avisos.append(
+                "BOT_EMAIL=si pero falta cryptography: no se pueden cifrar los "
+                "tokens OAuth. Reinstala requirements-bot.txt."
             )
 
     if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID):

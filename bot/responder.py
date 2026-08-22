@@ -36,8 +36,8 @@ from collections import defaultdict
 
 import config
 import registry
-from bot import (artefactos, catalogo, formato, intencion, kpis, memoria,
-                 nl2sql, warehouse_ro)
+from bot import (artefactos, catalogo, correo, formato, intencion, kpis,
+                 memoria, nl2sql, warehouse_ro)
 from bot.salida import Respuesta
 from bot.tiempo import fecha_local
 
@@ -223,6 +223,18 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     # La memoria es best-effort: si falla, seguimos sin historial.
     historial = memoria.cargar_historial(cliente, numero)
 
+    # El correo es una ACCION, no una consulta de datos. Se resuelve antes del
+    # catalogo/LLM para que "envia el PDF anterior" no dispare text-to-SQL. La
+    # confirmacion y el archivo temporal viven en Neon, asi que funcionan aun
+    # con varios workers o tras un redeploy.
+    respuesta_correo = correo.procesar_mensaje(cliente, numero, pregunta)
+    if respuesta_correo is not None:
+        memoria.guardar_intercambio(
+            cliente, numero, pregunta, respuesta_correo.texto,
+            sql=respuesta_correo.sql,
+        )
+        return respuesta_correo
+
     # Se carga una sola vez y se reutiliza para gobernanza, clasificación y
     # mensajes. Así el bot describe las tablas realmente habilitadas para este
     # cliente, sin una lista fija de ventas/inventario ni una segunda lectura.
@@ -274,6 +286,7 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     # siguiente ("mandame ese mismo en Excel") tenga contexto de que se envio.
     texto_memoria = respuesta.texto
     if respuesta.adjuntos:
+        correo.guardar_artefactos(cliente, numero, respuesta.adjuntos)
         nombres = ", ".join(a.nombre for a in respuesta.adjuntos)
         texto_memoria = f"{texto_memoria}\n[Se envió el archivo adjunto: {nombres}]"
     memoria.guardar_intercambio(

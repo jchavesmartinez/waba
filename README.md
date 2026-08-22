@@ -242,6 +242,31 @@ tablas permitidas; (2) el SQL se valida antes de ejecutarse y corre en una
 transacción de solo lectura. Aunque algo se colara, Postgres aborta cualquier
 escritura.
 
+### Envío de archivos desde el Gmail de cada usuario
+
+Con `BOT_EMAIL=si`, cada número registrado puede escribir `conectar mi correo`.
+El bot genera un enlace firmado, personal, de un solo uso y diez minutos de
+vigencia. La página propia exige aceptar Términos/Privacidad y luego inicia
+Google OAuth con identidad básica y **solo** `gmail.send`: Fachavi puede enviar,
+pero no leer ni eliminar mensajes. El refresh token queda cifrado con AES-GCM
+en `_bot.conexiones_email` y nunca entra al historial ni a Gemini.
+
+Los PDF, Excel, CSV y gráficos generados quedan disponibles temporalmente en
+`_bot.artefactos`. Un pedido como `envía el PDF anterior a persona@empresa.com,
+asunto: Reporte de marzo y texto: Hola, adjunto el reporte` muestra remitente,
+destinatario, asunto, texto y archivo; exige un `sí` separado del mismo número.
+La reclamación transaccional impide dos confirmaciones y limita cada cuenta a
+10 correos/hora y 50/día. Gmail confirma aceptación con un message ID, no la
+entrega final al servidor destinatario; ante un timeout ambiguo no se reintenta
+automáticamente para evitar duplicados.
+
+Google Cloud debe tener Gmail API habilitada, un OAuth Client tipo Web y el
+callback exacto `https://TU-DOMINIO/oauth/google/callback`. En Render se
+configuran `APP_PUBLIC_URL`, URLs de términos/privacidad,
+`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` y un
+`OAUTH_TOKEN_KEY` aleatorio largo. En producción, `gmail.send` requiere la
+verificación de permiso sensible de Google.
+
 ### Gemini por Vertex AI
 
 Gemini es el proveedor único de IA: clasifica intención, selecciona KPIs,
@@ -359,7 +384,7 @@ para la lista completa de variables.
 > **`PYTHON_VERSION` importa**: si Render usa 3.14, pandas y duckdb no tienen
 > wheels y pip intenta compilarlos desde fuente → el build falla.
 
-### Antes de desplegar, tres cosas que hay que verificar en el panel
+### Antes de desplegar, cosas que hay que verificar en el panel
 
 1. **`SYNC_ARGS` en vacío.** Con `--forzar` todo el sistema de frescura queda
    inerte y cada fuente se recarga 96 veces al día.
@@ -368,6 +393,10 @@ para la lista completa de variables.
    desarrollo local: `BOT_PERMITIR_SIN_FIRMA=si`.)
 3. **`WHATSAPP_TOKEN` permanente**, no el temporal del panel de Meta: ese vence
    en 24 h y el síntoma es que el bot deja de contestar al día siguiente.
+4. Si `BOT_EMAIL=si`, completar las variables de Google OAuth, registrar el
+   callback exacto `APP_PUBLIC_URL/oauth/google/callback` y verificar que
+   términos/privacidad sean públicos. El proyecto en modo Testing solo sirve
+   para pilotos: sus conexiones expiran a los siete días.
 
 El bot revisa las tres al arrancar y deja advertencias de nivel alto en el log;
 también se ven en `GET /salud`.
