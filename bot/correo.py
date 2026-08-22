@@ -47,6 +47,15 @@ _ARCHIVO_RE = re.compile(
     r"\b(?:archivo|adjunto|pdf|excel|xlsx|csv|grafico|grafica|imagen|documento|reporte|informe)\b",
     re.IGNORECASE,
 )
+_GENERAR_RE = re.compile(
+    r"\b(?:crea|crear|cree|genera|generar|genere|haz|haga|arma|armar|arme|"
+    r"prepara|preparar|prepare)\w*\b",
+    re.IGNORECASE,
+)
+_ENVIAR_RE = re.compile(
+    r"\b(?:envi|mand|reenvi|compart)\w*\b",
+    re.IGNORECASE,
+)
 _CONECTAR_RE = re.compile(
     r"\b(?:conectar|conecta|conecte|conectame|vincular|vincula|vincule|vinculame)\b.*"
     r"\b(?:correo|gmail|google|email)\b|"
@@ -413,6 +422,28 @@ def desconectar_google(cliente: dict, numero: str) -> bool:
 def es_pedido(texto_usuario: str) -> bool:
     t = _normalizar(texto_usuario)
     return bool(_PEDIDO_RE.search(t) and (_EMAIL_RE.search(t) or _ARCHIVO_RE.search(t)))
+
+
+def es_generacion_y_correo(texto_usuario: str) -> bool:
+    """Detecta "crea el PDF ... y envialo a ..." en un solo turno."""
+    t = _normalizar(texto_usuario)
+    generar = _GENERAR_RE.search(t)
+    if not generar or not _ARCHIVO_RE.search(t) or not _EMAIL_RE.search(t):
+        return False
+    return bool(_ENVIAR_RE.search(t, generar.end()))
+
+
+def pregunta_para_generar(texto_usuario: str) -> str:
+    """Quita la instruccion de email para que text-to-SQL reciba solo los datos."""
+    t = _normalizar(texto_usuario)
+    generar = _GENERAR_RE.search(t)
+    enviar = _ENVIAR_RE.search(t, generar.end()) if generar else None
+    if not enviar:
+        return texto_usuario
+    pregunta = texto_usuario[:enviar.start()].rstrip(" ,;:-")
+    pregunta = re.sub(r"\s+\b(?:y|luego|despues)\s*$", "", pregunta,
+                      flags=re.IGNORECASE).rstrip(" ,;:-")
+    return pregunta or texto_usuario
 
 
 def _extension_pedida(texto_usuario: str) -> str:

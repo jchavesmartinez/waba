@@ -223,11 +223,24 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     # La memoria es best-effort: si falla, seguimos sin historial.
     historial = memoria.cargar_historial(cliente, numero)
 
+    # Un mismo turno puede pedir las dos acciones: "crea un PDF ... y envialo
+    # a persona@empresa.com". En ese caso primero se consulta/genera el archivo
+    # y solo despues se prepara el borrador. El envio sigue exigiendo un "si"
+    # separado; nunca se salta la confirmacion por combinar las instrucciones.
+    correo_compuesto = correo.es_generacion_y_correo(pregunta)
+    pregunta_datos = (
+        correo.pregunta_para_generar(pregunta)
+        if correo_compuesto else pregunta
+    )
+
     # El correo es una ACCION, no una consulta de datos. Se resuelve antes del
     # catalogo/LLM para que "envia el PDF anterior" no dispare text-to-SQL. La
     # confirmacion y el archivo temporal viven en Neon, asi que funcionan aun
     # con varios workers o tras un redeploy.
-    respuesta_correo = correo.procesar_mensaje(cliente, numero, pregunta)
+    respuesta_correo = (
+        None if correo_compuesto
+        else correo.procesar_mensaje(cliente, numero, pregunta)
+    )
     if respuesta_correo is not None:
         memoria.guardar_intercambio(
             cliente, numero, pregunta, respuesta_correo.texto,
@@ -245,11 +258,11 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     # Un pedido de archivo es una accion de datos aunque el texto sea tan corto
     # como "en PDF" o "si, ese". Resolverlo antes evita gastar una llamada en
     # clasificarlo como charla y perder el resultado al que hace referencia.
-    fmt_solicitado = formato.detectar_con_contexto(pregunta, historial)
+    fmt_solicitado = formato.detectar_con_contexto(pregunta_datos, historial)
     intent = (
         "datos" if fmt_solicitado != formato.TEXTO
         else intencion.clasificar(
-            pregunta, historial, tablas_habilitadas=tablas_habilitadas,
+            pregunta_datos, historial, tablas_habilitadas=tablas_habilitadas,
         )
     )
     logger.info("[%s] intencion=%s", cid, intent)
@@ -261,7 +274,7 @@ def responder(numero: str, pregunta: str) -> Respuesta:
         try:
             respuesta = Respuesta(
                 intencion.responder_conversacional(
-                    pregunta, historial,
+                    pregunta_datos, historial,
                     temas_habilitados=temas_habilitados,
                 )
             )
@@ -273,7 +286,7 @@ def responder(numero: str, pregunta: str) -> Respuesta:
             )
     else:  # "datos"
         respuesta = _responder_datos(
-            cliente, numero, pregunta, historial,
+            cliente, numero, pregunta_datos, historial,
             fmt_solicitado=fmt_solicitado,
             ctx=ctx,
         )
@@ -287,6 +300,11 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     texto_memoria = respuesta.texto
     if respuesta.adjuntos:
         correo.guardar_artefactos(cliente, numero, respuesta.adjuntos)
+        if correo_compuesto:
+            previa_correo = correo.procesar_mensaje(cliente, numero, pregunta)
+            if previa_correo is not None:
+                respuesta.texto = f"{respuesta.texto}\n\n{previa_correo.texto}"
+                texto_memoria = respuesta.texto
         nombres = ", ".join(a.nombre for a in respuesta.adjuntos)
         texto_memoria = f"{texto_memoria}\n[Se envió el archivo adjunto: {nombres}]"
     memoria.guardar_intercambio(

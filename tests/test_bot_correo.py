@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 
 from bot import correo
 from bot import app as app_mod
+from bot import responder as responder_mod
+from bot.salida import Adjunto, Respuesta
 
 
 CLIENTE = {"cliente_id": "cliente_prueba"}
@@ -33,6 +35,68 @@ def test_extrae_destinatario_asunto_y_texto():
     assert destino == "gerente@empresa.com"
     assert asunto == "Marzo"
     assert cuerpo == "Hola, adjunto el reporte"
+
+
+def test_separa_generacion_de_pdf_de_la_instruccion_de_correo():
+    pedido = (
+        "Crea un PDF con las últimas excursiones y sus reservaciones, "
+        "envíaselo a gerente@empresa.com y pon en el cuerpo: Hecho por el bot"
+    )
+    assert correo.es_generacion_y_correo(pedido)
+    pregunta = correo.pregunta_para_generar(pedido)
+    assert "PDF" in pregunta
+    assert "excursiones" in pregunta
+    assert "gerente@empresa.com" not in pregunta
+    assert "cuerpo" not in pregunta
+
+
+def test_turno_compuesto_genera_archivo_y_luego_prepara_borrador(monkeypatch):
+    pedido = (
+        "Crea un PDF con las últimas excursiones, envíaselo a "
+        "gerente@empresa.com y pon en el cuerpo: Prueba"
+    )
+    adjunto = Adjunto(
+        tipo="document", contenido=b"%PDF-prueba", nombre="excursiones.pdf",
+        mime="application/pdf",
+    )
+    contexto = type("Ctx", (), {"permitidas": [], "tablas_reales": {"excursiones"}})()
+    eventos = []
+
+    monkeypatch.setattr(responder_mod.registry, "resolver", lambda _n: CLIENTE)
+    monkeypatch.setattr(responder_mod, "_pasa_tope_diario", lambda _cid: True)
+    monkeypatch.setattr(responder_mod.memoria, "cargar_historial", lambda *_: [])
+    monkeypatch.setattr(responder_mod.memoria, "guardar_intercambio", lambda *_a, **_k: None)
+    monkeypatch.setattr(responder_mod.catalogo, "construir_contexto", lambda _c: contexto)
+    monkeypatch.setattr(responder_mod.catalogo, "nombres_habilitados", lambda _c: ["excursiones"])
+    monkeypatch.setattr(responder_mod.catalogo, "resumir_habilitados", lambda _c: "excursiones")
+    monkeypatch.setattr(
+        responder_mod.formato, "detectar_con_contexto",
+        lambda pregunta, _historial: (
+            responder_mod.formato.PDF if "PDF" in pregunta else responder_mod.formato.TEXTO
+        ),
+    )
+
+    def responder_datos(_cliente, _numero, pregunta, _historial, **_kwargs):
+        eventos.append(("generar", pregunta))
+        return Respuesta("Preparé el PDF.", adjuntos=[adjunto])
+
+    def guardar(_cliente, _numero, adjuntos):
+        eventos.append(("guardar", adjuntos[0].nombre))
+
+    def preparar(_cliente, _numero, texto):
+        eventos.append(("correo", texto))
+        return Respuesta("Confirme el envío a gerente@empresa.com respondiendo *sí*.")
+
+    monkeypatch.setattr(responder_mod, "_responder_datos", responder_datos)
+    monkeypatch.setattr(responder_mod.correo, "guardar_artefactos", guardar)
+    monkeypatch.setattr(responder_mod.correo, "procesar_mensaje", preparar)
+
+    respuesta = responder_mod.responder("5061111", pedido)
+
+    assert [evento[0] for evento in eventos] == ["generar", "guardar", "correo"]
+    assert "gerente@empresa.com" not in eventos[0][1]
+    assert respuesta.adjuntos == [adjunto]
+    assert "Confirme el envío" in respuesta.texto
 
 
 def test_refresh_token_se_cifra_con_contexto(monkeypatch):
