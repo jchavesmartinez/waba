@@ -56,6 +56,15 @@ _ENVIAR_RE = re.compile(
     r"\b(?:envi|mand|reenvi|compart)\w*\b",
     re.IGNORECASE,
 )
+_ENVOLTURA_GENERACION_RE = re.compile(
+    r"^\s*(?:(?:ok|listo)[,;:.]?\s*)?(?:por\s+favor[,;:.]?\s*)?"
+    r"(?:crea|crear|cree|genera|generar|genere|haz|haga|arma|armar|arme|"
+    r"prepara|preparar|prepare)\w*\s+"
+    r"(?:(?:un|una|el|la)\s+)?"
+    r"(?:archivo|adjunto|pdf|excel|xlsx|csv|grafico|grafica|imagen|documento|"
+    r"reporte|informe)\b\s*(?:(?:con|de|sobre)\s+)?",
+    re.IGNORECASE,
+)
 _CONECTAR_RE = re.compile(
     r"\b(?:conectar|conecta|conecte|conectame|vincular|vincula|vincule|vinculame)\b.*"
     r"\b(?:correo|gmail|google|email)\b|"
@@ -434,7 +443,7 @@ def es_generacion_y_correo(texto_usuario: str) -> bool:
 
 
 def pregunta_para_generar(texto_usuario: str) -> str:
-    """Quita la instruccion de email para que text-to-SQL reciba solo los datos."""
+    """Aisla la consulta de datos de las instrucciones de archivo y correo."""
     t = _normalizar(texto_usuario)
     generar = _GENERAR_RE.search(t)
     enviar = _ENVIAR_RE.search(t, generar.end()) if generar else None
@@ -443,6 +452,8 @@ def pregunta_para_generar(texto_usuario: str) -> str:
     pregunta = texto_usuario[:enviar.start()].rstrip(" ,;:-")
     pregunta = re.sub(r"\s+\b(?:y|luego|despues)\s*$", "", pregunta,
                       flags=re.IGNORECASE).rstrip(" ,;:-")
+    pregunta = _ENVOLTURA_GENERACION_RE.sub("", pregunta, count=1)
+    pregunta = pregunta.strip(" ¿?¡!.,;:-")
     return pregunta or texto_usuario
 
 

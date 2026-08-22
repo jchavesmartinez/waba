@@ -937,6 +937,17 @@ def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | Non
     # cantidad aquí porque WhatsApp divide el texto largo en varios mensajes.
     return _resultado_lista(columnas, filas, unidad, tope)
 
+
+def es_resultado_no_respondible(columnas, filas) -> bool:
+    """True cuando el SELECT devuelve el marcador interno de rechazo."""
+    return (
+        len(filas) == 1
+        and len(columnas) == 1
+        and str(columnas[0]).strip().lower() == "nota"
+        and str(filas[0][0]).strip() == "NO_RESPONDIBLE"
+    )
+
+
 def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
                        unidad: str = "", temas_habilitados: str = "") -> str:
     """
@@ -948,7 +959,7 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
     el mensaje no. La salida textual ahora usa exactamente las mismas filas que
     el archivo.
     """
-    if len(filas) == 1 and len(columnas) == 1 and str(filas[0][0]) == "NO_RESPONDIBLE":
+    if es_resultado_no_respondible(columnas, filas):
         temas = temas_habilitados or "los datos habilitados para su empresa"
         return (
             "No puedo responder esa consulta con los datos habilitados para "

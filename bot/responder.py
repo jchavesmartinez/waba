@@ -258,7 +258,11 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     # Un pedido de archivo es una accion de datos aunque el texto sea tan corto
     # como "en PDF" o "si, ese". Resolverlo antes evita gastar una llamada en
     # clasificarlo como charla y perder el resultado al que hace referencia.
-    fmt_solicitado = formato.detectar_con_contexto(pregunta_datos, historial)
+    # En un pedido compuesto, pregunta_datos ya no contiene "PDF/Excel": se
+    # quitó esa envoltura para que el planificador vea una consulta limpia. El
+    # formato se conserva leyéndolo del mensaje original.
+    pregunta_formato = pregunta if correo_compuesto else pregunta_datos
+    fmt_solicitado = formato.detectar_con_contexto(pregunta_formato, historial)
     intent = (
         "datos" if fmt_solicitado != formato.TEXTO
         else intencion.clasificar(
@@ -442,6 +446,17 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error ejecutando SQL: %s", cid, e)
         return Respuesta(_ERROR)
+
+    # NO_RESPONDIBLE es una señal de control del planificador, no una fila de
+    # negocio. Se debe detener aquí, antes de que PDF/Excel la conviertan en un
+    # archivo válido y antes de que un pedido compuesto prepare un correo con
+    # ese archivo vacío.
+    if nl2sql.es_resultado_no_respondible(columnas, filas):
+        texto = nl2sql.redactar_respuesta(
+            pregunta, columnas, filas,
+            temas_habilitados=catalogo.resumir_habilitados(ctx),
+        )
+        return Respuesta(texto, sql=sql)
 
     # 3) Redactar la respuesta en lenguaje natural (con continuidad).
     #

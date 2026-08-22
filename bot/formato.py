@@ -56,6 +56,17 @@ _REGLAS = (
 
 _COMPILADAS = tuple((f, re.compile(p)) for f, p in _REGLAS)
 
+# Mencionar un formato no siempre significa pedir un archivo. Frases como
+# "¿por qué no pudiste poner eso en PDF antes?" preguntan por el comportamiento
+# del bot y deben pasar al clasificador conversacional. Sin este freno, la sola
+# palabra "PDF" fuerza la intención de datos y genera otro documento.
+_PREGUNTA_EXPLICATIVA = re.compile(
+    r"^\s*[^a-z0-9]*(?:entonces\b[^a-z0-9]*)?"
+    r"(?:por\s+que|porque|como\s+es\s+que|que\s+paso|"
+    r"que\s+ocurrio|cual\s+fue\s+el\s+problema)\b",
+    re.IGNORECASE,
+)
+
 _AFIRMACION = re.compile(
     r"^\s*(?:si|sí|dale|claro|correcto|exacto|por supuesto|ok)(?:\b|[,!.])",
     re.IGNORECASE,
@@ -81,6 +92,9 @@ def detectar(pregunta: str) -> str:
 
     t = _sin_tildes(pregunta)
     if not t.strip():
+        return TEXTO
+
+    if _PREGUNTA_EXPLICATIVA.search(t):
         return TEXTO
 
     for formato, rx in _COMPILADAS:

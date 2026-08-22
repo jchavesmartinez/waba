@@ -64,6 +64,15 @@ def test_pdf_gana_sobre_grafico():
     assert formato.detectar("mandame el gráfico en PDF") == formato.PDF
 
 
+@pytest.mark.parametrize("pregunta", [
+    "Entonces, ¿por qué no pudiste poner eso en PDF antes?",
+    "¿Qué pasó con el PDF anterior?",
+    "¿Cuál fue el problema con el Excel?",
+])
+def test_mencionar_archivo_en_pregunta_explicativa_no_lo_genera(pregunta):
+    assert formato.detectar(pregunta) == formato.TEXTO
+
+
 def test_csv_degrada_a_excel_por_defecto():
     """text/csv no esta en los MIME de documento que lista la Cloud API."""
     assert formato.detectar("mandame el csv") == formato.EXCEL

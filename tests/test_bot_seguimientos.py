@@ -115,6 +115,41 @@ def test_pedir_excel_con_damelo_reutiliza_el_ultimo_sql():
     assert respuesta.texto == "Listo. Le adjunto el Excel con 44 registros."
 
 
+def test_no_respondible_no_se_exporta_como_pdf():
+    with (
+        patch.object(R.catalogo, "construir_contexto", return_value=CTX),
+        patch.object(
+            R.catalogo, "resumir_habilitados", return_value="transacciones",
+        ),
+        patch.object(R.kpis, "cargar_kpis", return_value=[]),
+        patch.object(
+            R.kpis, "planificar",
+            return_value={
+                "accion": "sql_libre", "kpi": "", "sql": "", "mensaje": "",
+            },
+        ),
+        patch.object(
+            R.nl2sql, "generar_sql",
+            return_value="SELECT 'NO_RESPONDIBLE' AS nota",
+        ),
+        patch.object(
+            R.warehouse_ro, "ejecutar",
+            return_value=(["nota"], [("NO_RESPONDIBLE",)]),
+        ),
+        patch.object(
+            R.artefactos, "pdf_reporte",
+            side_effect=AssertionError("no debe generar un PDF del marcador"),
+        ),
+    ):
+        respuesta = R._responder_datos(
+            CLIENTE, "50600000000", "Crea un PDF de la temperatura", [],
+            fmt_solicitado=formato.PDF,
+        )
+
+    assert respuesta.adjuntos == []
+    assert "No puedo responder" in respuesta.texto
+
+
 def test_pedir_datos_usados_repite_exactamente_la_consulta_del_analisis():
     sql_analisis = (
         "SELECT DATE_TRUNC('month', fecha_transaccion) AS mes, SUM(monto) AS total "

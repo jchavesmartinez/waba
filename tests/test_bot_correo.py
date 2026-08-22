@@ -44,8 +44,9 @@ def test_separa_generacion_de_pdf_de_la_instruccion_de_correo():
     )
     assert correo.es_generacion_y_correo(pedido)
     pregunta = correo.pregunta_para_generar(pedido)
-    assert "PDF" in pregunta
     assert "excursiones" in pregunta
+    assert "PDF" not in pregunta
+    assert "Crea" not in pregunta
     assert "gerente@empresa.com" not in pregunta
     assert "cuerpo" not in pregunta
 
@@ -95,6 +96,7 @@ def test_turno_compuesto_genera_archivo_y_luego_prepara_borrador(monkeypatch):
 
     assert [evento[0] for evento in eventos] == ["generar", "guardar", "correo"]
     assert "gerente@empresa.com" not in eventos[0][1]
+    assert eventos[0][1] == "las últimas excursiones"
     assert respuesta.adjuntos == [adjunto]
     assert "Confirme el envío" in respuesta.texto
 
