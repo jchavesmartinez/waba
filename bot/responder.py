@@ -305,6 +305,90 @@ def responder(numero: str, pregunta: str) -> Respuesta:
         )
         return respuesta_correo
 
+    # Detectar si el usuario presionó un botón del menú de saludo
+    pregunta_limpia = (pregunta or "").strip().upper()
+    es_boton_correos = pregunta_limpia in ("A", "CORREOS SIN LEER")
+    es_boton_reportes = pregunta_limpia in ("B", "REPORTE DE VENTAS")
+    es_boton_reservas = pregunta_limpia in ("C", "LISTA DE RESERVAS")
+
+    if es_boton_correos:
+        sin_leer = correo.contar_correos_sin_leer(cliente, numero)
+        if sin_leer is None:
+            texto_respuesta = (
+                "Necesitas conectar tu correo Gmail primero. "
+                "Escribe 'conectar correo' para autorizarme el acceso."
+            )
+        else:
+            texto_respuesta = (
+                f"Tienes *{sin_leer}* correos sin leer en tu bandeja de entrada. 📧"
+                if sin_leer > 0
+                else "¡Excelente! No tienes correos sin leer. ✅"
+            )
+        memoria.guardar_intercambio(cliente, numero, pregunta, texto_respuesta)
+        return Respuesta(texto_respuesta)
+    elif es_boton_reportes:
+        # Detectar si ya está respondiendo al período o formato
+        palabras_mensuales = ("mes", "mensual", "meses")
+        palabras_semanales = ("semana", "semanal", "semanas")
+        palabras_diarias = ("dia", "día", "diario", "dias", "días", "hoy", "today")
+        palabras_pdf = ("pdf",)
+        palabras_excel = ("excel", "xlsx", "xls")
+        palabras_grafico = ("gráfico", "grafico", "gráfica", "grafica", "chart", "imagen", "image")
+
+        es_mes = any(p in pregunta_limpia for p in palabras_mensuales)
+        es_semana = any(p in pregunta_limpia for p in palabras_semanales)
+        es_dia = any(p in pregunta_limpia for p in palabras_diarias)
+        es_pdf = any(p in pregunta_limpia for p in palabras_pdf)
+        es_excel = any(p in pregunta_limpia for p in palabras_excel)
+        es_grafico = any(p in pregunta_limpia for p in palabras_grafico)
+
+        # Determinar período si lo especificó
+        periodo = None
+        if es_mes:
+            periodo = "mes"
+        elif es_semana:
+            periodo = "semana"
+        elif es_dia:
+            periodo = "día"
+
+        if periodo:
+            # Usuario respondió el período, mostrar total de ventas y preguntar formato
+            total_ventas = _obtener_total_ventas(cliente, periodo)
+            if total_ventas is None:
+                total_ventas = "₡0"
+            detalle = (
+                f"📊 *Reporte de ventas - {periodo.upper()}*\n\n"
+                f"Total ventas: {total_ventas}\n\n"
+                f"¿En qué formato lo quieres?\n"
+                f"• PDF\n"
+                f"• Excel\n"
+                f"• Gráfico"
+            )
+            memoria.guardar_intercambio(cliente, numero, pregunta, detalle)
+            return Respuesta(detalle)
+        elif es_pdf or es_excel or es_grafico:
+            # Usuario eligió formato
+            formato_txt = "PDF" if es_pdf else ("Excel" if es_excel else "Gráfico")
+            texto_respuesta = f"Generando reporte en formato {formato_txt}... ⏳\n\n(Proximamente: envío del archivo)"
+            memoria.guardar_intercambio(cliente, numero, pregunta, texto_respuesta)
+            return Respuesta(texto_respuesta)
+        else:
+            # Primera vez: preguntar por el período
+            texto_respuesta = (
+                "¿Qué período deseas? Responde:\n"
+                "• Mensual (este mes)\n"
+                "• Semanal (esta semana)\n"
+                "• Diario (hoy)"
+            )
+            memoria.guardar_intercambio(cliente, numero, pregunta, texto_respuesta)
+            return Respuesta(texto_respuesta)
+    elif es_boton_reservas:
+        texto_respuesta = (
+            "Te muestro las reservas futuras. "
+            "¿Desde qué fecha quieres ver? (ej: mañana, próxima semana)"
+        )
+        memoria.guardar_intercambio(cliente, numero, pregunta, texto_respuesta)
+        return Respuesta(texto_respuesta)
     # Se carga una sola vez y se reutiliza para gobernanza, clasificación y
     # mensajes. Así el bot describe las tablas realmente habilitadas para este
     # cliente, sin una lista fija de ventas/inventario ni una segunda lectura.
