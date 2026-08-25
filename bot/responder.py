@@ -88,8 +88,17 @@ def _mensaje_capacidades(temas: str) -> str:
     return "Puede consultarme sobre los datos habilitados para su empresa."
 
 
-def _saludo(temas: str) -> str:
-    return f"Hola. Soy su asistente de datos. {_mensaje_capacidades(temas)}"
+def _saludo() -> str:
+    return (
+        "Hola soy Dativa, su asistente empresarial. 📲\n\n"
+        "Puedo ayudarle a revisar los datos habilitados de Inside Tours. 🌴\n"
+        "Datos tales como ventas, tours, puntos de salida, cantidad de "
+        "personas, entre otros.\n\n"
+        "Además puedo generar gráficos, puedo ayudarle a ingresar ventas a "
+        "las hojas de cálculo o inclusive revisar la bandeja de entrada de "
+        "su correo electrónico, todo al alcance de su celular.\n\n"
+        "¿En qué puedo ayudarle?"
+    )
 
 # Comandos para borrar la memoria del propio numero.
 #
@@ -272,7 +281,7 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     logger.info("[%s] intencion=%s", cid, intent)
 
     if intent == "saludo":
-        respuesta = Respuesta(_saludo(temas_habilitados))
+        respuesta = Respuesta(_saludo())
     elif intent == "meta":
         # Pregunta sobre la conversacion: se responde con el historial, sin base.
         try:
