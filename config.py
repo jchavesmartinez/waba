@@ -7,7 +7,7 @@ El repo tiene DOS mitades y este archivo configura las dos (B-39):
     warehouse — nunca de los sistemas fuente.
 
 Una sola superficie de configuracion: si algo se puede ajustar por variable de
-entorno, esta en este archivo. Ningun otro modulo lee os.environ directamente.
+entorno, esta en este archivo. Ningun otro modulo lee os.environ directamente. prueba
 """
 
 import json
