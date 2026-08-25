@@ -249,12 +249,12 @@ def _obtener_total_ventas(cliente: dict, periodo: str) -> str | None:
             return None
 
         # Query para obtener el total de ventas del periodo
-        sql = f"""
-        SELECT COALESCE(SUM(monto_original), 0) as total
-        FROM pagos
-        WHERE fecha >= '{fecha_inicio}'::date
-          AND fecha <= '{fecha_fin}'::date
-        """
+        sql = (
+            "SELECT COALESCE(SUM(monto_original), 0) as total "
+            "FROM pagos "
+            f"WHERE fecha >= '{fecha_inicio}'::date "
+            f"AND fecha <= '{fecha_fin}'::date"
+        )
 
         columnas, filas = warehouse_ro.ejecutar(cliente, sql)
         if not filas:
