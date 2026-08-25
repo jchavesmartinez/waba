@@ -117,16 +117,15 @@ def test_temas_del_bot_salen_de_las_tablas_habilitadas_del_catalogo():
     assert catalogo.resumir_habilitados(ctx) == (
         "excursiones, asignaciones transporte y pagos"
     )
-    assert R._saludo() == (
+    assert R._saludo_texto() == (
         "Hola soy Dativa, su asistente empresarial. 📲\n\n"
-        "Puedo ayudarle a revisar los datos habilitados de Inside Tours. 🌴\n"
-        "Datos tales como ventas, tours, puntos de salida, cantidad de "
-        "personas, entre otros.\n\n"
-        "Además puedo generar gráficos, puedo ayudarle a ingresar ventas a "
-        "las hojas de cálculo o inclusive revisar la bandeja de entrada de "
-        "su correo electrónico, todo al alcance de su celular.\n\n"
-        "¿En qué puedo ayudarle?"
+        "Puedo ayudarle a revisar los principales datos de Inside Tours. 🌴"
     )
+    botones = R._saludo_botones()
+    assert len(botones) == 3
+    assert botones[0].id == "A"
+    assert botones[1].id == "B"
+    assert botones[2].id == "C"
 
 
 def test_una_tabla_habilitada_clasifica_el_tema_sin_vocabulario_fijo():
