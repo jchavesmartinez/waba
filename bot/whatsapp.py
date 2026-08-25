@@ -227,6 +227,54 @@ def enviar_texto(numero_destino: str, texto: str,
     return True
 
 
+def enviar_botones(numero_destino: str, texto: str, botones: list,
+                   numero_origen: str = "") -> bool:
+    """
+    Manda un menú interactivo con hasta 3 botones por la Cloud API.
+
+    Devuelve True si Meta lo aceptó.
+    """
+    if not _hay_credenciales():
+        return False
+
+    if not botones or len(botones) > 3:
+        logger.error(
+            "enviar_botones: se esperan 1-3 botones, se recibieron %d",
+            len(botones) if botones else 0,
+        )
+        return False
+
+    # Meta requiere que los botones tengan id único y título
+    button_list = []
+    for boton in botones:
+        button_list.append({
+            "type": "reply",
+            "reply": {
+                "id": str(boton.id),
+                "title": str(boton.titulo)[:20],  # Meta limita a 20 caracteres
+            }
+        })
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": numero_destino,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": _recortar(texto),
+            },
+            "action": {
+                "buttons": button_list,
+            }
+        }
+    }
+
+    descripcion = f"menú interactivo con {len(botones)} botones"
+    return _post_mensaje(payload, descripcion, numero_origen)
+
+
 # --- Adjuntos: subir y mandar --------------------------------------------
 
 def subir_media(contenido: bytes, nombre: str, mime: str,

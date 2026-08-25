@@ -178,7 +178,11 @@ def _atender(numero: str, texto: str, numero_origen: str = "") -> None:
     # contra 4096 y el celular lo muestra colapsado bajo un "ver mas": la
     # respuesta se leeria peor por ahorrarse un mensaje.
     if respuesta.texto:
-        whatsapp.enviar_texto(numero, respuesta.texto, numero_origen)
+        if respuesta.botones:
+            whatsapp.enviar_botones(numero, respuesta.texto,
+                                   respuesta.botones, numero_origen)
+        else:
+            whatsapp.enviar_texto(numero, respuesta.texto, numero_origen)
 
     try:
         cliente = registry.resolver(numero) if respuesta.adjuntos else None

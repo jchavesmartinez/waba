@@ -19,6 +19,14 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class Boton:
+    """Botón para menú interactivo en WhatsApp."""
+
+    id: str       # identificador único (A, B, C, etc.)
+    titulo: str   # texto que ve el usuario
+
+
+@dataclass
 class Adjunto:
     """Un archivo listo para subir a Meta y mandar por WhatsApp."""
 
@@ -35,10 +43,11 @@ class Adjunto:
 
 @dataclass
 class Respuesta:
-    """Lo que responder() devuelve: el texto y, si aplica, los adjuntos."""
+    """Lo que responder() devuelve: el texto y, si aplica, los adjuntos o botones."""
 
     texto: str
     adjuntos: list = field(default_factory=list)
+    botones: list = field(default_factory=list)
     # Consulta que produjo la respuesta. No se muestra al usuario; se guarda en
     # memoria para que "cuales son esas" conserve exactamente los filtros.
     sql: str = ""
