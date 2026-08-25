@@ -33,6 +33,7 @@ import logging
 import re
 import threading
 from collections import defaultdict
+from datetime import date, timedelta
 
 import config
 import registry
@@ -209,6 +210,53 @@ def _pasa_tope_diario(cliente_id: str) -> bool:
             return False
         _CONSUMO[cliente_id] += 1
     return True
+
+
+def _obtener_total_ventas(cliente: dict, periodo: str) -> str | None:
+    """
+    Obtiene el total de ventas para un periodo especifico.
+
+    Args:
+        cliente: dict con datos del cliente
+        periodo: "día", "semana" o "mes"
+
+    Returns:
+        String formateado como moneda (ej: "₡314.678.900") o None si hay error
+    """
+    try:
+        hoy = fecha_local()
+
+        if periodo == "día":
+            fecha_inicio = hoy
+            fecha_fin = hoy
+        elif periodo == "semana":
+            fecha_inicio = hoy - timedelta(days=6)
+            fecha_fin = hoy
+        elif periodo == "mes":
+            fecha_inicio = hoy.replace(day=1)
+            fecha_fin = hoy
+        else:
+            return None
+
+        # Query para obtener el total de ventas del periodo
+        sql = f"""
+        SELECT COALESCE(SUM(monto_original), 0) as total
+        FROM pagos
+        WHERE fecha >= '{fecha_inicio}'::date
+          AND fecha <= '{fecha_fin}'::date
+        """
+
+        columnas, filas = warehouse_ro.ejecutar(cliente, sql)
+        if not filas:
+            return "₡0"
+
+        total = float(filas[0][0]) if filas[0][0] else 0
+        # Formatear como moneda de Costa Rica
+        return f"₡{total:,.0f}".replace(",", ".")
+    except Exception as e:
+        logger.exception("Error obteniendo total de ventas para %s: %s",
+                        cliente.get("cliente_id"), e)
+        return None
 
 
 def responder(numero: str, pregunta: str) -> Respuesta:
