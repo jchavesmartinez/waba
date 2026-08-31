@@ -262,6 +262,8 @@ class Modelo:
             # aun faltan, sin repetir ni sobrescribir los joins ya resueltos.
             self._aplicar_joins(
                 fila, cruda, auxiliares, solo_si_faltan_salidas=True)
+            self._derivar_cuenta_contable_desde_linea(
+                fila, cruda, auxiliares, indice_overrides.get(clave, {}))
             derivadas.append(fila)
 
         return derivadas, rechazos
@@ -410,6 +412,45 @@ class Modelo:
             if candidatas:
                 for columna in salidas:
                     fila[columna] = candidatas[0].get(columna)
+
+    def _derivar_cuenta_contable_desde_linea(
+            self, fila: dict, cruda: dict, auxiliares: dict,
+            override: dict) -> None:
+        """Deriva la cuenta desde la categoria de la linea presupuestaria.
+
+        ``linea_presupuesto_id`` es mas especifica que ``cuenta_contable``:
+        una linea pertenece a una unica categoria del presupuesto. Cuando el
+        modelo logra identificarla, esa relacion debe ser la fuente de verdad
+        aunque la clasificacion general del comercio haya producido otra
+        cuenta. Un override explicito de ``cuenta_contable`` conserva la
+        maxima precedencia y no se pisa.
+        """
+        if "cuenta_contable" in override:
+            return
+
+        linea = fila.get("linea_presupuesto_id")
+        if linea in (None, "", SIN_CLASIFICAR):
+            return
+
+        for join in self.joins:
+            if join.get("columna_base") != "linea_presupuesto_id":
+                continue
+            tabla = join.get("tabla_auxiliar", "")
+            clave = _transformar_join(linea, join.get("transformacion"))
+            if not clave:
+                continue
+            for aux in auxiliares.get(tabla, []):
+                if not _es_si_o_vacio(aux.get("activo", "si")):
+                    continue
+                otra = _transformar_join(
+                    aux.get(join.get("columna_auxiliar")),
+                    join.get("transformacion"))
+                if otra != clave or not _vigente(fila, cruda, aux, join):
+                    continue
+                cuenta = aux.get("cuenta_contable") or aux.get("categoria")
+                if cuenta not in (None, ""):
+                    fila["cuenta_contable"] = cuenta
+                return
 
     def _indexar_overrides(self) -> dict:
         indice = {}

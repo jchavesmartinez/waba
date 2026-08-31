@@ -156,6 +156,7 @@ def test_join_posterior_usa_linea_presupuesto_nacida_de_clasificacion():
         {"modelo_id": "bac", "tabla_origen": "correos",
          "tabla_destino": "transacciones", "columna_texto": "cuerpo"}, meta)
     mapeo = {
+        ("cuenta_contable", _normalizar("AM PM VEROLIZ")): "Otros",
         ("linea_presupuesto_id",
          _normalizar("comercio_concepto: AM PM VEROLIZ | titular: Jose")):
             "gas_comedera",
@@ -167,6 +168,7 @@ def test_join_posterior_usa_linea_presupuesto_nacida_de_clasificacion():
         }],
         "sharepoint_db__presupuesto": [{
             "linea_id": "gas_comedera", "concepto": "Comedera",
+            "categoria": "Alimentacion",
             "activo": "si", "vigencia_desde": "2026-01-01",
             "vigencia_hasta": "",
         }],
@@ -178,6 +180,53 @@ def test_join_posterior_usa_linea_presupuesto_nacida_de_clasificacion():
     assert filas[0]["titular"] == "Jose"
     assert filas[0]["linea_presupuesto_id"] == "gas_comedera"
     assert filas[0]["concepto"] == "Comedera"
+    assert filas[0]["cuenta_contable"] == "Alimentacion"
+
+
+def test_override_de_cuenta_gana_sobre_categoria_de_linea_presupuestaria():
+    campos = CAMPOS + [{
+        "modelo_id": "bac", "columna": "comercio_concepto",
+        "tipo": "texto", "patron": "Comercio",
+        "clasifica_en": "linea_presupuesto_id",
+    }]
+    meta = {
+        "campos": campos,
+        "clasificacion": [],
+        "overrides": [{
+            "modelo_id": "bac", "clave": "c1",
+            "columna": "cuenta_contable", "valor": "Regalos",
+        }],
+        "joins": [{
+            "modelo_id": "bac",
+            "tabla_auxiliar": "sharepoint_db__presupuesto",
+            "columna_base": "linea_presupuesto_id",
+            "columna_auxiliar": "linea_id",
+            "transformacion": "exacto",
+            "columnas_salida": "concepto",
+            "activo": "si",
+        }],
+    }
+    modelo = Modelo(
+        {"modelo_id": "bac", "tabla_origen": "correos",
+         "tabla_destino": "transacciones", "columna_texto": "cuerpo"},
+        meta,
+    )
+    mapeo = {
+        ("linea_presupuesto_id", _normalizar("AM PM VEROLIZ")):
+            "gas_comedera",
+    }
+    auxiliares = {
+        "sharepoint_db__presupuesto": [{
+            "linea_id": "gas_comedera", "concepto": "Comedera",
+            "categoria": "Alimentacion", "activo": "si",
+        }],
+    }
+
+    filas, rechazos = modelo.procesar([_fila()], mapeo, auxiliares)
+
+    assert rechazos == []
+    assert filas[0]["linea_presupuesto_id"] == "gas_comedera"
+    assert filas[0]["cuenta_contable"] == "Regalos"
 
 
 # --- extraccion y tipado --------------------------------------------------
