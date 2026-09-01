@@ -400,6 +400,26 @@ def test_varias_columnas_forman_un_solo_contexto_de_clasificacion():
     assert filas[0]["cuenta_contable"] == "Supermercado"
 
 
+def test_una_regla_se_puede_contrastar_con_un_mapeo_con_contexto():
+    campos = [dict(c) for c in CAMPOS] + [{
+        "modelo_id": "bac", "columna": "comercio_concepto",
+        "tipo": "texto", "patron": "Comercio",
+        "clasifica_en": "linea_presupuesto_id",
+        "clasifica_con": "titular,monto",
+    }]
+    reglas = [{
+        "modelo_id": "bac", "patron": "%CHATGPT%", "valor": "gas_chatgpt",
+        "prioridad": "10", "clasifica_en": "linea_presupuesto_id",
+    }]
+    modelo = _modelo(campos=campos, reglas=reglas)
+    campo = campos[-1]
+    original = modelo.valor_clasificacion(
+        {"comercio_concepto": "CHATGPT", "titular": "Aline", "monto": 20},
+        campo)
+
+    assert modelo.regla_para_valor_clasificacion(original, campo) == "gas_chatgpt"
+
+
 def test_una_regla_puede_elegir_las_columnas_que_evalua():
     campos = [dict(c) for c in CAMPOS]
     campos[0]["clasifica_con"] = "asunto,tipo_transaccion"

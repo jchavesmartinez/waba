@@ -381,6 +381,37 @@ class Modelo:
             for columna in columnas
         )
 
+    def regla_para_valor_clasificacion(self, valor: str, campo: dict):
+        """Evalua las reglas actuales contra una llave guardada en _mapeo.
+
+        ``valor_clasificacion`` etiqueta cada columna de contexto para que la
+        llave sea estable y auditable. Esta operacion inversa permite limpiar
+        decisiones antiguas del LLM cuando una regla explicita pasa a cubrir
+        el mismo valor, incluso si esa transaccion ya no esta en la tabla raw.
+        """
+        columnas = self.columnas_de_clasificacion(campo)
+        if len(columnas) == 1:
+            fila = {columnas[0]: str(valor or "").strip()}
+        else:
+            restante = str(valor or "")
+            fila = {}
+            for i, columna in enumerate(columnas):
+                prefijo = f"{columna}: "
+                if not restante.startswith(prefijo):
+                    return None
+                restante = restante[len(prefijo):]
+                if i + 1 < len(columnas):
+                    separador = f" | {columnas[i + 1]}: "
+                    if separador not in restante:
+                        return None
+                    contenido, restante = restante.split(separador, 1)
+                    fila[columna] = contenido
+                    restante = f"{columnas[i + 1]}: {restante}"
+                else:
+                    fila[columna] = restante
+        origen = fila.get(campo.get("columna", ""))
+        return self._por_regla(fila, campo, origen)
+
     def _copiar_contexto_raw(self, fila: dict, cruda: dict) -> None:
         for campo in self.campos:
             for columna in self.columnas_contexto(campo):

@@ -133,6 +133,42 @@ def test_no_se_reclasifica_lo_que_ya_esta_en_el_mapeo(destino, monkeypatch):
     assert segunda["pendientes"] == 0 and segunda["llamadas"] == 0
 
 
+def test_una_regla_nueva_elimina_solo_el_mapeo_que_la_contradice(
+        destino, monkeypatch):
+    destino.reconstruir_tabla(
+        "semantic_cliente_a", "_mapeo", C.COLUMNAS_MAPEO,
+        [
+            {"modelo_id": "bac", "clasifica_en": "cuenta_contable",
+             "valor_normalizado": "AUTOMERCADO ESCAZU",
+             "valor_original": "AUTOMERCADO ESCAZU",
+             "valor_asignado": "Mascotas", "confianza": "media",
+             "modelo_llm": "modelo-viejo", "clasificado_en": "2026-01-01"},
+            {"modelo_id": "bac", "clasifica_en": "cuenta_contable",
+             "valor_normalizado": "PANADERIA PANES",
+             "valor_original": "PANADERIA PANES",
+             "valor_asignado": "Alimentacion", "confianza": "alta",
+             "modelo_llm": "modelo-viejo", "clasificado_en": "2026-01-01"},
+        ])
+    llamadas = _simular(monkeypatch, [])
+    meta = _metadata()
+    meta["clasificacion"] = [{
+        "modelo_id": "bac", "patron": "AUTOMERCADO%",
+        "valor": "Supermercado", "prioridad": "10",
+        "clasifica_en": "cuenta_contable",
+    }]
+
+    resultado = C.clasificar_modelo(
+        destino, "semantic_cliente_a", _modelo(meta), meta)
+
+    guardado = {f["valor_original"]: f["valor_asignado"] for f in
+                destino.leer_filas(
+                    'SELECT valor_original, valor_asignado '
+                    'FROM "semantic_cliente_a"."_mapeo"')}
+    assert guardado == {"PANADERIA PANES": "Alimentacion"}
+    assert llamadas == []
+    assert resultado["mapeos_eliminados"] == 1
+
+
 def test_los_lotes_son_chicos(destino, monkeypatch):
     """Los modelos pierden precision en listas largas y apuran el final."""
     lotes = list(C._lotes(list(range(60)), 25))

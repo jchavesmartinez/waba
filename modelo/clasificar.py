@@ -72,11 +72,12 @@ def clasificar_modelo(destino, esquema_sem: str, modelo, metadata: dict,
                       probar: bool = False, tamano_lote: int = TAMANO_LOTE,
                       forzar: bool = False) -> dict:
     total = {"pendientes": 0, "clasificados": 0, "sin_resolver": 0,
-             "llamadas": 0, "alertas": []}
+             "llamadas": 0, "mapeos_eliminados": 0, "alertas": []}
     for campo in (c for c in modelo.campos if c.get("clasifica_en")):
         r = _clasificar_dimension(destino, esquema_sem, modelo, metadata,
                                   campo, probar, tamano_lote, forzar)
-        for k in ("pendientes", "clasificados", "sin_resolver", "llamadas"):
+        for k in ("pendientes", "clasificados", "sin_resolver", "llamadas",
+                  "mapeos_eliminados"):
             total[k] += r[k]
         total["alertas"] += r["alertas"]
     return total
@@ -89,15 +90,22 @@ def _clasificar_dimension(destino, esquema_sem: str, modelo, metadata: dict,
     Clasifica los valores pendientes de un modelo y actualiza la tabla de mapeo.
 
     Devuelve {"pendientes", "clasificados", "sin_resolver", "llamadas",
-              "alertas"}.
+              "mapeos_eliminados", "alertas"}.
     """
     resultado = {"pendientes": 0, "clasificados": 0, "sin_resolver": 0,
-                 "llamadas": 0, "alertas": []}
+                 "llamadas": 0, "mapeos_eliminados": 0, "alertas": []}
 
     dimension = campo.get("clasifica_en", "")
-    categorias = categorias_de(metadata, modelo.modelo_id, dimension)
     principal = next((c.get("clasifica_en") for c in modelo.campos
                       if c.get("clasifica_en")), "")
+    mapeo_actual = _leer_mapeo(destino, esquema_sem, modelo.modelo_id,
+                               dimension, aceptar_legacy=(dimension == principal))
+    mapeo_actual, eliminados = _reconciliar_mapeo_con_reglas(
+        destino, esquema_sem, modelo, campo, mapeo_actual,
+        aceptar_legacy=(dimension == principal), probar=probar)
+    resultado["mapeos_eliminados"] = eliminados
+
+    categorias = categorias_de(metadata, modelo.modelo_id, dimension)
     # Las filas historicas sin clasifica_en pertenecen solo al destino
     # principal; no se reutilizan accidentalmente para concepto u otra dimension.
     if dimension != principal:
@@ -111,8 +119,6 @@ def _clasificar_dimension(destino, esquema_sem: str, modelo, metadata: dict,
         resultado["alertas"].append(msg)
         return resultado
 
-    mapeo_actual = _leer_mapeo(destino, esquema_sem, modelo.modelo_id,
-                               dimension, aceptar_legacy=(dimension == principal))
     pendientes = _pendientes(destino, esquema_sem, modelo, campo,
                              set() if forzar else set(mapeo_actual))
     resultado["pendientes"] = len(pendientes)
@@ -219,6 +225,12 @@ def _pendientes(destino, esquema_sem: str, modelo, campo: dict,
             modelo.modelo_id, modelo.tabla_destino, e)
         return {}
     for fila in filas:
+        origen = fila.get(campo.get("columna", ""))
+        if modelo._por_regla(fila, campo, origen):
+            # La tabla semantica puede haber sido construida antes del ultimo
+            # cambio de metadata. No se gasta una llamada al LLM en un valor
+            # que ya tiene una regla explicita vigente.
+            continue
         original = modelo.valor_clasificacion(fila, campo)
         clave = _normalizar(original)
         if clave and clave not in ya_mapeados:
@@ -337,6 +349,61 @@ def _leer_mapeo(destino, esquema_sem: str, modelo_id: str,
         return {}      # primera corrida: la tabla todavia no existe
 
 
+def _reconciliar_mapeo_con_reglas(destino, esquema_sem: str, modelo,
+                                  campo: dict, mapeo_actual: dict,
+                                  aceptar_legacy: bool = False,
+                                  probar: bool = False) -> tuple:
+    """Elimina decisiones del LLM que contradicen reglas explicitas.
+
+    Los mapeos que coinciden se conservan: siguen siendo un fallback util si
+    la regla se retira. Solo se borra lo que produciria una clasificacion
+    distinta a la metadata actual.
+    """
+    conflictivos = set()
+    for clave, fila in mapeo_actual.items():
+        por_regla = modelo.regla_para_valor_clasificacion(
+            fila.get("valor_original", ""), campo)
+        if por_regla and por_regla != fila.get("valor_asignado"):
+            conflictivos.add(clave)
+    if not conflictivos:
+        return mapeo_actual, 0
+
+    logger.info(
+        "[%s/%s] %d mapeo(s) contradicen reglas vigentes y se %s.",
+        modelo.modelo_id, campo.get("clasifica_en", ""), len(conflictivos),
+        "ignorarian en modo prueba" if probar else "eliminan")
+    if not probar:
+        _eliminar_mapeos(
+            destino, esquema_sem, modelo.modelo_id,
+            campo.get("clasifica_en", ""), conflictivos, aceptar_legacy)
+    return ({k: v for k, v in mapeo_actual.items() if k not in conflictivos},
+            0 if probar else len(conflictivos))
+
+
+def _eliminar_mapeos(destino, esquema_sem: str, modelo_id: str,
+                     clasifica_en: str, claves: set,
+                     aceptar_legacy: bool = False) -> None:
+    """Reescribe _mapeo sin las llaves conflictivas de una dimension."""
+    try:
+        filas = destino.leer_filas(
+            f'SELECT * FROM "{esquema_sem}"."{TABLA_MAPEO}"')
+    except Exception:  # noqa: BLE001
+        return
+    conservadas = []
+    for fila in filas:
+        misma_dimension = fila.get("clasifica_en", "") == clasifica_en
+        if (aceptar_legacy and not fila.get("clasifica_en")):
+            misma_dimension = True
+        eliminar = (fila.get("modelo_id") == modelo_id and misma_dimension and
+                    fila.get("valor_normalizado") in claves)
+        if not eliminar:
+            conservadas.append(fila)
+    nombres = [c for c, _ in COLUMNAS_MAPEO]
+    limpias = [{c: f.get(c) for c in nombres} for f in conservadas]
+    destino.reconstruir_tabla(
+        esquema_sem, TABLA_MAPEO, COLUMNAS_MAPEO, limpias)
+
+
 def _guardar_mapeo(destino, esquema_sem: str, actual: dict, nuevos: dict):
     """
     Reescribe la tabla de mapeo con lo viejo mas lo nuevo.
@@ -378,7 +445,7 @@ def clasificar_cliente(destino, cliente: dict, probar=False,
     cid = cliente["cliente_id"]
     metadata = leer_metadata(cliente)
     total = {"pendientes": 0, "clasificados": 0, "sin_resolver": 0,
-             "llamadas": 0, "alertas": []}
+             "llamadas": 0, "mapeos_eliminados": 0, "alertas": []}
     if not metadata["modelos"]:
         return total
 
@@ -397,7 +464,8 @@ def clasificar_cliente(destino, cliente: dict, probar=False,
         r = clasificar_modelo(destino, esquema_sem, modelo, metadata,
                               probar=probar, tamano_lote=tamano_lote,
                               forzar=forzar)
-        for k in ("pendientes", "clasificados", "sin_resolver", "llamadas"):
+        for k in ("pendientes", "clasificados", "sin_resolver", "llamadas",
+                  "mapeos_eliminados"):
             total[k] += r[k]
         total["alertas"] += r["alertas"]
     return total
@@ -444,7 +512,8 @@ def main():
                     cliente["cliente_id"], r["pendientes"], r["clasificados"],
                     r["sin_resolver"], r["llamadas"])
 
-            if args.y_construir and r["clasificados"] and not args.probar:
+            cambios = r["clasificados"] + r["mapeos_eliminados"]
+            if args.y_construir and cambios and not args.probar:
                 from .construir import construir_cliente
                 logger.info("[%s] reconstruyendo con el mapeo actualizado...",
                             cliente["cliente_id"])
