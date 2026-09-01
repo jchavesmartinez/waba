@@ -5,7 +5,7 @@ Motor de transformacion: raw -> tabla derivada consumible.
         |  filtro        que filas aplican (SQL declarado en la metadata)
         |  extraccion    texto -> columnas (modelo/extractores.py)
         |  tipado        texto -> valor tipado (modelo/tipos.py)
-        |  clasificacion override > mapeo > regla > sin_clasificar
+        |  clasificacion override > regla > mapeo > sin_clasificar
         v
     semantic_<cliente>.<tabla_destino>   +  <tabla_destino>__rechazos
 
@@ -291,7 +291,7 @@ class Modelo:
 
     def _clasificar(self, fila: dict, mapeo: dict, override: dict):
         """
-        Precedencia: override > mapeo > regla > sin_clasificar.
+        Precedencia: override > regla > mapeo > sin_clasificar.
 
         El orden no es negociable y es la razon de ser de las tres capas. Un
         mismo comercio puede corresponder a cuentas distintas segun la compra
@@ -309,6 +309,15 @@ class Modelo:
                 fila[destino] = override[destino]
                 continue
 
+            # Las reglas son decisiones explicitas y versionadas en la
+            # metadata. Deben poder corregir un mapeo aprendido anteriormente
+            # por el LLM; de lo contrario, cambiar una regla no reconstruye el
+            # historico como promete el modelo semantico.
+            por_regla = self._por_regla(fila, campo, origen)
+            if por_regla:
+                fila[destino] = por_regla
+                continue
+
             valor_clasificacion = self.valor_clasificacion(fila, campo)
             clave = _normalizar(valor_clasificacion)
             clave_mapeo = (destino, clave)
@@ -320,7 +329,7 @@ class Modelo:
                 fila[destino] = mapeo[clave]
                 continue
 
-            fila[destino] = self._por_regla(fila, campo, origen) or SIN_CLASIFICAR
+            fila[destino] = SIN_CLASIFICAR
 
         # Overrides sobre columnas que no son de clasificacion (corregir un
         # monto mal leido, por ejemplo).

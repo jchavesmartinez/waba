@@ -349,8 +349,14 @@ def test_precedencia_override_gana_sobre_mapeo_y_regla():
     assert filas[0]["cuenta_contable"] == "Regalos"
 
 
-def test_el_mapeo_gana_sobre_la_regla():
+def test_la_regla_gana_sobre_un_mapeo_desactualizado():
     filas, _ = _modelo().procesar(
+        [_fila()], mapeo={"AM PM VEROLIZ": "Conveniencia"})
+    assert filas[0]["cuenta_contable"] == "Supermercado"
+
+
+def test_el_mapeo_se_usa_si_no_hay_regla():
+    filas, _ = _modelo(reglas=[]).procesar(
         [_fila()], mapeo={"AM PM VEROLIZ": "Conveniencia"})
     assert filas[0]["cuenta_contable"] == "Conveniencia"
 
@@ -370,7 +376,7 @@ def test_sin_ninguna_capa_queda_sin_clasificar_no_adivinado():
 def test_el_mapeo_ignora_acentos_y_espacios_de_mas():
     """Si no, el LLM termina clasificando la misma cadena varias veces."""
     cuerpo = CUERPO_BAC.replace("AM PM VEROLIZ", "Automercado  Escazú")
-    filas, _ = _modelo().procesar(
+    filas, _ = _modelo(reglas=[]).procesar(
         [_fila(cuerpo, "c3")], mapeo={"AUTOMERCADO ESCAZU": "Supermercado"})
     assert filas[0]["cuenta_contable"] == "Supermercado"
 

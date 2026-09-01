@@ -61,7 +61,7 @@ _CAMPOS_COLS = (
     # Nombre de la columna donde cae la CLASIFICACION de este campo. Vacio =
     # el campo no se clasifica. Ej: columna 'comercio' con
     # clasifica_en='cuenta_contable' crea esa columna y le aplica las tres
-    # capas (override > mapeo > regla).
+    # capas (override > regla > mapeo).
     "clasifica_en",
     # Columnas adicionales, separadas por coma, que se presentan junto al
     # campo principal al clasificador. Pueden ser campos extraidos por el
