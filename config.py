@@ -282,6 +282,10 @@ BOT_MODELO_INTENCION = os.environ.get(
 # --------------------------------------------------------------------------
 BOT_KPIS = _es_si(os.environ.get("BOT_KPIS", "si"))
 BOT_MODELO_KPIS = os.environ.get("BOT_MODELO_KPIS", _GEMINI_MODELO_DEFAULT)
+# Critico final opcional. Las validaciones matematicas siempre corren en codigo;
+# esta llamada solo puede bloquear una respuesta incoherente, nunca reescribir
+# cifras. Se deja apagada porque agrega costo y latencia y no sustituye contratos.
+BOT_CRITICO_RESPUESTAS = _es_si(os.environ.get("BOT_CRITICO_RESPUESTAS", "no"))
 
 # --------------------------------------------------------------------------
 # WhatsApp Cloud API (Meta / Graph API) — transporte del bot.

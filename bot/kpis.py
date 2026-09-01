@@ -199,6 +199,70 @@ def sql_canonico(kpi: dict, ctx) -> str:
     return arbol.sql(dialect="postgres")
 
 
+_FILTROS_SALIDA = {
+    "linea_id": ("linea_id", "linea_presupuesto_id", "linea_presupuestaria_id"),
+    "concepto": ("concepto",),
+    "categoria": ("categoria",),
+    "titular": ("titular",),
+}
+
+
+def parametrizar_sql(sql: str, filtros: dict | None,
+                     periodo: dict | None = None) -> tuple[str, dict]:
+    """Acota un KPI canonico usando dimensiones de un turno verificado.
+
+    La formula KPI no se reescribe ni se entrega al modelo. Se envuelve como
+    subconsulta y se agregan comparaciones AST contra columnas que la propia
+    formula proyecta. Los valores vienen del resultado anterior ejecutado.
+    """
+    if not filtros:
+        filtros = {}
+    arbol = sqlglot.parse_one(sql, read="postgres")
+    aplicados = {}
+    inicio = str((periodo or {}).get("inicio", ""))
+    if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", inicio):
+        reemplazo = exp.Cast(
+            this=exp.Literal.string(inicio),
+            to=exp.DataType.build("DATE"),
+        )
+        if any(isinstance(n, exp.CurrentDate) for n in arbol.walk()):
+            arbol = arbol.transform(
+                lambda nodo: reemplazo.copy()
+                if isinstance(nodo, exp.CurrentDate) else nodo
+            )
+            aplicados["periodo"] = periodo
+    salidas = {str(n).lower(): str(n) for n in arbol.named_selects}
+    condiciones = []
+    # La llave estable basta por si sola y evita filtros redundantes por nombre.
+    claves = ["linea_id", "concepto", "categoria", "titular"]
+    for clave in claves:
+        valor = filtros.get(clave)
+        if valor in (None, ""):
+            continue
+        columna = next((salidas[a] for a in _FILTROS_SALIDA[clave] if a in salidas), None)
+        if not columna:
+            continue
+        referencia = exp.column(columna, table="_kpi")
+        normalizada = exp.Lower(this=exp.Trim(this=exp.Cast(
+            this=referencia, to=exp.DataType.build("TEXT"))))
+        condiciones.append(exp.EQ(
+            this=normalizada,
+            expression=exp.Literal.string(str(valor).strip().lower()),
+        ))
+        aplicados[clave] = valor
+        # Una linea_id identifica el concepto de forma estable; no hace falta
+        # combinarla con etiquetas que pueden haber cambiado de capitalizacion.
+        if clave == "linea_id":
+            break
+    if not condiciones:
+        return arbol.sql(dialect="postgres"), aplicados
+    condicion = condiciones[0]
+    for otra in condiciones[1:]:
+        condicion = exp.and_(condicion, otra)
+    envuelta = exp.select("*").from_(arbol.subquery("_kpi")).where(condicion)
+    return envuelta.sql(dialect="postgres"), aplicados
+
+
 _SISTEMA = (
     "Sos el planificador de un bot de datos por WhatsApp. Con la PREGUNTA del "
     "usuario, un catalogo de KPIS predefinidos y el ESQUEMA real de tablas, "
@@ -318,6 +382,16 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
             linea = f"{etq.get(t['rol'], t['rol'])}: {t['contenido']}"
             if t.get("rol") == "assistant" and t.get("sql"):
                 linea += f"\nSQL que produjo esa respuesta: {t['sql']}"
+            estado = t.get("estado") if t.get("rol") == "assistant" else None
+            if isinstance(estado, dict) and estado:
+                linea += (
+                    "\nEstado verificado (debe conservarse en seguimientos): "
+                    + json.dumps({
+                        "kpi": estado.get("kpi", ""),
+                        "filtros": estado.get("filtros", {}),
+                        "periodo": estado.get("periodo", {}),
+                    }, ensure_ascii=False)
+                )
             lineas.append(linea)
         hist = "Conversacion reciente:\n" + "\n".join(lineas) + "\n\n"
 

@@ -37,7 +37,7 @@ from collections import defaultdict
 import config
 import registry
 from bot import (artefactos, catalogo, correo, formato, intencion, kpis,
-                 memoria, nl2sql, warehouse_ro)
+                 memoria, nl2sql, seguimiento, warehouse_ro)
 from bot.salida import Respuesta
 from bot.tiempo import fecha_local
 
@@ -244,7 +244,7 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     if respuesta_correo is not None:
         memoria.guardar_intercambio(
             cliente, numero, pregunta, respuesta_correo.texto,
-            sql=respuesta_correo.sql,
+            sql=respuesta_correo.sql, estado=respuesta_correo.estado,
         )
         return respuesta_correo
 
@@ -312,7 +312,8 @@ def responder(numero: str, pregunta: str) -> Respuesta:
         nombres = ", ".join(a.nombre for a in respuesta.adjuntos)
         texto_memoria = f"{texto_memoria}\n[Se envió el archivo adjunto: {nombres}]"
     memoria.guardar_intercambio(
-        cliente, numero, pregunta, texto_memoria, sql=respuesta.sql)
+        cliente, numero, pregunta, texto_memoria, sql=respuesta.sql,
+        estado=respuesta.estado)
     return respuesta
 
 
@@ -337,6 +338,15 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     if fmt != formato.TEXTO:
         logger.info("[%s] formato de salida pedido: %s", cid, fmt)
 
+    # Un contrafactual sobre el ultimo agregado ("sin la transaccion de 195
+    # mil") es aritmetica, no text-to-SQL. Se calcula sobre cifras persistidas
+    # y verificadas; Gemini no vuelve a interpretar ni a sumar los montos.
+    if fmt == formato.TEXTO:
+        ajuste = seguimiento.resolver_ajuste(pregunta, historial)
+        if ajuste is not None:
+            texto_ajuste, estado_ajuste = ajuste
+            return Respuesta(texto_ajuste, estado=estado_ajuste)
+
     # "Eso en PDF" no es una consulta nueva: reutiliza el ultimo SELECT
     # validado. Si el mensaje agrega tema o periodo ("ventas de agosto en
     # PDF"), sigue por el planificador normal.
@@ -353,6 +363,8 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     pregunta_efectiva, confirma_detalle = _confirmacion_de_detalle(
         pregunta, historial,
     )
+    es_seguimiento = seguimiento.es_seguimiento_contextual(pregunta, historial)
+    estado_previo = seguimiento.ultimo_estado(historial) if es_seguimiento else {}
 
     # Capa semantica: ¿un KPI predefinido calza? ¿hay que pedir contexto o retar?
     kpis_def = kpis.cargar_kpis(cliente)
@@ -402,6 +414,13 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     sql = sql_reutilizado
     if plan["accion"] == "usar_kpi" and plan.get("sql"):
         sql = plan["sql"]
+        if estado_previo:
+            sql, filtros_sql = kpis.parametrizar_sql(
+                sql, estado_previo.get("filtros"), estado_previo.get("periodo"),
+            )
+            if filtros_sql:
+                logger.info("[%s] KPI parametrizado con contexto: %s",
+                            cid, sorted(filtros_sql))
         # La formula ya viene materializada de forma deterministica desde la
         # metadata: el modelo eligio el KPI, pero no pudo reescribir su SQL.
         logger.info("[%s] SQL derivado del KPI '%s': %s",
@@ -415,15 +434,28 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             sql = ""  # cae al camino libre abajo
 
     if not sql:
+        pregunta_sql = pregunta_efectiva
+        if estado_previo:
+            contexto = {
+                "kpi": estado_previo.get("kpi", ""),
+                "filtros": estado_previo.get("filtros", {}),
+                "periodo": estado_previo.get("periodo", {}),
+            }
+            pregunta_sql = (
+                f"{pregunta_efectiva}\n\n"
+                "CONTEXTO ESTRUCTURADO OBLIGATORIO DEL RESULTADO ANTERIOR: "
+                f"{contexto}. Conserva esos filtros salvo que el usuario los "
+                "cambie explicitamente."
+            )
         sql = nl2sql.generar_sql(
-            pregunta_efectiva, ctx.schema_text, historial=historial,
+            pregunta_sql, ctx.schema_text, historial=historial,
         )
         ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
         if ok:
             ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
         if not ok:
             logger.info("[%s] SQL rechazado (%s); reintento. sql=%s", cid, motivo, sql)
-            sql = nl2sql.generar_sql(pregunta_efectiva, ctx.schema_text,
+            sql = nl2sql.generar_sql(pregunta_sql, ctx.schema_text,
                                      correccion=motivo, sql_previo=sql,
                                      historial=historial)
             ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
@@ -447,6 +479,29 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         logger.exception("[%s] error ejecutando SQL: %s", cid, e)
         return Respuesta(_ERROR)
 
+    # Un KPI antiguo puede no proyectar la llave necesaria para filtrarlo en
+    # SQL. Como segunda defensa se acota el resultado ya calculado usando solo
+    # valores inequívocos del turno anterior.
+    if estado_previo:
+        filas_filtradas, filtros_aplicados = seguimiento.filtrar_filas_por_contexto(
+            columnas, filas, estado_previo,
+        )
+        if filtros_aplicados:
+            logger.info("[%s] resultado acotado por contexto: %s",
+                        cid, sorted(filtros_aplicados))
+            filas = filas_filtradas
+
+    ok_resultado, motivo_resultado = seguimiento.validar_resultado(
+        columnas, filas, contexto=estado_previo,
+    )
+    if not ok_resultado:
+        logger.error("[%s] resultado no reconciliado: %s", cid, motivo_resultado)
+        return Respuesta(
+            "No pude reconciliar el resultado con sus filtros y cálculos "
+            "anteriores, así que no voy a mostrar una cifra dudosa. Inténtelo "
+            "nuevamente o indique el concepto y período completos."
+        )
+
     # NO_RESPONDIBLE es una señal de control del planificador, no una fila de
     # negocio. Se debe detener aquí, antes de que PDF/Excel la conviertan en un
     # archivo válido y antes de que un pedido compuesto prepare un correo con
@@ -464,6 +519,10 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # muestra de siempre. Un prompt con 5.000 filas cuesta plata, tarda y no
     # mejora la frase "te mando el detalle en Excel".
     muestra = filas[:config.BOT_MAX_FILAS]
+    estado_resultado = seguimiento.crear_estado(
+        pregunta, sql, plan.get("kpi", ""), unidad_kpi,
+        columnas, filas, previo=estado_previo,
+    )
     try:
         if sql_reutilizado and fmt != formato.TEXTO:
             etiqueta = {
@@ -500,10 +559,23 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                     "gráfico real en su lugar", cid)
         fmt = formato.GRAFICO
 
+    pasa_critico, motivo_critico = seguimiento.criticar_respuesta(
+        pregunta, texto, estado_resultado,
+    )
+    if not pasa_critico:
+        logger.error("[%s] critico final rechazo la respuesta: %s",
+                     cid, motivo_critico)
+        return Respuesta(
+            "El resultado pasó las validaciones matemáticas, pero no pude "
+            "confirmar que la explicación conservara correctamente el contexto. "
+            "Prefiero no enviarle una respuesta dudosa; reformule la consulta "
+            "indicando concepto y período."
+        )
+
     # 4) Si pidio archivo, armarlo con el MISMO resultado. Nunca se vuelve a
     #    consultar la base: el adjunto es otra presentacion de lo ya autorizado.
     if fmt == formato.TEXTO or not filas:
-        return Respuesta(texto, sql=sql)
+        return Respuesta(texto, sql=sql, estado=estado_resultado)
     # Una lista explicita de columnas tambien se respeta en el adjunto. La
     # respuesta textual aplica esta misma proyeccion dentro del redactor para
     # elegir el formato compacto sin reescribir el SQL ni cambiar valores.
@@ -516,6 +588,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         cid, fmt, pregunta, texto, columnas, filas, historial,
         avisar_si_falla=not hubo_arte)
     respuesta.sql = sql
+    respuesta.estado = estado_resultado
     return respuesta
 
 

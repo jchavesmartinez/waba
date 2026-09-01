@@ -21,6 +21,7 @@ que sobrevive redeploys de Render y funciona con varios workers. Un dict en
 memoria no serviria (muere en cada restart y no se comparte entre procesos).
 """
 
+import json
 import logging
 import threading
 
@@ -44,10 +45,12 @@ _DDL = (
         rol         TEXT        NOT NULL,
         contenido   TEXT        NOT NULL,
         sql         TEXT        NOT NULL DEFAULT '',
+        estado      JSONB       NOT NULL DEFAULT '{}'::jsonb,
         creado_en   TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
     'ALTER TABLE "_bot".conversaciones ADD COLUMN IF NOT EXISTS sql TEXT NOT NULL DEFAULT \'\'',
+    'ALTER TABLE "_bot".conversaciones ADD COLUMN IF NOT EXISTS estado JSONB NOT NULL DEFAULT \'{}\'::jsonb',
     """
     CREATE INDEX IF NOT EXISTS ix_conv_cliente_numero_fecha
         ON "_bot".conversaciones (cliente_id, numero, creado_en DESC)
@@ -111,7 +114,7 @@ def cargar_historial(cliente: dict, numero: str) -> list:
         _asegurar_tabla(cliente)
         sql = text(
             """
-            SELECT rol, contenido, sql
+            SELECT rol, contenido, sql, estado
             FROM "_bot".conversaciones
             WHERE cliente_id = :cid
               AND numero = :num
@@ -128,7 +131,8 @@ def cargar_historial(cliente: dict, numero: str) -> list:
                 "lim": config.BOT_MEMORIA_MAX_TURNOS,
             }).fetchall()
         # Vinieron en DESC (nuevo->viejo); los damos vuelta a cronologico.
-        return [{"rol": r[0], "contenido": r[1], "sql": r[2] or ""}
+        return [{"rol": r[0], "contenido": r[1], "sql": r[2] or "",
+                 "estado": r[3] if isinstance(r[3], dict) else {}}
                 for r in reversed(filas)]
     except Exception as e:  # noqa: BLE001
         logger.warning("[%s] no se pudo cargar historial: %s",
@@ -137,7 +141,8 @@ def cargar_historial(cliente: dict, numero: str) -> list:
 
 
 def guardar_intercambio(cliente: dict, numero: str,
-                        pregunta: str, respuesta: str, sql: str = "") -> None:
+                        pregunta: str, respuesta: str, sql: str = "",
+                        estado: dict | None = None) -> None:
     """Guarda el turno del usuario y el del asistente. Nunca relanza."""
     if not config.BOT_MEMORIA:
         return
@@ -148,8 +153,8 @@ def guardar_intercambio(cliente: dict, numero: str,
         ins = text(
             """
             INSERT INTO "_bot".conversaciones
-                (cliente_id, numero, rol, contenido, sql)
-            VALUES (:cid, :num, :rol, :cont, :sql)
+                (cliente_id, numero, rol, contenido, sql, estado)
+            VALUES (:cid, :num, :rol, :cont, :sql, CAST(:estado AS JSONB))
             """
         )
         purga = text(
@@ -162,9 +167,10 @@ def guardar_intercambio(cliente: dict, numero: str,
         cid = cliente["cliente_id"]
         with _engine(cliente).begin() as cx:
             cx.execute(ins, {"cid": cid, "num": numero, "rol": "user",
-                             "cont": pregunta, "sql": ""})
+                             "cont": pregunta, "sql": "", "estado": "{}"})
             cx.execute(ins, {"cid": cid, "num": numero, "rol": "assistant",
-                             "cont": respuesta, "sql": sql or ""})
+                             "cont": respuesta, "sql": sql or "",
+                             "estado": json.dumps(estado or {}, ensure_ascii=False)})
             # Purga de retencion: barata porque va por (cliente, numero) indexado.
             cx.execute(purga, {"cid": cid, "num": numero, "d": config.BOT_MEMORIA_TTL_DIAS})
     except Exception as e:  # noqa: BLE001

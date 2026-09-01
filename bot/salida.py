@@ -42,6 +42,10 @@ class Respuesta:
     # Consulta que produjo la respuesta. No se muestra al usuario; se guarda en
     # memoria para que "cuales son esas" conserve exactamente los filtros.
     sql: str = ""
+    # Estado estructurado del resultado. Se persiste junto al turno para que un
+    # seguimiento no tenga que reconstruir concepto, periodo o cifras leyendo
+    # prosa. Nunca se muestra al usuario.
+    estado: dict = field(default_factory=dict)
 
     def __str__(self) -> str:      # compatibilidad con codigo viejo/tests
         return self.texto
