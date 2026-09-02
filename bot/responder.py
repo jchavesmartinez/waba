@@ -32,6 +32,8 @@ atras: quien llame a responder() tiene que usar .texto y .adjuntos.
 import logging
 import re
 import threading
+import time
+import uuid
 from collections import defaultdict
 
 import config
@@ -166,6 +168,41 @@ def _ultimo_sql_seguro(historial: list, tablas_reales) -> str:
     return ""
 
 
+def _sql_una_linea(sql: str) -> str:
+    limpio = " ".join(str(sql or "").split())
+    tope = int(getattr(config, "BOT_LOG_SQL_MAX_CHARS", 20000) or 0)
+    if tope > 0 and len(limpio) > tope:
+        return limpio[:tope] + f" ... [recortado; {len(limpio)} caracteres]"
+    return limpio
+
+
+def _ejecutar_con_auditoria(cliente: dict, sql: str, limite, origen: str):
+    """Ejecuta y deja una traza copiable en Render para cada SELECT de negocio."""
+    cid = cliente.get("cliente_id", "")
+    query_id = uuid.uuid4().hex[:10]
+    auditar = bool(getattr(config, "BOT_LOG_SQL", True))
+    if auditar:
+        logger.info("[%s] SQL_AUDIT inicio id=%s origen=%s limite=%s sql=%s",
+                    cid, query_id, origen, limite or config.BOT_MAX_FILAS,
+                    _sql_una_linea(sql))
+    inicio = time.perf_counter()
+    try:
+        columnas, filas = warehouse_ro.ejecutar(cliente, sql, limite=limite)
+    except Exception:
+        if auditar:
+            logger.exception("[%s] SQL_AUDIT error id=%s origen=%s duracion_ms=%.1f",
+                             cid, query_id, origen,
+                             (time.perf_counter() - inicio) * 1000)
+        raise
+    if auditar:
+        logger.info(
+            "[%s] SQL_AUDIT fin id=%s origen=%s duracion_ms=%.1f filas=%d columnas=%d",
+            cid, query_id, origen, (time.perf_counter() - inicio) * 1000,
+            len(filas), len(columnas),
+        )
+    return columnas, filas, query_id
+
+
 def _reconciliar_presupuesto_fuente(cliente, ctx, columnas, filas):
     """Ata ``presupuesto`` al monto mensual raw sin sumar filas de un JOIN."""
     nombres = [str(c).strip().lower().replace(" ", "_") for c in columnas]
@@ -203,12 +240,35 @@ def _reconciliar_presupuesto_fuente(cliente, ctx, columnas, filas):
         + "(" + " OR ".join(condiciones) + ") "
         "AND LOWER(TRIM(tipo)) = 'gasto' GROUP BY linea_id, concepto"
     )
+    auditar = bool(getattr(config, "BOT_LOG_SQL", True))
+    audit_id = uuid.uuid4().hex[:10]
+    inicio = time.perf_counter()
+    if auditar:
+        logger.info(
+            "[%s] SQL_AUDIT inicio id=%s origen=validacion_presupuesto "
+            "params=%s sql=%s",
+            cliente.get("cliente_id"), audit_id, params, _sql_una_linea(sql_fuente),
+        )
     try:
         fuente = warehouse_ro.leer_interno(cliente, sql_fuente, params)
     except Exception as e:  # noqa: BLE001
+        if auditar:
+            logger.exception(
+                "[%s] SQL_AUDIT error id=%s origen=validacion_presupuesto "
+                "duracion_ms=%.1f",
+                cliente.get("cliente_id"), audit_id,
+                (time.perf_counter() - inicio) * 1000,
+            )
         logger.warning("[%s] no se pudo reconciliar presupuesto fuente: %s",
                        cliente.get("cliente_id"), e)
         return list(filas), []
+    if auditar:
+        logger.info(
+            "[%s] SQL_AUDIT fin id=%s origen=validacion_presupuesto "
+            "duracion_ms=%.1f filas=%d",
+            cliente.get("cliente_id"), audit_id,
+            (time.perf_counter() - inicio) * 1000, len(fuente),
+        )
     presupuestos = {}
     for item in fuente:
         # Valores diferentes para una misma llave requieren corregir la fuente,
@@ -552,8 +612,15 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # freno real del warehouse sigue siendo el statement_timeout, que no se toca.
     limite = (int(config.BOT_ADJUNTO_MAX_FILAS)
               if fmt in (formato.EXCEL, formato.CSV, formato.PDF) else None)
+    origen_sql = (
+        "reutilizado" if sql_reutilizado
+        else (f"kpi:{plan.get('kpi')}" if plan.get("accion") == "usar_kpi"
+              else "sql_libre")
+    )
     try:
-        columnas, filas = warehouse_ro.ejecutar(cliente, sql, limite=limite)
+        columnas, filas, query_id = _ejecutar_con_auditoria(
+            cliente, sql, limite, origen_sql,
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error ejecutando SQL: %s", cid, e)
         return Respuesta(_ERROR)
@@ -580,11 +647,12 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             )
         if ok:
             try:
-                columnas_nuevas, filas_nuevas = warehouse_ro.ejecutar(
-                    cliente, sql_reintento, limite=limite,
+                columnas_nuevas, filas_nuevas, query_id_nuevo = _ejecutar_con_auditoria(
+                    cliente, sql_reintento, limite, "reintento_composicion",
                 )
                 if filas_nuevas:
                     sql, columnas, filas = sql_reintento, columnas_nuevas, filas_nuevas
+                    query_id = query_id_nuevo
             except Exception as e:  # noqa: BLE001
                 logger.warning("[%s] fallo reintento de composicion: %s", cid, e)
 
@@ -643,6 +711,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         pregunta, sql, plan.get("kpi", ""), unidad_kpi,
         columnas, filas, previo=estado_previo,
     )
+    estado_resultado["query_id"] = query_id
     try:
         if sql_reutilizado and fmt != formato.TEXTO:
             etiqueta = {

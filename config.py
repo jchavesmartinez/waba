@@ -236,6 +236,12 @@ BOT_MAX_FILAS = int(os.environ.get("BOT_MAX_FILAS", "500"))
 # Corta consultas que se pasen de tiempo (proteccion del warehouse).
 BOT_TIMEOUT_MS = int(os.environ.get("BOT_TIMEOUT_MS", "8000"))
 
+# Auditoria de consultas en los logs de Render. El SQL se escribe en una sola
+# linea junto con un id, origen, duracion y cantidad de filas. Puede contener
+# literales de negocio; apaguelo si su politica de logs no permite esos datos.
+BOT_LOG_SQL = _es_si(os.environ.get("BOT_LOG_SQL", "si"))
+BOT_LOG_SQL_MAX_CHARS = int(os.environ.get("BOT_LOG_SQL_MAX_CHARS", "20000"))
+
 # Politica de gobernanza: ¿que hace el bot con una tabla cuya 'instruccion'
 # viene VACIA o ambigua en el catalogo? False = no la usa (fail-closed, la
 # opcion segura). Ponelo en True solo si preferis que "sin instruccion" = abierta.

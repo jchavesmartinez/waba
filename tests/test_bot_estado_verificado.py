@@ -1,4 +1,5 @@
 from decimal import Decimal
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -19,6 +20,47 @@ CTX = SimpleNamespace(
         SimpleNamespace(tabla_logica="presupuesto", tabla_real="finanzas__presupuesto"),
     ],
 )
+
+
+def test_ejecucion_deja_sql_copiable_y_metricas_en_logs(caplog):
+    sql = "SELECT concepto,\n       SUM(monto_crc) AS total\nFROM finanzas__transacciones"
+    with (
+        patch.object(R.config, "BOT_LOG_SQL", True),
+        patch.object(R.config, "BOT_LOG_SQL_MAX_CHARS", 20000),
+        patch.object(
+            R.warehouse_ro,
+            "ejecutar",
+            return_value=(["concepto", "total"], [("Comida", 25000)]),
+        ) as ejecutar,
+        caplog.at_level(logging.INFO, logger="fachavi.bot.responder"),
+    ):
+        columnas, filas, query_id = R._ejecutar_con_auditoria(
+            CLIENTE, sql, 100, "sql_libre",
+        )
+
+    ejecutar.assert_called_once_with(CLIENTE, sql, limite=100)
+    assert columnas == ["concepto", "total"]
+    assert filas == [("Comida", 25000)]
+    assert len(query_id) == 10
+    assert f"SQL_AUDIT inicio id={query_id}" in caplog.text
+    assert "origen=sql_libre limite=100" in caplog.text
+    assert (
+        "sql=SELECT concepto, SUM(monto_crc) AS total "
+        "FROM finanzas__transacciones"
+    ) in caplog.text
+    assert f"SQL_AUDIT fin id={query_id}" in caplog.text
+    assert "filas=1 columnas=2" in caplog.text
+
+
+def test_auditoria_sql_se_puede_desactivar(caplog):
+    with (
+        patch.object(R.config, "BOT_LOG_SQL", False),
+        patch.object(R.warehouse_ro, "ejecutar", return_value=(["x"], [(1,)])),
+        caplog.at_level(logging.INFO, logger="fachavi.bot.responder"),
+    ):
+        R._ejecutar_con_auditoria(CLIENTE, "SELECT 1 AS x", None, "kpi:prueba")
+
+    assert "SQL_AUDIT" not in caplog.text
 
 
 def test_estado_conserva_filtro_unico_y_hash():
