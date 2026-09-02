@@ -64,3 +64,13 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: var(--
   .panel { padding: 17px; }
   footer { display: grid; }
 }
+@media (max-width: 600px) {
+  .tabla-wrap { max-height: none; overflow: visible; border: 0; }
+  table, tbody, tr, td { display: block; }
+  thead { display: none; }
+  tr { margin: 0 0 10px; padding: 7px 12px; background: #f8faf7; border: 1px solid var(--line); border-radius: 12px; }
+  tr:last-child { margin-bottom: 0; }
+  td { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--line); white-space: normal; text-align: right; overflow-wrap: anywhere; }
+  td::before { content: attr(data-label); color: var(--muted); font-size: .76rem; font-weight: 700; text-align: left; text-transform: capitalize; }
+  td:last-child { border-bottom: 0; }
+}

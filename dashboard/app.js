@@ -70,7 +70,7 @@
     kpi.columnas.forEach((c) => { const th = document.createElement("th"); th.textContent = clean(c); hr.append(th); });
     head.append(hr); table.append(head);
     const body = document.createElement("tbody");
-    kpi.filas.forEach((row) => { const tr = document.createElement("tr"); row.forEach((v, i) => { const td = document.createElement("td"); td.textContent = format(v, kpi.columnas[i], kpi.unidad); tr.append(td); }); body.append(tr); });
+    kpi.filas.forEach((row) => { const tr = document.createElement("tr"); row.forEach((v, i) => { const td = document.createElement("td"); td.dataset.label = clean(kpi.columnas[i]); td.textContent = format(v, kpi.columnas[i], kpi.unidad); tr.append(td); }); body.append(tr); });
     table.append(body); wrap.append(table); panel.append(wrap); target.append(panel);
   });
   if (!data.kpis.length) target.innerHTML = '<article class="panel vacio">No hay KPIs habilitados para mostrar.</article>';
