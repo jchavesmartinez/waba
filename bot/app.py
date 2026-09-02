@@ -36,10 +36,11 @@ from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 import config
 import registry
-from bot import audio, correo, entregas, whatsapp
+from bot import audio, correo, dashboard, entregas, whatsapp
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -48,6 +49,11 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("fachavi.bot.app")
 
 app = FastAPI(title="FACHAVI — WhatsApp bot (Meta Cloud API)")
+app.mount(
+    "/dashboard-assets",
+    StaticFiles(directory=str(dashboard.ASSETS_DIR)),
+    name="dashboard-assets",
+)
 
 # C-05 / C-08 / B-37: se revisa la configuracion de seguridad AL ARRANCAR y se
 # deja en el log en nivel alto. Un default inseguro es discutible; uno
@@ -328,6 +334,39 @@ def _atender_audio(numero: str, media_id: str, mime_webhook: str = "",
 def salud():
     """Estado del servicio + advertencias de configuracion (sin filtrar secretos)."""
     return {"ok": True, "advertencias": _AVISOS_ARRANQUE}
+
+
+@app.get("/dashboard/{token}", response_class=HTMLResponse)
+def ver_dashboard(token: str):
+    """Entrega una vista autocontenida; los datos nunca quedan en una URL."""
+    cabeceras = {
+        "Cache-Control": "private, no-store, max-age=0",
+        "Pragma": "no-cache",
+        "Referrer-Policy": "no-referrer",
+        "X-Frame-Options": "DENY",
+        "Content-Security-Policy": (
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
+            "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'"
+        ),
+    }
+    try:
+        html = dashboard.renderizar(token)
+    except dashboard.EnlaceInvalido:
+        return HTMLResponse(
+            "<h1>Enlace inválido o vencido</h1>"
+            "<p>Solicite un enlace nuevo desde WhatsApp.</p>",
+            status_code=410,
+            headers=cabeceras,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("No se pudo generar el dashboard: %s", exc)
+        return HTMLResponse(
+            "<h1>No pudimos cargar el dashboard</h1>"
+            "<p>Inténtelo nuevamente en unos minutos.</p>",
+            status_code=503,
+            headers=cabeceras,
+        )
+    return HTMLResponse(html, headers=cabeceras)
 
 
 @app.get("/webhook")

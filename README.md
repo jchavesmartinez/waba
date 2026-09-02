@@ -348,6 +348,7 @@ Para darle a `cliente_a` su propio proyecto basta con agregar
 | `bot/app.py` | Webhook de la Meta Cloud API + validación de firma y topes |
 | `bot/audio.py` | Conversión temporal OGG/Opus + transcripción de notas de voz |
 | `bot/responder.py` | Orquestador: registro → memoria → catálogo → SQL |
+| `bot/dashboard.py`, `dashboard/` | Enlaces temporales, snapshots de `_kpis` y plantilla visual multi-cliente |
 | `bot/nl2sql.py` | Genera el SELECT y lo valida con sqlglot |
 | `bot/catalogo.py` | Gobernanza: qué tablas puede leer el bot |
 | `bot/kpis.py`, `intencion.py`, `memoria.py`, `warehouse_ro.py`, `whatsapp.py` | Capa semántica, ruteo, memoria, lectura RO y envío |
@@ -397,6 +398,10 @@ para la lista completa de variables.
    callback exacto `APP_PUBLIC_URL/oauth/google/callback` y verificar que
    términos/privacidad sean públicos. El proyecto en modo Testing solo sirve
    para pilotos: sus conexiones expiran a los siete días.
+5. Si `BOT_DASHBOARD=si`, configurar `APP_PUBLIC_URL` y una llave
+   `DASHBOARD_SECRET` de al menos 32 caracteres (o reutilizar
+   `OAUTH_TOKEN_KEY`). El usuario puede pedir “mándame mi dashboard”; el enlace
+   queda asociado a su número y vence según `DASHBOARD_TOKEN_TTL_MINUTOS`.
 
 El bot revisa las tres al arrancar y deja advertencias de nivel alto en el log;
 también se ven en `GET /salud`.

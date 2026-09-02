@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>Dashboard financiero · Fachavi</title>
+  <link rel="stylesheet" href="/dashboard-assets/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Fachavi · Control financiero</p>
+        <h1 id="cliente">Dashboard financiero</h1>
+        <p id="periodo" class="periodo"></p>
+      </div>
+      <div class="estado"><span></span> Datos verificados</div>
+    </header>
+
+    <section id="resumen" class="cards" aria-label="Resumen"></section>
+    <section id="presupuesto" class="panel presupuesto" hidden></section>
+    <section id="indicadores" class="indicadores"></section>
+
+    <footer>
+      <span id="actualizado"></span>
+      <span>Vista de solo lectura</span>
+    </footer>
+  </main>
+  <script id="dashboard-data" type="application/json">__DASHBOARD_DATA__</script>
+  <script src="/dashboard-assets/app.js" defer></script>
+</body>
+</html>

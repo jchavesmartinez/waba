@@ -294,6 +294,21 @@ services:
       # firma enlaces de conexion. Rotarlo invalida las conexiones existentes.
       - key: OAUTH_TOKEN_KEY
         sync: false
+      # --- Dashboard financiero solicitado desde WhatsApp ---
+      - key: BOT_DASHBOARD
+        value: "si"
+      # Si queda vacío, el código reutiliza OAUTH_TOKEN_KEY. Para instalaciones
+      # nuevas conviene una llave independiente de al menos 32 caracteres.
+      - key: DASHBOARD_SECRET
+        sync: false
+      - key: DASHBOARD_TOKEN_TTL_MINUTOS
+        value: "30"
+      - key: DASHBOARD_CACHE_MINUTOS
+        value: "15"
+      - key: DASHBOARD_MAX_KPIS
+        value: "12"
+      - key: DASHBOARD_MAX_FILAS_POR_KPI
+        value: "50"
       # --- Notas de voz entrantes ---
       # Gemini transcribe el audio y luego procesa el texto con el mismo flujo.
       - key: BOT_AUDIO_ENTRANTE

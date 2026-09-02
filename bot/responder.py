@@ -38,7 +38,7 @@ from collections import defaultdict
 
 import config
 import registry
-from bot import (artefactos, catalogo, correo, formato, intencion, kpis,
+from bot import (artefactos, catalogo, correo, dashboard, formato, intencion, kpis,
                  memoria, nl2sql, seguimiento, warehouse_ro)
 from bot.salida import Respuesta
 from bot.tiempo import fecha_local
@@ -329,6 +329,12 @@ def responder(numero: str, pregunta: str) -> Respuesta:
     if _es_comando_olvidar(pregunta):
         memoria.olvidar(cliente, numero)
         return Respuesta(_OLVIDADO)
+
+    # El dashboard es una entrega, no una consulta conversacional. El numero ya
+    # fue resuelto contra el registro y queda firmado dentro del enlace; no se
+    # gasta una llamada al modelo ni consume el tope diario de preguntas.
+    if dashboard.es_solicitud(pregunta):
+        return Respuesta(dashboard.mensaje_enlace(cliente, numero, pregunta))
 
     if not _pasa_tope_diario(cid):
         logger.warning("[%s] tope diario de mensajes alcanzado (%s)",

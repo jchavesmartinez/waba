@@ -423,6 +423,20 @@ APP_TERMS_VERSION = os.environ.get("APP_TERMS_VERSION", "2026-08").strip()
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
 OAUTH_TOKEN_KEY = os.environ.get("OAUTH_TOKEN_KEY", "").strip()
+# Dashboard multi-cliente. Puede usar una llave independiente; para no duplicar
+# secretos en instalaciones existentes, cae a la llave OAuth si esta ya existe.
+BOT_DASHBOARD = _es_si(os.environ.get("BOT_DASHBOARD", "no"))
+DASHBOARD_SECRET = (
+    os.environ.get("DASHBOARD_SECRET", "").strip() or OAUTH_TOKEN_KEY
+)
+DASHBOARD_TOKEN_TTL_MINUTOS = int(os.environ.get(
+    "DASHBOARD_TOKEN_TTL_MINUTOS", "30",
+))
+DASHBOARD_CACHE_MINUTOS = int(os.environ.get("DASHBOARD_CACHE_MINUTOS", "15"))
+DASHBOARD_MAX_KPIS = int(os.environ.get("DASHBOARD_MAX_KPIS", "12"))
+DASHBOARD_MAX_FILAS_POR_KPI = int(os.environ.get(
+    "DASHBOARD_MAX_FILAS_POR_KPI", "50",
+))
 GOOGLE_OAUTH_REDIRECT_URI = (
     f"{APP_PUBLIC_URL}/oauth/google/callback" if APP_PUBLIC_URL else ""
 )
@@ -613,6 +627,22 @@ def revisar_arranque_bot() -> list:
             avisos.append(
                 "BOT_EMAIL=si pero falta cryptography: no se pueden cifrar los "
                 "tokens OAuth. Reinstala requirements-bot.txt."
+            )
+
+    if BOT_DASHBOARD:
+        faltan_dashboard = [nombre for nombre, valor in (
+            ("APP_PUBLIC_URL", APP_PUBLIC_URL),
+            ("DASHBOARD_SECRET u OAUTH_TOKEN_KEY", DASHBOARD_SECRET),
+        ) if not valor]
+        if faltan_dashboard:
+            avisos.append(
+                "BOT_DASHBOARD=si pero faltan variables: "
+                + ", ".join(faltan_dashboard) + "."
+            )
+        if DASHBOARD_SECRET and len(DASHBOARD_SECRET) < 32:
+            avisos.append(
+                "DASHBOARD_SECRET tiene menos de 32 caracteres; use un secreto "
+                "aleatorio largo para firmar los enlaces."
             )
 
     if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID):
