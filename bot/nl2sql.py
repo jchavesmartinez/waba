@@ -944,6 +944,9 @@ def _contexto_respuesta(pregunta: str) -> str:
     periodo = next((f"{m} {y}" for m in meses for y in re.findall(rf"\b{m}\s+(\d{{4}})\b", texto)), None)
     metrica = "gastos" if re.search(r"\bgast", texto) else "resultados"
     agrupacion = " por comercio" if re.search(r"\bpor\s+comercio", texto) else ""
+    if re.search(r"presupuesto|sobregir|exced", texto):
+        sujeto = "las categorías que excedieron el presupuesto"
+        return f"Estas son {sujeto} de {periodo}:" if periodo else f"Estas son {sujeto}:"
     if periodo:
         return f"Tus {metrica} de {periodo}{agrupacion} son:"
     if agrupacion or metrica == "gastos":
@@ -958,15 +961,19 @@ def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | Non
         return "No encontré registros para ese filtro."
 
     if compacto:
-        return _resultado_compacto(columnas, filas, unidad)
+        resultado = _resultado_compacto(columnas, filas, unidad)
+        contexto = _contexto_respuesta(pregunta) if pregunta else ""
+        return f"{contexto}\n\n{resultado}" if contexto else resultado
 
     presupuesto = _presupuesto_formateado(columnas, filas, unidad)
     if presupuesto:
-        return presupuesto
+        contexto = _contexto_respuesta(pregunta) if pregunta else ""
+        return f"{contexto}\n\n{presupuesto}" if contexto else presupuesto
 
     movimientos = _resultado_movimientos(columnas, filas, unidad, tope)
     if movimientos:
-        return movimientos
+        contexto = _contexto_respuesta(pregunta) if pregunta else ""
+        return f"{contexto}\n\n{movimientos}" if contexto else movimientos
 
     serie = _resultado_serie_temporal(columnas, filas, unidad)
     if serie:
