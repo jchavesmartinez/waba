@@ -936,8 +936,23 @@ def _analisis_tendencia_local(columnas, filas, unidad: str = "") -> str | None:
     return "\n".join(x for x in lineas if x)
 
 
+def _contexto_respuesta(pregunta: str) -> str:
+    """Confirma el alcance interpretado sin repetir literalmente la pregunta."""
+    texto = str(pregunta or "").lower()
+    meses = ("enero", "febrero", "marzo", "abril", "mayo", "junio",
+             "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre")
+    periodo = next((f"{m} {y}" for m in meses for y in re.findall(rf"\b{m}\s+(\d{{4}})\b", texto)), None)
+    metrica = "gastos" if re.search(r"\bgast", texto) else "resultados"
+    agrupacion = " por comercio" if re.search(r"\bpor\s+comercio", texto) else ""
+    if periodo:
+        return f"Tus {metrica} de {periodo}{agrupacion} son:"
+    if agrupacion or metrica == "gastos":
+        return f"Estos son tus {metrica}{agrupacion}:"
+    return ""
+
+
 def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | None = None,
-                              compacto: bool = False) -> str:
+                              compacto: bool = False, pregunta: str = "") -> str:
     """Presenta las celdas ejecutadas sin pedirle aritmetica ni datos al LLM."""
     if not filas:
         return "No encontré registros para ese filtro."
@@ -966,7 +981,9 @@ def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | Non
 
     # Todas las tablas comparten la misma presentación móvil; no se limita la
     # cantidad aquí porque WhatsApp divide el texto largo en varios mensajes.
-    return _resultado_lista(columnas, filas, unidad, tope)
+    resultado = _resultado_lista(columnas, filas, unidad, tope)
+    contexto = _contexto_respuesta(pregunta) if pregunta else ""
+    return f"{contexto}\n\n{resultado}" if contexto else resultado
 
 
 def es_resultado_no_respondible(columnas, filas) -> bool:
@@ -1008,7 +1025,7 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
         pregunta, columnas, filas,
     )
     return redactar_resultado_exacto(
-        columnas, filas, unidad=unidad, compacto=compacto,
+        columnas, filas, unidad=unidad, compacto=compacto, pregunta=pregunta,
     )
 
 
