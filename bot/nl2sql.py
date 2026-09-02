@@ -16,6 +16,7 @@ Dos capas de seguridad, no una:
 La ejecucion en si vive en bot/warehouse_ro.py (transaccion READ ONLY).
 """
 
+import json
 import logging
 import re
 import unicodedata
@@ -34,6 +35,15 @@ logger = logging.getLogger("fachavi.bot.nl2sql")
 # B-24: era 600 fijo. Una consulta con varios JOIN y un CTE se pasa, sale
 # truncada y el motivo del rechazo confunde. Configurable.
 _MAX_TOKENS_SQL = int(getattr(config, "BOT_MAX_TOKENS_SQL", 1200))
+
+_SQL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "sql": {"type": "string"},
+    },
+    "required": ["sql"],
+    "additionalProperties": False,
+}
 
 
 _SISTEMA_SQL = (
@@ -61,13 +71,20 @@ _SISTEMA_SQL = (
     "reutiliza la categoria, periodo y demas filtros del resultado anterior y "
     "devuelve las filas de detalle que lo componen. El esquema actual manda sobre "
     "cualquier afirmacion vieja del historial acerca de acceso a datos.\n"
-    "- Devolve SOLO el SQL, sin explicacion, sin markdown, sin ```."
+    "- En el campo sql devolve SOLO la consulta, sin explicacion, sin markdown "
+    "ni ```; no describas tu razonamiento."
 )
 
 
 def _extraer_sql(texto: str) -> str:
-    """Limpia cercas de markdown y ruido; deja el SQL pelado."""
+    """Extrae el contrato JSON; tolera el formato de texto anterior."""
     t = (texto or "").strip()
+    try:
+        dato = json.loads(t)
+    except (TypeError, ValueError):
+        dato = None
+    if isinstance(dato, dict):
+        t = str(dato.get("sql", "") or "").strip()
     t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
     t = re.sub(r"\s*```$", "", t)
     return t.strip().rstrip(";").strip()
@@ -165,12 +182,20 @@ def generar_sql(pregunta: str, schema_text: str,
             f"SQL rechazado:\n{sql_previo}\n"
             "Corregilo respetando las reglas."
         )
+    # La consulta es una salida corta y mecanica. ``low`` permitia que Gemini
+    # consumiera todo el presupuesto explicando alternativas antes del SELECT;
+    # ``minimal`` reserva los tokens para el SQL. En el reintento se duplica el
+    # limite porque ya sabemos que el intento anterior no cupo.
+    max_tokens = (
+        max(_MAX_TOKENS_SQL * 2, 2400) if correccion else _MAX_TOKENS_SQL
+    )
     resp = llm.generar_texto(
         config.BOT_MODELO_SQL,
         "\n".join(partes),
-        max_tokens=_MAX_TOKENS_SQL,
+        max_tokens=max_tokens,
         system=_SISTEMA_SQL,
-        thinking_level="low",
+        thinking_level="minimal",
+        response_schema=_SQL_SCHEMA,
     )
     # B-24: si el modelo se quedo sin tokens, el SQL viene CORTADO y el
     # validador lo rechaza con "no parseable", un motivo que no tiene nada que
@@ -178,9 +203,10 @@ def generar_sql(pregunta: str, schema_text: str,
     if resp.truncada:
         logger.warning(
             "El SQL se trunco por el tope de %d tokens: la consulta va a quedar "
-            "incompleta y el validador la va a rechazar por 'no parseable'. "
-            "Subi BOT_MAX_TOKENS_SQL si esto se repite.", _MAX_TOKENS_SQL,
+            "incompleta y se descarta antes del validador. El reintento usara "
+            "un limite mayor.", max_tokens,
         )
+        return ""
     return _extraer_sql(resp.texto)
 
 
