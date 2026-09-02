@@ -71,6 +71,60 @@ def test_reconciliador_rechaza_porcentaje_con_denominador_anual():
     assert "porcentaje" in motivo
 
 
+def test_presupuesto_duplicado_se_corrige_con_la_fuente_mensual():
+    columnas = ["concepto", "presupuesto_mensual", "gasto_real", "diferencia",
+                "porcentaje_ejecutado"]
+    filas, cambios = seguimiento.reconciliar_presupuesto_fuente(
+        columnas,
+        [("Imprevistos Jose", 260000, 322625, -62625, 124.09)],
+        {"concepto:imprevistos jose": Decimal("130000")},
+    )
+    assert len(cambios) == 1
+    assert filas[0][1] == Decimal("130000")
+    assert filas[0][3] == Decimal("-192625")
+    assert filas[0][4].quantize(Decimal("0.01")) == Decimal("248.17")
+
+
+def test_consulta_de_composicion_no_implica_mes_actual():
+    assert seguimiento.es_consulta_composicion(
+        "Dime, sobre el concepto de imprevistos José, ¿qué gastos lo conforman?"
+    )
+
+
+def test_composicion_vacia_reintenta_sin_mes_actual_y_sin_tildes():
+    sql_mes = (
+        "SELECT fecha, concepto, monto_crc FROM finanzas__transacciones "
+        "WHERE fecha >= DATE_TRUNC('month', CURRENT_DATE)"
+    )
+    sql_historia = (
+        "SELECT fecha, concepto, monto_crc FROM finanzas__transacciones "
+        "WHERE TRANSLATE(LOWER(concepto), 'áéíóúüñ', 'aeiouun') "
+        "= 'imprevistos jose'"
+    )
+    consultas = []
+
+    def ejecutar(_cliente, sql, limite=None):
+        consultas.append(sql)
+        if sql == sql_mes:
+            return ["fecha", "concepto", "monto_crc"], []
+        return ["fecha", "concepto", "monto_crc"], [
+            ("2026-08-31", "Imprevistos Jose", 26900),
+        ]
+
+    with (
+        patch.object(R.kpis, "cargar_kpis", return_value=[]),
+        patch.object(R.nl2sql, "generar_sql", side_effect=[sql_mes, sql_historia]),
+        patch.object(R.warehouse_ro, "ejecutar", side_effect=ejecutar),
+    ):
+        respuesta = R._responder_datos(
+            CLIENTE, "50600000000",
+            "Dime, sobre imprevistos José, qué gastos lo conforman?", [],
+            fmt_solicitado=formato.TEXTO, ctx=CTX,
+        )
+    assert consultas == [sql_mes, sql_historia]
+    assert "Imprevistos Jose" in respuesta.texto
+
+
 def test_ajuste_de_195mil_usa_presupuesto_mensual_y_no_gemini():
     detalle = seguimiento.crear_estado(
         "qué gastos lo conforman", "SELECT detalle", "", "crc",
@@ -140,6 +194,10 @@ def test_seguimiento_de_presupuesto_devuelve_solo_el_concepto_anterior():
             "sql": definicion["formula_sql"], "mensaje": "",
         }),
         patch.object(R.warehouse_ro, "ejecutar", side_effect=ejecutar),
+        patch.object(R.warehouse_ro, "leer_interno", return_value=[{
+            "linea_id": "gas_imprevistos_jose", "concepto": "Imprevistos Jose",
+            "minimo": 130000, "maximo": 130000,
+        }]),
     ):
         respuesta = R._responder_datos(
             CLIENTE, "50600000000", "¿Y cómo está contra su presupuesto?",
@@ -149,3 +207,40 @@ def test_seguimiento_de_presupuesto_devuelve_solo_el_concepto_anterior():
     assert "_kpi.linea_id" in ejecutado["sql"]
     assert "Imprevistos Jose" in respuesta.texto
     assert respuesta.estado["filtros"]["linea_id"] == "gas_imprevistos_jose"
+
+
+def test_seguimiento_contra_presupuesto_fuerza_kpi_sin_sortearlo_con_gemini():
+    estado = seguimiento.crear_estado(
+        "gastos de agosto", "SELECT detalle", "", "crc",
+        ["fecha", "linea_presupuesto_id", "concepto", "monto_crc"],
+        [("2026-08-31", "gas_imprevistos_jose", "Imprevistos Jose", 322625)],
+    )
+    historial = [{"rol": "assistant", "contenido": "detalle", "estado": estado,
+                  "sql": "SELECT detalle"}]
+    definicion = {
+        "kpi": "ejecucion_presupuesto_concepto", "unidad": "crc",
+        "formula_sql": (
+            "SELECT linea_id, concepto, monto_mensual AS presupuesto, "
+            "0 AS gastado, monto_mensual AS disponible, 0 AS porcentaje_consumido "
+            "FROM presupuesto"
+        ),
+    }
+    with (
+        patch.object(R.kpis, "cargar_kpis", return_value=[definicion]),
+        patch.object(R.kpis, "planificar",
+                     side_effect=AssertionError("no debe llamar Gemini")),
+        patch.object(R.warehouse_ro, "ejecutar", return_value=(
+            ["linea_id", "concepto", "presupuesto", "gastado", "disponible",
+             "porcentaje_consumido"],
+            [("gas_imprevistos_jose", "Imprevistos Jose", 130000, 0, 130000, 0)],
+        )),
+        patch.object(R.warehouse_ro, "leer_interno", return_value=[{
+            "linea_id": "gas_imprevistos_jose", "concepto": "Imprevistos Jose",
+            "minimo": 130000, "maximo": 130000,
+        }]),
+    ):
+        respuesta = R._responder_datos(
+            CLIENTE, "50600000000", "¿Y cómo está contra su presupuesto?",
+            historial, fmt_solicitado=formato.TEXTO, ctx=CTX,
+        )
+    assert respuesta.estado["kpi"] == "ejecucion_presupuesto_concepto"

@@ -25,8 +25,8 @@ _GRUPOS_FILTRO = {
     "moneda": ("moneda",),
 }
 _PRESUPUESTO = ("presupuesto_mensual", "monto_mensual", "presupuesto")
-_GASTADO = ("gastado", "gasto_ejecutado", "ejecutado", "total_gastado")
-_DISPONIBLE = ("disponible", "saldo_disponible")
+_GASTADO = ("gastado", "gasto_real", "gasto_ejecutado", "ejecutado", "total_gastado")
+_DISPONIBLE = ("disponible", "saldo_disponible", "diferencia")
 _PORCENTAJE = ("porcentaje_consumido", "porcentaje_ejecutado", "pct_consumido",
                "pct_ejecutado")
 _MONTOS_DETALLE = ("monto_crc", "monto", "importe", "monto_total", "total")
@@ -45,6 +45,11 @@ def _normalizar(valor) -> str:
 
 def _nombre(valor) -> str:
     return _normalizar(valor).replace(" ", "_")
+
+
+def normalizar_clave(valor) -> str:
+    """Normalizacion publica para cruzar dimensiones ejecutadas."""
+    return _normalizar(valor)
 
 
 def _json_valor(valor):
@@ -88,6 +93,38 @@ def es_seguimiento_contextual(pregunta: str, historial: list) -> bool:
         r"^(?:y\b|pero\b)|\b(?:eso|ese|esa|esos|esas|anterior|mismo|misma|"
         r"contra su presupuesto|contra el presupuesto|sin la transaccion|"
         r"quit(?:a|ar|amos)|exclu(?:ir|ye|yendo)|sac(?:a|ar|amos))\b",
+        t,
+    ))
+
+
+def es_consulta_composicion(pregunta: str) -> bool:
+    """True para preguntas de detalle que no solicitan un agregado temporal."""
+    t = _normalizar(pregunta)
+    return bool(re.search(
+        r"\b(?:que|cuales)\s+(?:gastos?|movimientos?|transacciones?)\b.*"
+        r"\b(?:conforman?|componen?|incluye|hubo)\b|"
+        r"\b(?:que|cuales)\b.*\b(?:conforman?|componen?)\b",
+        t,
+    ))
+
+
+def es_consulta_ejecucion_presupuesto(pregunta: str) -> bool:
+    t = _normalizar(pregunta)
+    return bool(
+        "presupuesto" in t
+        and re.search(
+            r"\b(?:contra|ejecut\w*|gast\w*|consum\w*|disponible|como esta)\b",
+            t,
+        )
+    )
+
+
+def tiene_periodo_explicito(pregunta: str) -> bool:
+    t = _normalizar(pregunta)
+    meses = "|".join(_MESES)
+    return bool(re.search(
+        rf"\b(?:hoy|ayer|este mes|mes pasado|{meses}|20\d{{2}})\b|"
+        r"\b\d{1,2}[/.-]\d{1,2}",
         t,
     ))
 
@@ -300,6 +337,43 @@ def validar_resultado(columnas, filas, contexto: dict | None = None) -> tuple[bo
                 _normalizar(f[indice]) != _normalizar(esperado) for f in filas):
             return False, f"el resultado mezclo valores fuera del filtro {clave}"
     return True, ""
+
+
+def reconciliar_presupuesto_fuente(columnas, filas, presupuestos: dict):
+    """Corrige un presupuesto agregado contra su valor mensual de origen.
+
+    ``presupuestos`` contiene llaves ``linea:<id>`` y ``concepto:<nombre>``.
+    Solo se toca el denominador cuando la fuente tiene un valor inequívoco; los
+    gastos ejecutados siguen viniendo del resultado consultado.
+    """
+    i_linea = _indice(columnas, _GRUPOS_FILTRO["linea_id"])
+    i_concepto = _indice(columnas, _GRUPOS_FILTRO["concepto"])
+    i_pre = _indice(columnas, _PRESUPUESTO)
+    if i_pre is None or (i_linea is None and i_concepto is None):
+        return list(filas), []
+    i_gas = _indice(columnas, _GASTADO)
+    i_dis = _indice(columnas, _DISPONIBLE)
+    i_pct = _indice(columnas, _PORCENTAJE)
+    salida, cambios = [], []
+    for original in filas:
+        fila = list(original)
+        fuente = None
+        if i_linea is not None:
+            fuente = presupuestos.get(f"linea:{_normalizar(fila[i_linea])}")
+        if fuente is None and i_concepto is not None:
+            fuente = presupuestos.get(f"concepto:{_normalizar(fila[i_concepto])}")
+        actual, correcto = _decimal(fila[i_pre]), _decimal(fuente)
+        if correcto is not None and actual is not None and actual != correcto:
+            fila[i_pre] = correcto
+            gastado = _decimal(fila[i_gas]) if i_gas is not None else None
+            if gastado is not None:
+                if i_dis is not None:
+                    fila[i_dis] = correcto - gastado
+                if i_pct is not None and correcto != 0:
+                    fila[i_pct] = gastado / correcto * Decimal("100")
+            cambios.append({"anterior": actual, "correcto": correcto})
+        salida.append(tuple(fila))
+    return salida, cambios
 
 
 def _monto_pedido(pregunta: str) -> Decimal | None:

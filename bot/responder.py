@@ -62,11 +62,9 @@ _TOPE_DIARIO = (
     "Ya llegamos al tope de consultas de hoy para esta cuenta. "
     "Mañana se reinicia. Si necesita más, contacte al administrador."
 )
-_NO_SEGURO = (
-    "No pude armar esa consulta de forma segura. "
-    "Intente formularla de otra manera, por ejemplo: "
-    "«¿cuánto vendimos ayer?» o «¿qué productos tienen bajo inventario?»."
-)
+def _no_seguro(temas: str = "") -> str:
+    mensaje = "No pude armar esa consulta de forma segura. Intente formularla de otra manera."
+    return f"{mensaje} {_mensaje_capacidades(temas)}" if temas else mensaje
 _ERROR = "Tuve un problema consultando los datos. Intentá de nuevo en un momento."
 # El archivo se genera DESPUES de tener los datos. Si falla el armado (o la
 # subida a Meta), el usuario igual se queda con la respuesta en texto: perder el
@@ -166,6 +164,63 @@ def _ultimo_sql_seguro(historial: list, tablas_reales) -> str:
             return sql
         logger.info("SQL historico descartado para adjunto: %s", motivo)
     return ""
+
+
+def _reconciliar_presupuesto_fuente(cliente, ctx, columnas, filas):
+    """Ata ``presupuesto`` al monto mensual raw sin sumar filas de un JOIN."""
+    nombres = [str(c).strip().lower().replace(" ", "_") for c in columnas]
+    i_linea = next((nombres.index(x) for x in
+                    ("linea_id", "linea_presupuesto_id") if x in nombres), None)
+    i_concepto = nombres.index("concepto") if "concepto" in nombres else None
+    i_presupuesto = next((nombres.index(x) for x in
+                          ("presupuesto_mensual", "monto_mensual", "presupuesto")
+                          if x in nombres), None)
+    if not filas or i_presupuesto is None or (i_linea is None and i_concepto is None):
+        return list(filas), []
+    tabla = next((p.tabla_real for p in ctx.permitidas
+                  if str(p.tabla_logica).strip().lower() == "presupuesto"), "")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(tabla)):
+        return list(filas), []
+    lineas = sorted({str(f[i_linea]) for f in filas
+                     if i_linea is not None and f[i_linea] not in (None, "")})
+    conceptos = sorted({seguimiento.normalizar_clave(f[i_concepto]) for f in filas
+                        if i_concepto is not None and f[i_concepto] not in (None, "")})
+    condiciones = []
+    params = {}
+    if lineas:
+        condiciones.append("linea_id = ANY(:lineas)")
+        params["lineas"] = lineas
+    if conceptos:
+        condiciones.append(
+            "TRANSLATE(LOWER(TRIM(concepto)), 'áéíóúüñ', 'aeiouun') = ANY(:conceptos)"
+        )
+        params["conceptos"] = conceptos
+    if not condiciones:
+        return list(filas), []
+    sql_fuente = (
+        f'SELECT linea_id, concepto, MIN(monto_mensual) AS minimo, '
+        f'MAX(monto_mensual) AS maximo FROM "{tabla}" WHERE '
+        + "(" + " OR ".join(condiciones) + ") "
+        "AND LOWER(TRIM(tipo)) = 'gasto' GROUP BY linea_id, concepto"
+    )
+    try:
+        fuente = warehouse_ro.leer_interno(cliente, sql_fuente, params)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[%s] no se pudo reconciliar presupuesto fuente: %s",
+                       cliente.get("cliente_id"), e)
+        return list(filas), []
+    presupuestos = {}
+    for item in fuente:
+        # Valores diferentes para una misma llave requieren corregir la fuente,
+        # no elegir uno silenciosamente desde el bot.
+        if item.get("minimo") != item.get("maximo"):
+            continue
+        valor = item.get("minimo")
+        presupuestos[f"linea:{seguimiento.normalizar_clave(item.get('linea_id'))}"] = valor
+        presupuestos[f"concepto:{seguimiento.normalizar_clave(item.get('concepto'))}"] = valor
+    return seguimiento.reconciliar_presupuesto_fuente(
+        columnas, filas, presupuestos,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -374,10 +429,27 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             "mensaje": "",
         }
         logger.info("[%s] se reutiliza el ultimo SQL para entregar %s", cid, fmt)
-    elif confirma_detalle:
+    elif confirma_detalle or seguimiento.es_consulta_composicion(pregunta_efectiva):
         # El KPI de resumen no sirve para "si, quiero el detalle". El camino
         # libre conserva los filtros anteriores y lista las filas subyacentes.
         plan = {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+    elif (estado_previo
+          and seguimiento.es_consulta_ejecucion_presupuesto(pregunta_efectiva)):
+        # Este seguimiento tiene una interpretacion unica: comparar la linea
+        # anterior contra el presupuesto mensual. No se vuelve a sortear entre
+        # SQL libre y varios KPI mediante otra llamada al modelo.
+        elegido = next((k for k in kpis_def
+                        if str(k.get("kpi", "")).strip().lower()
+                        == "ejecucion_presupuesto_concepto"), None)
+        if elegido:
+            plan = {
+                "accion": "usar_kpi", "kpi": elegido["kpi"],
+                "sql": kpis.sql_canonico(elegido, ctx), "mensaje": "",
+            }
+        else:
+            plan = kpis.planificar(
+                pregunta_efectiva, kpis_def, ctx, historial=historial,
+            )
     else:
         plan = kpis.planificar(
             pregunta_efectiva, kpis_def, ctx, historial=historial,
@@ -447,6 +519,13 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 f"{contexto}. Conserva esos filtros salvo que el usuario los "
                 "cambie explicitamente."
             )
+        if seguimiento.es_consulta_composicion(pregunta_efectiva):
+            pregunta_sql += (
+                "\n\nREGLA DETERMINISTICA: esta es una consulta de composicion. "
+                "Si el usuario no indico periodo, no agregues un filtro de mes; "
+                "lista las filas coincidentes, incluye su fecha y compara texto "
+                "sin tildes con TRANSLATE."
+            )
         sql = nl2sql.generar_sql(
             pregunta_sql, ctx.schema_text, historial=historial,
         )
@@ -463,7 +542,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
             if not ok:
                 logger.warning("[%s] SQL invalido tras reintento (%s): %s", cid, motivo, sql)
-                return Respuesta(_NO_SEGURO)
+                return Respuesta(_no_seguro(catalogo.resumir_habilitados(ctx)))
 
     # 2) Ejecutar en solo-lectura.
     #
@@ -478,6 +557,47 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error ejecutando SQL: %s", cid, e)
         return Respuesta(_ERROR)
+
+    # Una composicion sin periodo debe mirar las filas que forman el concepto,
+    # no el mes calendario recien iniciado. Si el primer SQL devolvio cero, se
+    # permite un unico reintento explicito sin filtro temporal y sin tildes.
+    if (not filas and seguimiento.es_consulta_composicion(pregunta_efectiva)
+            and not seguimiento.tiene_periodo_explicito(pregunta_efectiva)):
+        correccion_vacia = (
+            "La consulta devolvio cero filas. El usuario pregunto la composicion "
+            "historica de un concepto sin indicar periodo: elimina cualquier "
+            "filtro de mes/CURRENT_DATE, incluye la fecha y compara concepto sin "
+            "tildes usando TRANSLATE en columna y literal."
+        )
+        sql_reintento = nl2sql.generar_sql(
+            pregunta_efectiva, ctx.schema_text, correccion=correccion_vacia,
+            sql_previo=sql, historial=historial,
+        )
+        ok, motivo = nl2sql.validar_sql(sql_reintento, ctx.tablas_reales)
+        if ok:
+            ok, motivo = nl2sql.validar_granularidad(
+                pregunta_efectiva, sql_reintento,
+            )
+        if ok:
+            try:
+                columnas_nuevas, filas_nuevas = warehouse_ro.ejecutar(
+                    cliente, sql_reintento, limite=limite,
+                )
+                if filas_nuevas:
+                    sql, columnas, filas = sql_reintento, columnas_nuevas, filas_nuevas
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[%s] fallo reintento de composicion: %s", cid, e)
+
+    # Reconciliacion independiente del denominador. Una consulta libre puede
+    # duplicar monto_mensual al unir presupuesto con movimientos; antes el
+    # cociente seguia siendo internamente consistente y pasaba el validador.
+    # La tabla presupuesto es la fuente de verdad del monto mensual.
+    filas, correcciones_presupuesto = _reconciliar_presupuesto_fuente(
+        cliente, ctx, columnas, filas,
+    )
+    if correcciones_presupuesto:
+        logger.warning("[%s] se corrigieron %d presupuesto(s) contra la fuente",
+                       cid, len(correcciones_presupuesto))
 
     # Un KPI antiguo puede no proyectar la llave necesaria para filtrarlo en
     # SQL. Como segunda defensa se acota el resultado ya calculado usando solo
