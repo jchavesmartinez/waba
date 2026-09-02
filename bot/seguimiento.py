@@ -21,7 +21,6 @@ _GRUPOS_FILTRO = {
     "linea_id": ("linea_id", "linea_presupuesto_id", "linea_presupuestaria_id"),
     "concepto": ("concepto",),
     "categoria": ("categoria",),
-    "titular": ("titular",),
     "moneda": ("moneda",),
 }
 _PRESUPUESTO = ("presupuesto_mensual", "monto_mensual", "presupuesto")
@@ -138,6 +137,33 @@ def tiene_periodo_explicito(pregunta: str) -> bool:
     ))
 
 
+def periodo_explicito(pregunta: str) -> dict:
+    """Extrae un mes/año escrito por el usuario, sin inferirlo del historial.
+
+    El resultado se puede aplicar de forma deterministica a una fórmula KPI.
+    Por ahora solo devuelve rangos cuando el usuario indicó mes y año completos;
+    los demás formatos continúan por el camino que ya interpreta text-to-SQL.
+    """
+    t = _normalizar(pregunta)
+    mes = next((numero for nombre, numero in _MESES.items()
+                if re.search(rf"\b{nombre}\b", t)), None)
+    anio_m = re.search(r"\b(20\d{2})\b", t)
+    if not mes or not anio_m:
+        return {}
+    anio = int(anio_m.group(1))
+    ultimo = monthrange(anio, mes)[1]
+    if mes == 12:
+        fin_exclusivo = f"{anio + 1:04d}-01-01"
+    else:
+        fin_exclusivo = f"{anio:04d}-{mes + 1:02d}-01"
+    return {
+        "inicio": f"{anio:04d}-{mes:02d}-01",
+        "fin_inclusivo": f"{anio:04d}-{mes:02d}-{ultimo:02d}",
+        "fin_exclusivo": fin_exclusivo,
+        "granularidad": "mes",
+    }
+
+
 def filtros_unicos(columnas, filas) -> dict:
     """Extrae dimensiones que tienen un solo valor en todo el resultado."""
     filtros = {}
@@ -155,18 +181,9 @@ def filtros_unicos(columnas, filas) -> dict:
 
 def _periodo_resultado(pregunta: str, columnas, filas, previo: dict | None) -> dict:
     periodo = dict((previo or {}).get("periodo") or {})
-    t = _normalizar(pregunta)
-    mes = next((numero for nombre, numero in _MESES.items()
-                if re.search(rf"\b{nombre}\b", t)), None)
-    anio_m = re.search(r"\b(20\d{2})\b", t)
-    if mes and anio_m:
-        anio = int(anio_m.group(1))
-        ultimo = monthrange(anio, mes)[1]
-        return {
-            "inicio": f"{anio:04d}-{mes:02d}-01",
-            "fin_inclusivo": f"{anio:04d}-{mes:02d}-{ultimo:02d}",
-            "granularidad": "mes",
-        }
+    explicito = periodo_explicito(pregunta)
+    if explicito:
+        return explicito
 
     nombres = [_nombre(c) for c in columnas]
     indices = [i for i, n in enumerate(nombres)

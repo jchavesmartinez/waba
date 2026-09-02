@@ -561,24 +561,61 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     sql = sql_reutilizado
     if plan["accion"] == "usar_kpi" and plan.get("sql"):
         sql = plan["sql"]
-        if estado_previo:
-            sql, filtros_sql = kpis.parametrizar_sql(
-                sql, estado_previo.get("filtros"), estado_previo.get("periodo"),
+        filtros_kpi = dict(estado_previo.get("filtros") or {})
+        # El LLM puede nombrar un filtro explícito de la pregunta actual, pero
+        # jamás escribe SQL: el valor solo se aplica si la fórmula KPI expone
+        # esa dimensión en su resultado canónico.
+        filtros_kpi.update(plan.get("filtros_actuales") or {})
+        periodo_actual = seguimiento.periodo_explicito(pregunta_efectiva)
+        periodo_kpi = periodo_actual or estado_previo.get("periodo") or {}
+        if not periodo_kpi and kpis.admite_periodo_parametrizado(sql):
+            hoy = fecha_local()
+            if hoy.month == 12:
+                fin = f"{hoy.year + 1:04d}-01-01"
+            else:
+                fin = f"{hoy.year:04d}-{hoy.month + 1:02d}-01"
+            periodo_kpi = {
+                "inicio": f"{hoy.year:04d}-{hoy.month:02d}-01",
+                "fin_exclusivo": fin,
+                "granularidad": "mes",
+            }
+        if periodo_actual and not kpis.admite_periodo_parametrizado(sql):
+            logger.info(
+                "[%s] KPI '%s' no declara parámetros de período; cae a sql_libre",
+                cid, plan.get("kpi"),
             )
+            sql = ""
+        else:
+            try:
+                sql, filtros_sql = kpis.parametrizar_sql(
+                    sql, filtros_kpi, periodo_kpi,
+                )
+            except ValueError as e:
+                logger.info(
+                    "[%s] KPI '%s' no se pudo parametrizar (%s); cae a sql_libre",
+                    cid, plan.get("kpi"), e,
+                )
+                sql = ""
+                filtros_sql = {}
             if filtros_sql:
                 logger.info("[%s] KPI parametrizado con contexto: %s",
                             cid, sorted(filtros_sql))
-        # La formula ya viene materializada de forma deterministica desde la
-        # metadata: el modelo eligio el KPI, pero no pudo reescribir su SQL.
-        logger.info("[%s] SQL derivado del KPI '%s': %s",
-                    cid, plan.get("kpi"), " ".join(sql.split()))
-        ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
-        if ok:
-            ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
-        if not ok:
-            logger.info("[%s] SQL de KPI '%s' invalido (%s); cae a sql_libre",
-                        cid, plan.get("kpi"), motivo)
-            sql = ""  # cae al camino libre abajo
+        if sql:
+            # La formula ya viene materializada de forma deterministica desde la
+            # metadata: el modelo eligio QUE KPI corresponde, pero no puede
+            # reescribir sus joins, deduplicación ni sus rangos.
+            logger.info("[%s] SQL derivado del KPI '%s': %s",
+                        cid, plan.get("kpi"), " ".join(sql.split()))
+            ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
+            if ok:
+                ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
+            if not ok:
+                logger.info("[%s] SQL de KPI '%s' invalido (%s); cae a sql_libre",
+                            cid, plan.get("kpi"), motivo)
+                sql = ""  # cae al camino libre abajo
+
+    if not sql and plan.get("accion") == "usar_kpi":
+        plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
 
     if not sql:
         pregunta_sql = pregunta_efectiva

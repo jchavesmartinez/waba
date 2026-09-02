@@ -95,7 +95,7 @@ def test_plan_nuevo_no_hereda_estado_anterior():
     assert contexto == {}
 
 
-def test_modificacion_hereda_solo_filtros_solicitados_y_verificados():
+def test_modificacion_ignora_filtros_no_habilitados_para_kpis():
     previo = seguimiento.crear_estado(
         "imprevistos jose", "SELECT detalle", "detalle_gastos", "crc",
         ["concepto", "titular", "monto_crc"],
@@ -110,7 +110,7 @@ def test_modificacion_hereda_solo_filtros_solicitados_y_verificados():
     })
     assert contexto == {
         "kpi": "detalle_gastos",
-        "filtros": {"titular": "Jose"},
+        "filtros": {},
         "periodo": {},
     }
 
@@ -169,6 +169,66 @@ def test_pregunta_completa_nueva_no_arrastra_titular_anterior():
     assert "alimentacion" in respuesta.sql.lower()
 
 
+def test_periodo_explicito_mantiene_kpi_consolidado_y_no_degrada_a_sql_libre():
+    ctx = SimpleNamespace(
+        error_lectura=False,
+        tablas_reales={"finanzas__transacciones", "googledrive_db__gastos_manuales"},
+        schema_text=(
+            "finanzas__transacciones(fecha_transaccion, comercio, cuenta_contable, monto); "
+            "googledrive_db__gastos_manuales(fecha, descripcion, categoria, monto)"
+        ),
+        permitidas=[],
+    )
+    formula = (
+        "WITH movimientos AS ("
+        "SELECT fecha_transaccion AS fecha, comercio, cuenta_contable AS categoria, monto "
+        "FROM finanzas__transacciones "
+        "UNION ALL "
+        "SELECT fecha, descripcion AS comercio, categoria, monto "
+        "FROM googledrive_db__gastos_manuales) "
+        "SELECT categoria, comercio, SUM(monto) AS gastado "
+        "FROM movimientos "
+        "WHERE fecha >= DATE '{{periodo_inicio}}' "
+        "AND fecha < DATE '{{periodo_fin}}' "
+        "GROUP BY categoria, comercio"
+    )
+    definicion = {
+        "kpi": "gasto_por_comercio", "unidad": "colones",
+        "formula_sql": formula,
+    }
+    ejecutado = {}
+
+    def ejecutar(_cliente, sql, limite=None):
+        ejecutado["sql"] = sql
+        return ["categoria", "comercio", "gastado"], [
+            ("Alimentacion", "Pinchos", 22500),
+        ]
+
+    with (
+        patch.object(R.kpis, "cargar_kpis", return_value=[definicion]),
+        patch.object(R.kpis, "planificar", return_value={
+            "relacion": "nueva", "heredar_filtros": [],
+            "filtros_actuales": {"categoria": "Alimentacion"},
+            "heredar_periodo": False, "heredar_kpi": False,
+            "accion": "usar_kpi", "kpi": "gasto_por_comercio",
+            "sql": formula, "mensaje": "",
+        }),
+        patch.object(R.warehouse_ro, "ejecutar", side_effect=ejecutar),
+    ):
+        respuesta = R._responder_datos(
+            CLIENTE, "50683919244",
+            "Podrías agregar por comercio los gastos de alimentación para agosto 2026",
+            [], fmt_solicitado=formato.TEXTO, ctx=ctx,
+        )
+
+    assert "finanzas__transacciones" in ejecutado["sql"]
+    assert "googledrive_db__gastos_manuales" in ejecutado["sql"]
+    assert "CAST('2026-08-01' AS DATE)" in ejecutado["sql"]
+    assert "CAST('2026-09-01' AS DATE)" in ejecutado["sql"]
+    assert "_kpi.categoria" in ejecutado["sql"]
+    assert "Pinchos" in respuesta.texto
+
+
 def test_kpi_se_parametriza_con_linea_verificada():
     sql, aplicados = kpis.parametrizar_sql(
         "SELECT linea_id, concepto, SUM(presupuesto) AS presupuesto "
@@ -192,6 +252,33 @@ def test_kpi_de_seguimiento_conserva_el_mes_aunque_cambie_current_date():
     assert "CURRENT_DATE" not in sql
     assert "CAST('2026-08-01' AS DATE)" in sql
     assert aplicados["periodo"]["inicio"] == "2026-08-01"
+
+
+def test_kpi_parametrizado_reemplaza_rango_y_filtro_actual_sin_reescribir_joins():
+    sql, aplicados = kpis.parametrizar_sql(
+        "SELECT categoria, comercio, SUM(monto) AS gastado "
+        "FROM finanzas__movimientos "
+        "WHERE fecha >= DATE '{{periodo_inicio}}' "
+        "AND fecha < DATE '{{periodo_fin}}' "
+        "GROUP BY categoria, comercio",
+        {"categoria": "Alimentacion"},
+        {"inicio": "2026-08-01", "fin_exclusivo": "2026-09-01", "granularidad": "mes"},
+    )
+    assert "{{periodo_" not in sql
+    assert "CAST('2026-08-01' AS DATE)" in sql
+    assert "CAST('2026-09-01' AS DATE)" in sql
+    assert "_kpi.categoria" in sql
+    assert aplicados["periodo"]["inicio"] == "2026-08-01"
+    assert aplicados["categoria"] == "Alimentacion"
+
+
+def test_periodo_explicito_extrae_rango_mensual():
+    assert seguimiento.periodo_explicito("gastos de agosto 2026") == {
+        "inicio": "2026-08-01",
+        "fin_inclusivo": "2026-08-31",
+        "fin_exclusivo": "2026-09-01",
+        "granularidad": "mes",
+    }
 
 
 def test_reconciliador_rechaza_porcentaje_con_denominador_anual():

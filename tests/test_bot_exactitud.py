@@ -254,14 +254,22 @@ def test_planificador_elige_kpi_pero_no_puede_reescribir_su_sql():
     assert "deja 'sql' VACIO" in capturado["system"]
 
 
-def test_ventas_de_hoy_no_usan_un_kpi_historico_estatico(monkeypatch):
+def test_ventas_de_hoy_conservan_un_kpi_parametrizable(monkeypatch):
     definicion = {
         "kpi": "ventas_totales",
         "nombre": "Ventas totales",
         "preguntas_ejemplo": "ventas totales",
-        "formula_sql": "SELECT SUM(total) AS ventas FROM ventas",
+        "formula_sql": (
+            "SELECT SUM(total) AS ventas FROM ventas "
+            "WHERE fecha >= DATE '{{periodo_inicio}}' "
+            "AND fecha < DATE '{{periodo_fin}}'"
+        ),
     }
-    ctx = SimpleNamespace(schema_text="ventas(fecha, total)")
+    ctx = SimpleNamespace(
+        schema_text="ventas(fecha, total)",
+        tablas_reales={"ventas"},
+        permitidas=[SimpleNamespace(tabla_logica="ventas", tabla_real="ventas")],
+    )
 
     llamadas = []
 
@@ -281,7 +289,8 @@ def test_ventas_de_hoy_no_usan_un_kpi_historico_estatico(monkeypatch):
     plan = kpis.planificar("ventas totales de hoy", [definicion], ctx)
 
     assert len(llamadas) == 1
-    assert plan["accion"] == "sql_libre"
+    assert plan["accion"] == "usar_kpi"
+    assert "{{periodo_inicio}}" in plan["sql"]
     assert plan["relacion"] == "nueva"
     assert plan["heredar_periodo"] is False
 

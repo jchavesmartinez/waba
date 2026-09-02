@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import unicodedata
+from datetime import date, timedelta
 
 import config
 import llm
@@ -206,8 +207,39 @@ _FILTROS_SALIDA = {
     "linea_id": ("linea_id", "linea_presupuesto_id", "linea_presupuestaria_id"),
     "concepto": ("concepto",),
     "categoria": ("categoria",),
-    "titular": ("titular",),
+    "moneda": ("moneda",),
 }
+
+_PARAMETRO_PERIODO_INICIO = "{{periodo_inicio}}"
+_PARAMETRO_PERIODO_FIN = "{{periodo_fin}}"
+
+
+def admite_periodo_parametrizado(sql: str) -> bool:
+    """Indica si una fórmula KPI declara el contrato de período seguro."""
+    texto = str(sql or "")
+    return (
+        _PARAMETRO_PERIODO_INICIO in texto
+        and _PARAMETRO_PERIODO_FIN in texto
+    )
+
+
+def _rango_periodo(periodo: dict | None) -> tuple[str, str] | None:
+    inicio = str((periodo or {}).get("inicio", "")).strip()
+    fin = str((periodo or {}).get("fin_exclusivo", "")).strip()
+    if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", inicio) and re.fullmatch(
+        r"20\d{2}-\d{2}-\d{2}", fin,
+    ):
+        return inicio, fin
+    fin_inclusivo = str((periodo or {}).get("fin_inclusivo", "")).strip()
+    if not (
+        re.fullmatch(r"20\d{2}-\d{2}-\d{2}", inicio)
+        and re.fullmatch(r"20\d{2}-\d{2}-\d{2}", fin_inclusivo)
+    ):
+        return None
+    try:
+        return inicio, (date.fromisoformat(fin_inclusivo) + timedelta(days=1)).isoformat()
+    except ValueError:
+        return None
 
 
 def parametrizar_sql(sql: str, filtros: dict | None,
@@ -220,10 +252,23 @@ def parametrizar_sql(sql: str, filtros: dict | None,
     """
     if not filtros:
         filtros = {}
+    rango = _rango_periodo(periodo)
+    tiene_parametros = (
+        _PARAMETRO_PERIODO_INICIO in sql or _PARAMETRO_PERIODO_FIN in sql
+    )
+    if tiene_parametros:
+        if not rango:
+            raise ValueError("el KPI requiere un período explícito válido")
+        inicio, fin = rango
+        sql = sql.replace(_PARAMETRO_PERIODO_INICIO, inicio).replace(
+            _PARAMETRO_PERIODO_FIN, fin,
+        )
     arbol = sqlglot.parse_one(sql, read="postgres")
     aplicados = {}
+    if tiene_parametros:
+        aplicados["periodo"] = dict(periodo or {})
     inicio = str((periodo or {}).get("inicio", ""))
-    if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", inicio):
+    if not tiene_parametros and re.fullmatch(r"20\d{2}-\d{2}-\d{2}", inicio):
         reemplazo = exp.Cast(
             this=exp.Literal.string(inicio),
             to=exp.DataType.build("DATE"),
@@ -237,7 +282,7 @@ def parametrizar_sql(sql: str, filtros: dict | None,
     salidas = {str(n).lower(): str(n) for n in arbol.named_selects}
     condiciones = []
     # La llave estable basta por si sola y evita filtros redundantes por nombre.
-    claves = ["linea_id", "concepto", "categoria", "titular"]
+    claves = ["linea_id", "concepto", "categoria", "moneda"]
     for clave in claves:
         valor = filtros.get(clave)
         if valor in (None, ""):
@@ -272,7 +317,8 @@ _SISTEMA = (
     "decidis UNA accion y devolves SOLO un JSON (sin markdown, sin ```), con la "
     "forma:\n"
     '{"relacion":"nueva|seguimiento|modificacion|ambigua",'
-    '"heredar_filtros":[],"heredar_periodo":false,"heredar_kpi":false,'
+    '"heredar_filtros":[],"filtros_actuales":{},'
+    '"heredar_periodo":false,"heredar_kpi":false,'
     '"accion":"usar_kpi|sql_libre|pedir_contexto|retar",'
     '"kpi":"","sql":"","mensaje":""}\n'
     "Si completa 'mensaje', use español profesional, cordial y breve; trate al "
@@ -287,7 +333,13 @@ _SISTEMA = (
     "- La informacion explicita del mensaje actual manda. En heredar_filtros "
     "inclui SOLO nombres de filtros del ultimo Estado verificado que realmente "
     "deban conservarse y que el usuario no haya sustituido. Valores permitidos: "
-    "linea_id, concepto, categoria, titular y moneda. Nunca inventes valores.\n"
+    "linea_id, concepto, categoria y moneda. Nunca inventes valores.\n"
+    "- filtros_actuales contiene SOLO filtros escritos explicitamente en la "
+    "pregunta actual, con claves linea_id, concepto, categoria o moneda. "
+    "Ejemplo: 'gastos por comercio de alimentacion' usa "
+    "{\"categoria\":\"Alimentacion\"}. No pongas filtros que no aparecen "
+    "en la pregunta, ni copies valores del historial: esos van exclusivamente "
+    "en heredar_filtros.\n"
     "- heredar_periodo/heredar_kpi indican si hacen falta el periodo o KPI del "
     "ultimo Estado verificado. En una pregunta nueva deben ser false y "
     "heredar_filtros debe estar vacio.\n"
@@ -374,9 +426,19 @@ _PLAN_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "string",
-                "enum": ["linea_id", "concepto", "categoria", "titular", "moneda"],
+                "enum": ["linea_id", "concepto", "categoria", "moneda"],
             },
             "uniqueItems": True,
+        },
+        "filtros_actuales": {
+            "type": "object",
+            "properties": {
+                "linea_id": {"type": "string"},
+                "concepto": {"type": "string"},
+                "categoria": {"type": "string"},
+                "moneda": {"type": "string"},
+            },
+            "additionalProperties": False,
         },
         "heredar_periodo": {"type": "boolean"},
         "heredar_kpi": {"type": "boolean"},
@@ -389,7 +451,7 @@ _PLAN_SCHEMA = {
         "mensaje": {"type": "string"},
     },
     "required": [
-        "relacion", "heredar_filtros", "heredar_periodo", "heredar_kpi",
+        "relacion", "heredar_filtros", "filtros_actuales", "heredar_periodo", "heredar_kpi",
         "accion", "kpi", "sql", "mensaje",
     ],
     "additionalProperties": False,
@@ -400,6 +462,7 @@ def _plan_sql_libre() -> dict:
     return {
         "relacion": "nueva",
         "heredar_filtros": [],
+        "filtros_actuales": {},
         "heredar_periodo": False,
         "heredar_kpi": False,
         "accion": "sql_libre",
@@ -497,19 +560,11 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
             response_schema=_PLAN_SCHEMA,
         )
         plan = _parsear(resp.texto)
-        # Las formulas KPI son estaticas. El LLM decide la relacion semantica,
-        # pero una fecha explicita del turno actual debe llegar al generador SQL
-        # para adaptar el periodo. Esto no decide si es seguimiento: solo evita
-        # ejecutar un KPI historico con el rango equivocado.
+        # Una fecha explícita no invalida un KPI: el responder la aplica con el
+        # contrato {{periodo_inicio}}/{{periodo_fin}} de la fórmula canónica.
+        # Solo se evita heredar un período anterior distinto.
         if _tiene_periodo_explicito(pregunta):
             plan["heredar_periodo"] = False
-            if plan["accion"] == "usar_kpi":
-                logger.info(
-                    "consulta con periodo explicito; se conserva relacion=%s "
-                    "pero se usa sql_libre para adaptar la fecha",
-                    plan["relacion"],
-                )
-                plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
         if plan["accion"] != "usar_kpi":
             return plan
 
@@ -552,7 +607,7 @@ def _parsear(texto: str) -> dict:
     relacion = str(d.get("relacion", "nueva")).strip().lower()
     if relacion not in ("nueva", "seguimiento", "modificacion", "ambigua"):
         relacion = "nueva"
-    permitidos = {"linea_id", "concepto", "categoria", "titular", "moneda"}
+    permitidos = {"linea_id", "concepto", "categoria", "moneda"}
     heredados = []
     for clave in d.get("heredar_filtros", []) or []:
         clave = str(clave).strip().lower()
@@ -560,9 +615,16 @@ def _parsear(texto: str) -> dict:
             heredados.append(clave)
     if relacion == "nueva":
         heredados = []
+    filtros_actuales = {}
+    for clave, valor in (d.get("filtros_actuales") or {}).items():
+        clave = str(clave).strip().lower()
+        valor = str(valor).strip()
+        if clave in permitidos and valor:
+            filtros_actuales[clave] = valor
     return {
         "relacion": relacion,
         "heredar_filtros": heredados,
+        "filtros_actuales": filtros_actuales,
         "heredar_periodo": (
             bool(d.get("heredar_periodo", False)) if relacion != "nueva" else False
         ),
