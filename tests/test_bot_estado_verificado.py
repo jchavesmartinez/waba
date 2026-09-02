@@ -79,6 +79,96 @@ def test_estado_conserva_filtro_unico_y_hash():
     assert len(estado["resultado_hash"]) == 64
 
 
+def test_plan_nuevo_no_hereda_estado_anterior():
+    previo = seguimiento.crear_estado(
+        "imprevistos jose", "SELECT detalle", "", "crc",
+        ["concepto", "titular", "monto_crc"],
+        [("Imprevistos Jose", "Jose", 1000)],
+    )
+    historial = [{"rol": "assistant", "contenido": "detalle", "estado": previo}]
+    contexto = seguimiento.contexto_segun_plan(historial, {
+        "relacion": "nueva",
+        "heredar_filtros": ["concepto", "titular"],
+        "heredar_periodo": True,
+        "heredar_kpi": True,
+    })
+    assert contexto == {}
+
+
+def test_modificacion_hereda_solo_filtros_solicitados_y_verificados():
+    previo = seguimiento.crear_estado(
+        "imprevistos jose", "SELECT detalle", "detalle_gastos", "crc",
+        ["concepto", "titular", "monto_crc"],
+        [("Imprevistos Jose", "Jose", 1000)],
+    )
+    historial = [{"rol": "assistant", "contenido": "detalle", "estado": previo}]
+    contexto = seguimiento.contexto_segun_plan(historial, {
+        "relacion": "modificacion",
+        "heredar_filtros": ["titular", "categoria"],
+        "heredar_periodo": False,
+        "heredar_kpi": True,
+    })
+    assert contexto == {
+        "kpi": "detalle_gastos",
+        "filtros": {"titular": "Jose"},
+        "periodo": {},
+    }
+
+
+def test_pregunta_completa_nueva_no_arrastra_titular_anterior():
+    previo = seguimiento.crear_estado(
+        "imprevistos jose en agosto 2026", "SELECT detalle", "", "crc",
+        ["fecha", "concepto", "titular", "monto_crc"],
+        [("2026-08-31", "Imprevistos Jose", "Jose", 1000)],
+    )
+    historial = [
+        {"rol": "user", "contenido": "imprevistos jose en agosto 2026"},
+        {"rol": "assistant", "contenido": "detalle", "sql": "SELECT detalle",
+         "estado": previo},
+    ]
+    pregunta_sql = {}
+    sql_alimentacion = (
+        "SELECT concepto, SUM(monto_crc) AS gastado "
+        "FROM finanzas__transacciones "
+        "WHERE LOWER(concepto) = 'alimentacion' "
+        "AND fecha >= DATE '2026-08-01' AND fecha < DATE '2026-09-01' "
+        "GROUP BY concepto"
+    )
+
+    def generar(pregunta, _schema, **kwargs):
+        pregunta_sql["texto"] = pregunta
+        pregunta_sql["historial"] = kwargs.get("historial")
+        return sql_alimentacion
+
+    with (
+        patch.object(R.kpis, "cargar_kpis", return_value=[{
+            "kpi": "ejecucion_presupuesto_concepto", "unidad": "crc",
+        }]),
+        patch.object(R.kpis, "planificar", return_value={
+            "relacion": "nueva",
+            "heredar_filtros": [],
+            "heredar_periodo": False,
+            "heredar_kpi": False,
+            "accion": "sql_libre", "kpi": "", "sql": "", "mensaje": "",
+        }),
+        patch.object(R.nl2sql, "generar_sql", side_effect=generar),
+        patch.object(R.warehouse_ro, "ejecutar", return_value=(
+            ["concepto", "gastado"], [("Alimentacion", 250000)],
+        )),
+    ):
+        respuesta = R._responder_datos(
+            CLIENTE, "50683919244",
+            "¿Cuánto gasté en alimentación en agosto 2026 y cómo se compara "
+            "contra su presupuesto?",
+            historial, fmt_solicitado=formato.TEXTO, ctx=CTX,
+        )
+
+    assert "CONTEXTO ESTRUCTURADO OBLIGATORIO" not in pregunta_sql["texto"]
+    assert pregunta_sql["historial"] == []
+    assert "jose" not in respuesta.sql.lower()
+    assert "alimentacion" in respuesta.sql.lower()
+
+
 def test_kpi_se_parametriza_con_linea_verificada():
     sql, aplicados = kpis.parametrizar_sql(
         "SELECT linea_id, concepto, SUM(presupuesto) AS presupuesto "
@@ -232,6 +322,10 @@ def test_seguimiento_de_presupuesto_devuelve_solo_el_concepto_anterior():
     with (
         patch.object(R.kpis, "cargar_kpis", return_value=[definicion]),
         patch.object(R.kpis, "planificar", return_value={
+            "relacion": "seguimiento",
+            "heredar_filtros": ["linea_id", "concepto"],
+            "heredar_periodo": False,
+            "heredar_kpi": False,
             "accion": "usar_kpi", "kpi": "ejecucion_presupuesto_concepto",
             "sql": definicion["formula_sql"], "mensaje": "",
         }),
@@ -251,7 +345,7 @@ def test_seguimiento_de_presupuesto_devuelve_solo_el_concepto_anterior():
     assert respuesta.estado["filtros"]["linea_id"] == "gas_imprevistos_jose"
 
 
-def test_seguimiento_contra_presupuesto_fuerza_kpi_sin_sortearlo_con_gemini():
+def test_seguimiento_contra_presupuesto_lo_decide_el_planificador():
     estado = seguimiento.crear_estado(
         "gastos de agosto", "SELECT detalle", "", "crc",
         ["fecha", "linea_presupuesto_id", "concepto", "monto_crc"],
@@ -269,8 +363,17 @@ def test_seguimiento_contra_presupuesto_fuerza_kpi_sin_sortearlo_con_gemini():
     }
     with (
         patch.object(R.kpis, "cargar_kpis", return_value=[definicion]),
-        patch.object(R.kpis, "planificar",
-                     side_effect=AssertionError("no debe llamar Gemini")),
+        patch.object(R.kpis, "planificar", return_value={
+            "relacion": "seguimiento",
+            "heredar_filtros": ["linea_id", "concepto"],
+            "heredar_periodo": True,
+            "heredar_kpi": False,
+            "accion": "usar_kpi", "kpi": "ejecucion_presupuesto_concepto",
+            "sql": definicion["formula_sql"].replace(
+                "FROM presupuesto", "FROM finanzas__presupuesto",
+            ),
+            "mensaje": "",
+        }) as planificar,
         patch.object(R.warehouse_ro, "ejecutar", return_value=(
             ["linea_id", "concepto", "presupuesto", "gastado", "disponible",
              "porcentaje_consumido"],
@@ -285,4 +388,5 @@ def test_seguimiento_contra_presupuesto_fuerza_kpi_sin_sortearlo_con_gemini():
             CLIENTE, "50600000000", "¿Y cómo está contra su presupuesto?",
             historial, fmt_solicitado=formato.TEXTO, ctx=CTX,
         )
+    planificar.assert_called_once()
     assert respuesta.estado["kpi"] == "ejecucion_presupuesto_concepto"

@@ -163,7 +163,10 @@ def _kpis_texto(kpis: list, pregunta: str = "") -> str:
 
 def _mapa_nombres(ctx) -> str:
     """Texto 'nombre_logico -> nombre_real' para que el SQL use el real."""
-    pares = [f"{t.tabla_logica} -> {t.tabla_real}" for t in ctx.permitidas]
+    pares = [
+        f"{t.tabla_logica} -> {t.tabla_real}"
+        for t in getattr(ctx, "permitidas", [])
+    ]
     return "\n".join(pares)
 
 
@@ -268,10 +271,31 @@ _SISTEMA = (
     "usuario, un catalogo de KPIS predefinidos y el ESQUEMA real de tablas, "
     "decidis UNA accion y devolves SOLO un JSON (sin markdown, sin ```), con la "
     "forma:\n"
-    '{"accion":"usar_kpi|sql_libre|pedir_contexto|retar","kpi":"","sql":"","mensaje":""}\n'
+    '{"relacion":"nueva|seguimiento|modificacion|ambigua",'
+    '"heredar_filtros":[],"heredar_periodo":false,"heredar_kpi":false,'
+    '"accion":"usar_kpi|sql_libre|pedir_contexto|retar",'
+    '"kpi":"","sql":"","mensaje":""}\n'
     "Si completa 'mensaje', use español profesional, cordial y breve; trate al "
     "usuario de usted y no use jerga ni localismos.\n"
     "Reglas:\n"
+    "- relacion describe como se conecta la pregunta ACTUAL con el historial: "
+    "nueva si se entiende por si misma sin reutilizar la intencion anterior; "
+    "seguimiento si continua el mismo analisis; modificacion si conserva parte "
+    "del analisis pero cambia dimensiones, periodo o filtros; ambigua si no se "
+    "puede decidir con seguridad. Juzgalo por el significado completo, no por "
+    "una palabra aislada ni por si la frase trae tema y periodo.\n"
+    "- La informacion explicita del mensaje actual manda. En heredar_filtros "
+    "inclui SOLO nombres de filtros del ultimo Estado verificado que realmente "
+    "deban conservarse y que el usuario no haya sustituido. Valores permitidos: "
+    "linea_id, concepto, categoria, titular y moneda. Nunca inventes valores.\n"
+    "- heredar_periodo/heredar_kpi indican si hacen falta el periodo o KPI del "
+    "ultimo Estado verificado. En una pregunta nueva deben ser false y "
+    "heredar_filtros debe estar vacio.\n"
+    "- Un pronombre se resuelve dentro de la pregunta actual cuando sea natural: "
+    "en 'gasto en alimentacion y como se compara contra su presupuesto', 'su' "
+    "se refiere a alimentacion, no automaticamente al resultado anterior.\n"
+    "- Si la relacion es ambigua y cambia materialmente el resultado, usa "
+    "pedir_contexto con UNA pregunta breve.\n"
     "- usar_kpi: un KPI del catalogo calza claro y tenes los parametros. Pone su "
     "id exacto en 'kpi' y deja 'sql' VACIO. La aplicacion ejecutara la formula_sql "
     "canonica; vos NO la copies, adaptes ni reescribas.\n"
@@ -342,6 +366,20 @@ _SISTEMA = (
 _PLAN_SCHEMA = {
     "type": "object",
     "properties": {
+        "relacion": {
+            "type": "string",
+            "enum": ["nueva", "seguimiento", "modificacion", "ambigua"],
+        },
+        "heredar_filtros": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["linea_id", "concepto", "categoria", "titular", "moneda"],
+            },
+            "uniqueItems": True,
+        },
+        "heredar_periodo": {"type": "boolean"},
+        "heredar_kpi": {"type": "boolean"},
         "accion": {
             "type": "string",
             "enum": ["usar_kpi", "sql_libre", "pedir_contexto", "retar"],
@@ -350,9 +388,73 @@ _PLAN_SCHEMA = {
         "sql": {"type": "string"},
         "mensaje": {"type": "string"},
     },
-    "required": ["accion", "kpi", "sql", "mensaje"],
+    "required": [
+        "relacion", "heredar_filtros", "heredar_periodo", "heredar_kpi",
+        "accion", "kpi", "sql", "mensaje",
+    ],
     "additionalProperties": False,
 }
+
+
+def _plan_sql_libre() -> dict:
+    return {
+        "relacion": "nueva",
+        "heredar_filtros": [],
+        "heredar_periodo": False,
+        "heredar_kpi": False,
+        "accion": "sql_libre",
+        "kpi": "",
+        "sql": "",
+        "mensaje": "",
+    }
+
+
+def _historial_compacto(historial) -> str:
+    """Contexto semantico reciente sin respuestas ni SQL desproporcionados."""
+    if not historial:
+        return ""
+    tope_turnos = max(int(getattr(config, "BOT_PLAN_HISTORIAL_TURNOS", 6)), 0)
+    tope_chars = max(int(getattr(config, "BOT_PLAN_HISTORIAL_MAX_CHARS", 6000)), 0)
+    if not tope_turnos or not tope_chars:
+        return ""
+
+    prefijo = "Conversacion reciente:\n"
+    sufijo = "\n\n"
+    tope_util = max(tope_chars - len(prefijo) - len(sufijo), 0)
+    if not tope_util:
+        return ""
+    etq = {"user": "Usuario", "assistant": "Asistente"}
+    bloques = []
+    # Se preservan los turnos mas recientes. Cada respuesta se limita antes de
+    # agregar el estado compacto para que una tabla larga no desplace el dato
+    # semantico importante.
+    por_turno = max(min(tope_util // tope_turnos, 1200), 240)
+    for turno in list(historial)[-tope_turnos:]:
+        contenido = " ".join(str(turno.get("contenido", "") or "").split())
+        if len(contenido) > por_turno:
+            contenido = contenido[:por_turno] + " ..."
+        bloque = f"{etq.get(turno.get('rol'), turno.get('rol'))}: {contenido}"
+        estado = turno.get("estado") if turno.get("rol") == "assistant" else None
+        if isinstance(estado, dict) and estado:
+            bloque += (
+                "\nEstado verificado: "
+                + json.dumps({
+                    "kpi": estado.get("kpi", ""),
+                    "filtros": estado.get("filtros", {}),
+                    "periodo": estado.get("periodo", {}),
+                }, ensure_ascii=False, separators=(",", ":"))
+            )
+        bloques.append(bloque)
+
+    # El corte se hace desde el inicio de los turnos mas antiguos; nunca se
+    # adjuntan los SQL historicos, que ya viven en Neon y no ayudan a resolver
+    # si una frase es seguimiento.
+    while bloques and len("\n".join(bloques)) > tope_util:
+        if len(bloques) > 1:
+            bloques.pop(0)
+        else:
+            bloques[0] = bloques[0][:tope_util]
+    return prefijo + "\n".join(bloques) + sufijo
 
 
 def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
@@ -361,39 +463,9 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
     {'accion':'sql_libre'} para no bloquear el camino de datos de siempre.
     """
     if not config.BOT_KPIS or not kpis:
-        return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+        return _plan_sql_libre()
 
-    # Las formulas KPI actuales son SQL estatico: el planificador puede elegir
-    # una, pero no adaptarla. Si el usuario pide "hoy" y elige un KPI de ventas
-    # totales, ejecutar la formula canonica devuelve el historico completo. Una
-    # fecha explicita pasa a SQL libre, donde el filtro solicitado si se aplica.
-    if _tiene_periodo_explicito(pregunta):
-        logger.info(
-            "consulta con periodo explicito; se evita KPI SQL estatico y se "
-            "usa sql_libre"
-        )
-        return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
-
-    hist = ""
-    if historial:
-        etq = {"user": "Usuario", "assistant": "Asistente"}
-        lineas = []
-        for t in historial[-6:]:
-            linea = f"{etq.get(t['rol'], t['rol'])}: {t['contenido']}"
-            if t.get("rol") == "assistant" and t.get("sql"):
-                linea += f"\nSQL que produjo esa respuesta: {t['sql']}"
-            estado = t.get("estado") if t.get("rol") == "assistant" else None
-            if isinstance(estado, dict) and estado:
-                linea += (
-                    "\nEstado verificado (debe conservarse en seguimientos): "
-                    + json.dumps({
-                        "kpi": estado.get("kpi", ""),
-                        "filtros": estado.get("filtros", {}),
-                        "periodo": estado.get("periodo", {}),
-                    }, ensure_ascii=False)
-                )
-            lineas.append(linea)
-        hist = "Conversacion reciente:\n" + "\n".join(lineas) + "\n\n"
+    hist = _historial_compacto(historial)
 
     pregunta_relevancia = pregunta
     if historial and _es_ajuste_presentacion(pregunta):
@@ -425,6 +497,19 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
             response_schema=_PLAN_SCHEMA,
         )
         plan = _parsear(resp.texto)
+        # Las formulas KPI son estaticas. El LLM decide la relacion semantica,
+        # pero una fecha explicita del turno actual debe llegar al generador SQL
+        # para adaptar el periodo. Esto no decide si es seguimiento: solo evita
+        # ejecutar un KPI historico con el rango equivocado.
+        if _tiene_periodo_explicito(pregunta):
+            plan["heredar_periodo"] = False
+            if plan["accion"] == "usar_kpi":
+                logger.info(
+                    "consulta con periodo explicito; se conserva relacion=%s "
+                    "pero se usa sql_libre para adaptar la fecha",
+                    plan["relacion"],
+                )
+                plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
         if plan["accion"] != "usar_kpi":
             return plan
 
@@ -435,16 +520,18 @@ def planificar(pregunta: str, kpis: list, ctx, historial=None) -> dict:
         )
         if elegido is None:
             logger.warning("el planificador eligio un KPI inexistente: %r", plan["kpi"])
-            return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+            plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
+            return plan
         try:
             plan["sql"] = sql_canonico(elegido, ctx)
         except Exception as e:  # noqa: BLE001
             logger.warning("KPI '%s' sin SQL canonico ejecutable: %s", plan["kpi"], e)
-            return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+            plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
+            return plan
         return plan
     except Exception as e:  # noqa: BLE001
         logger.warning("planificador KPI fallo (%s); cae a sql_libre", e)
-        return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+        return _plan_sql_libre()
 
 
 def _parsear(texto: str) -> dict:
@@ -454,15 +541,34 @@ def _parsear(texto: str) -> dict:
     t = re.sub(r"\s*```$", "", t)
     m = re.search(r"\{.*\}", t, re.DOTALL)
     if not m:
-        return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+        return _plan_sql_libre()
     try:
         d = json.loads(m.group(0))
     except Exception:  # noqa: BLE001
-        return {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+        return _plan_sql_libre()
     accion = str(d.get("accion", "")).strip().lower()
     if accion not in ("usar_kpi", "sql_libre", "pedir_contexto", "retar"):
         accion = "sql_libre"
+    relacion = str(d.get("relacion", "nueva")).strip().lower()
+    if relacion not in ("nueva", "seguimiento", "modificacion", "ambigua"):
+        relacion = "nueva"
+    permitidos = {"linea_id", "concepto", "categoria", "titular", "moneda"}
+    heredados = []
+    for clave in d.get("heredar_filtros", []) or []:
+        clave = str(clave).strip().lower()
+        if clave in permitidos and clave not in heredados:
+            heredados.append(clave)
+    if relacion == "nueva":
+        heredados = []
     return {
+        "relacion": relacion,
+        "heredar_filtros": heredados,
+        "heredar_periodo": (
+            bool(d.get("heredar_periodo", False)) if relacion != "nueva" else False
+        ),
+        "heredar_kpi": (
+            bool(d.get("heredar_kpi", False)) if relacion != "nueva" else False
+        ),
         "accion": accion,
         "kpi": str(d.get("kpi", "")).strip(),
         "sql": str(d.get("sql", "")).strip(),

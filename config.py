@@ -229,6 +229,15 @@ BOT_MODELO_RESPUESTA = os.environ.get(
 # un CTE, y el validador las rechazaba con "no parseable" — un motivo que no
 # apunta a la causa real (B-24).
 BOT_MAX_TOKENS_SQL = int(os.environ.get("BOT_MAX_TOKENS_SQL", "1200"))
+# El planificador semantico solo necesita la conversacion reciente y el ultimo
+# estado verificado. El historial completo sigue en Neon, pero no se envia al
+# LLM en cada mensaje.
+BOT_PLAN_HISTORIAL_TURNOS = int(
+    os.environ.get("BOT_PLAN_HISTORIAL_TURNOS", "6")
+)
+BOT_PLAN_HISTORIAL_MAX_CHARS = int(
+    os.environ.get("BOT_PLAN_HISTORIAL_MAX_CHARS", "6000")
+)
 
 # Tope duro de filas que el bot trae del warehouse por consulta.
 BOT_MAX_FILAS = int(os.environ.get("BOT_MAX_FILAS", "500"))

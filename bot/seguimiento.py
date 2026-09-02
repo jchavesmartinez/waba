@@ -84,17 +84,37 @@ def ultimo_estado(historial: list) -> dict:
     return {}
 
 
-def es_seguimiento_contextual(pregunta: str, historial: list) -> bool:
-    """Detecta frases que semanticamente dependen del resultado anterior."""
-    if not ultimo_estado(historial):
-        return False
-    t = _normalizar(pregunta)
-    return bool(re.search(
-        r"^(?:y\b|pero\b)|\b(?:eso|ese|esa|esos|esas|anterior|mismo|misma|"
-        r"contra su presupuesto|contra el presupuesto|sin la transaccion|"
-        r"quit(?:a|ar|amos)|exclu(?:ir|ye|yendo)|sac(?:a|ar|amos))\b",
-        t,
-    ))
+def contexto_segun_plan(historial: list, plan: dict) -> dict:
+    """Materializa solo el contexto que el planificador pidio heredar.
+
+    El LLM decide la relacion semantica, pero nunca entrega valores de negocio:
+    las cifras y filtros se copian exclusivamente del ultimo estado verificado.
+    Una clave inexistente se ignora, de modo que el planificador no puede
+    inventar contexto ni ampliar el acceso a datos.
+    """
+    if str((plan or {}).get("relacion", "nueva")) not in (
+        "seguimiento", "modificacion",
+    ):
+        return {}
+    previo = ultimo_estado(historial)
+    if not previo:
+        return {}
+    disponibles = previo.get("filtros") or {}
+    solicitados = (plan or {}).get("heredar_filtros") or []
+    filtros = {
+        clave: disponibles[clave]
+        for clave in solicitados
+        if clave in disponibles and disponibles[clave] not in (None, "")
+    }
+    contexto = {
+        "kpi": previo.get("kpi", "") if plan.get("heredar_kpi") else "",
+        "filtros": filtros,
+        "periodo": (
+            dict(previo.get("periodo") or {})
+            if plan.get("heredar_periodo") else {}
+        ),
+    }
+    return contexto if any(contexto.values()) else {}
 
 
 def es_consulta_composicion(pregunta: str) -> bool:
@@ -106,17 +126,6 @@ def es_consulta_composicion(pregunta: str) -> bool:
         r"\b(?:que|cuales)\b.*\b(?:conforman?|componen?)\b",
         t,
     ))
-
-
-def es_consulta_ejecucion_presupuesto(pregunta: str) -> bool:
-    t = _normalizar(pregunta)
-    return bool(
-        "presupuesto" in t
-        and re.search(
-            r"\b(?:contra|ejecut\w*|gast\w*|consum\w*|disponible|como esta)\b",
-            t,
-        )
-    )
 
 
 def tiene_periodo_explicito(pregunta: str) -> bool:

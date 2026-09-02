@@ -478,8 +478,6 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     pregunta_efectiva, confirma_detalle = _confirmacion_de_detalle(
         pregunta, historial,
     )
-    es_seguimiento = seguimiento.es_seguimiento_contextual(pregunta, historial)
-    estado_previo = seguimiento.ultimo_estado(historial) if es_seguimiento else {}
 
     # Capa semantica: ¿un KPI predefinido calza? ¿hay que pedir contexto o retar?
     kpis_def = kpis.cargar_kpis(cliente)
@@ -489,31 +487,37 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             "mensaje": "",
         }
         logger.info("[%s] se reutiliza el ultimo SQL para entregar %s", cid, fmt)
-    elif confirma_detalle or seguimiento.es_consulta_composicion(pregunta_efectiva):
-        # El KPI de resumen no sirve para "si, quiero el detalle". El camino
-        # libre conserva los filtros anteriores y lista las filas subyacentes.
-        plan = {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
-    elif (estado_previo
-          and seguimiento.es_consulta_ejecucion_presupuesto(pregunta_efectiva)):
-        # Este seguimiento tiene una interpretacion unica: comparar la linea
-        # anterior contra el presupuesto mensual. No se vuelve a sortear entre
-        # SQL libre y varios KPI mediante otra llamada al modelo.
-        elegido = next((k for k in kpis_def
-                        if str(k.get("kpi", "")).strip().lower()
-                        == "ejecucion_presupuesto_concepto"), None)
-        if elegido:
-            plan = {
-                "accion": "usar_kpi", "kpi": elegido["kpi"],
-                "sql": kpis.sql_canonico(elegido, ctx), "mensaje": "",
-            }
-        else:
-            plan = kpis.planificar(
-                pregunta_efectiva, kpis_def, ctx, historial=historial,
-            )
+    elif confirma_detalle:
+        # Una afirmacion corta a una oferta explicita de detalle es el unico
+        # seguimiento conversacional que resolvemos sin LLM. No hay ambiguedad:
+        # hereda exactamente el estado ofrecido y fuerza filas, no otro resumen.
+        previo = seguimiento.ultimo_estado(historial)
+        plan = {
+            "relacion": "seguimiento",
+            "heredar_filtros": list((previo.get("filtros") or {}).keys()),
+            "heredar_periodo": bool(previo.get("periodo")),
+            "heredar_kpi": bool(previo.get("kpi")),
+            "accion": "sql_libre", "kpi": "", "sql": "", "mensaje": "",
+        }
     else:
         plan = kpis.planificar(
             pregunta_efectiva, kpis_def, ctx, historial=historial,
         )
+        if seguimiento.es_consulta_composicion(pregunta_efectiva):
+            # El planificador conserva la autoridad sobre la relacion y el
+            # contexto; solo se impide usar un KPI de resumen para pedir filas.
+            plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
+
+    estado_previo = seguimiento.contexto_segun_plan(historial, plan)
+    relacion_plan = plan.get("relacion", "nueva")
+    tope_historial_sql = max(
+        int(getattr(config, "BOT_PLAN_HISTORIAL_TURNOS", 6)), 0,
+    )
+    historial_sql = (
+        list(historial)[-tope_historial_sql:]
+        if relacion_plan in ("seguimiento", "modificacion")
+        and tope_historial_sql else []
+    )
     unidad_kpi = ""
     if plan.get("accion") == "usar_kpi":
         elegido = next(
@@ -524,7 +528,18 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         )
         if elegido:
             unidad_kpi = str(elegido.get("unidad", "")).strip()
-    logger.info("[%s] plan=%s kpi=%s", cid, plan["accion"], plan.get("kpi"))
+    heredado = []
+    if estado_previo.get("filtros"):
+        heredado.extend(sorted(estado_previo["filtros"]))
+    if estado_previo.get("periodo"):
+        heredado.append("periodo")
+    if estado_previo.get("kpi"):
+        heredado.append("kpi")
+    logger.info(
+        "[%s] plan=%s kpi=%s relacion=%s contexto_heredado=%s",
+        cid, plan["accion"], plan.get("kpi"), relacion_plan,
+        heredado,
+    )
 
     # Freno anti-interrogatorio: si el turno anterior el bot YA pregunto (su
     # ultimo mensaje termino en '?'), no volvemos a preguntar. El usuario ya
@@ -536,7 +551,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     )
     if plan["accion"] in ("pedir_contexto", "retar") and ya_pregunto:
         logger.info("[%s] ya se pregunto el turno previo; no repregunto, ejecuto", cid)
-        plan = {"accion": "sql_libre", "kpi": "", "sql": "", "mensaje": ""}
+        plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
 
     # El bot pregunta o advierte ANTES de responder: no improvisa un numero.
     if plan["accion"] in ("pedir_contexto", "retar") and plan.get("mensaje"):
@@ -587,7 +602,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 "sin tildes con TRANSLATE."
             )
         sql = nl2sql.generar_sql(
-            pregunta_sql, ctx.schema_text, historial=historial,
+            pregunta_sql, ctx.schema_text, historial=historial_sql,
         )
         ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
         if ok:
@@ -596,7 +611,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             logger.info("[%s] SQL rechazado (%s); reintento. sql=%s", cid, motivo, sql)
             sql = nl2sql.generar_sql(pregunta_sql, ctx.schema_text,
                                      correccion=motivo, sql_previo=sql,
-                                     historial=historial)
+                                     historial=historial_sql)
             ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
             if ok:
                 ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
@@ -638,7 +653,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         )
         sql_reintento = nl2sql.generar_sql(
             pregunta_efectiva, ctx.schema_text, correccion=correccion_vacia,
-            sql_previo=sql, historial=historial,
+            sql_previo=sql, historial=historial_sql,
         )
         ok, motivo = nl2sql.validar_sql(sql_reintento, ctx.tablas_reales)
         if ok:

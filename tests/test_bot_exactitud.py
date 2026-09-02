@@ -263,15 +263,27 @@ def test_ventas_de_hoy_no_usan_un_kpi_historico_estatico(monkeypatch):
     }
     ctx = SimpleNamespace(schema_text="ventas(fecha, total)")
 
-    def no_debe_llamarse(*_args, **_kwargs):
-        raise AssertionError("No debe elegirse un KPI estático para una fecha")
+    llamadas = []
 
-    monkeypatch.setattr(kpis.llm, "generar_texto", no_debe_llamarse)
+    def generar(*_args, **kwargs):
+        llamadas.append(kwargs)
+        return SimpleNamespace(
+            texto=(
+                '{"relacion":"nueva","heredar_filtros":[],'
+                '"heredar_periodo":false,"heredar_kpi":false,'
+                '"accion":"usar_kpi","kpi":"ventas_totales",'
+                '"sql":"","mensaje":""}'
+            ),
+            truncada=False,
+        )
+
+    monkeypatch.setattr(kpis.llm, "generar_texto", generar)
     plan = kpis.planificar("ventas totales de hoy", [definicion], ctx)
 
-    assert plan == {
-        "accion": "sql_libre", "kpi": "", "sql": "", "mensaje": "",
-    }
+    assert len(llamadas) == 1
+    assert plan["accion"] == "sql_libre"
+    assert plan["relacion"] == "nueva"
+    assert plan["heredar_periodo"] is False
 
 
 def test_decimal_de_excel_no_se_multiplica_por_diez_en_locale_tico():
@@ -372,3 +384,28 @@ def test_ajuste_de_columnas_conserva_contexto_para_seleccionar_kpi():
         kpis.llm.generar_texto = original
 
     assert "kpi: flujo_caja_semanal" in capturado["contenido"]
+
+
+def test_historial_del_planificador_es_compacto_y_no_incluye_sql(monkeypatch):
+    monkeypatch.setattr(kpis.config, "BOT_PLAN_HISTORIAL_TURNOS", 6)
+    monkeypatch.setattr(kpis.config, "BOT_PLAN_HISTORIAL_MAX_CHARS", 900)
+    historial = [
+        {"rol": "user", "contenido": "consulta " + "x" * 1500},
+        {
+            "rol": "assistant",
+            "contenido": "respuesta " + "y" * 1500,
+            "sql": "SELECT secreto_muy_largo FROM tabla",
+            "estado": {
+                "kpi": "gasto_categoria",
+                "filtros": {"categoria": "Alimentacion"},
+                "periodo": {"inicio": "2026-08-01"},
+            },
+        },
+    ]
+
+    texto = kpis._historial_compacto(historial)
+
+    assert len(texto) <= 900
+    assert "SELECT secreto_muy_largo" not in texto
+    assert "Estado verificado" in texto
+    assert "Alimentacion" in texto
