@@ -379,7 +379,15 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
     cambios_naturales = {}
     if ":" not in str(pregunta):
         criterios_naturales, cambios_naturales = _extraer_natural(politica, pregunta, accion)
-        valores.update(cambios_naturales if accion == "modificar" else criterios_naturales)
+        # Al crear, todos los datos extraídos son valores del nuevo registro.
+        # Al modificar/anular, los criterios identifican el registro y los
+        # cambios son los campos que se deben actualizar; ambos deben quedar
+        # disponibles para la búsqueda y la validación posterior.
+        if accion == "crear":
+            valores.update(cambios_naturales)
+        else:
+            valores.update(criterios_naturales)
+            valores.update(cambios_naturales)
     # Para modificar/anular, la llave primaria se resuelve internamente. El
     # cliente identifica el registro con lenguaje natural; si hay ambigüedad,
     # solicitamos un dato adicional sin revelar el ID técnico.
