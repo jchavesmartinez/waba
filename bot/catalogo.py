@@ -153,6 +153,10 @@ class TablaPermitida:
     instruccion: str = ""
     # {columna: descripcion} de las filas por-columna del catalogo
     columnas_doc: dict = field(default_factory=dict)
+    # Reglas opcionales de edicion, traidas sin reinterpretar desde _catalogo.
+    # Solo se usan si la fila de tabla declara editable=si.
+    configuracion: dict = field(default_factory=dict)
+    columnas_config: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -312,6 +316,8 @@ def resolver_tablas(cliente: dict) -> tuple[list, bool]:
 
         cols_doc = {r["columna"]: r.get("descripcion", "")
                     for r in rows if r.get("columna", "") not in ("*", "")}
+        cols_config = {r["columna"]: dict(r)
+                       for r in rows if r.get("columna", "") not in ("*", "")}
         # fuente_id ya no se puede afirmar con certeza para una fila del
         # catalogo consolidado; se guarda vacio en vez de un valor inventado.
         permitidas.append(TablaPermitida(
@@ -321,6 +327,8 @@ def resolver_tablas(cliente: dict) -> tuple[list, bool]:
             descripcion=desc,
             instruccion=instr,
             columnas_doc=cols_doc,
+            configuracion=dict(estrella or {}),
+            columnas_config=cols_config,
         ))
 
     return permitidas, False

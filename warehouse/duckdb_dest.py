@@ -632,25 +632,37 @@ class DuckDBDestino(Destino):
     def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
         con = self.conectar()
         self.asegurar_esquema(esquema)
+        cols = (
+            "fuente_id", "tabla", "columna", "descripcion", "instruccion",
+            "sistema_origen", "frecuencia", "dueno", "editable",
+            "acciones_permitidas", "origen_edicion", "clave_primaria",
+            "anulacion_campo", "requerido", "editable_campo", "tipo_validacion",
+            "valores_permitidos", "valor_por_defecto", "calculado_por_sistema",
+            "etiqueta_usuario", "ejemplo",
+        )
         con.execute(
             f'CREATE TABLE IF NOT EXISTS "{esquema}"."_catalogo" ('
             "fuente_id VARCHAR, tabla VARCHAR, columna VARCHAR, descripcion VARCHAR,"
             "instruccion VARCHAR,"
-            "sistema_origen VARCHAR, frecuencia VARCHAR, dueno VARCHAR)"
+            "sistema_origen VARCHAR, frecuencia VARCHAR, dueno VARCHAR,"
+            "editable VARCHAR, acciones_permitidas VARCHAR, origen_edicion VARCHAR,"
+            "clave_primaria VARCHAR, anulacion_campo VARCHAR, requerido VARCHAR,"
+            "editable_campo VARCHAR, tipo_validacion VARCHAR, valores_permitidos VARCHAR,"
+            "valor_por_defecto VARCHAR, calculado_por_sistema VARCHAR,"
+            "etiqueta_usuario VARCHAR, ejemplo VARCHAR)"
         )
         # Migracion suave para _catalogo creado por una version previa.
-        con.execute(
-            f'ALTER TABLE "{esquema}"."_catalogo" ADD COLUMN IF NOT EXISTS instruccion VARCHAR'
-        )
+        for col in cols[4:]:
+            con.execute(
+                f'ALTER TABLE "{esquema}"."_catalogo" ADD COLUMN IF NOT EXISTS "{col}" VARCHAR'
+            )
         con.execute(f'DELETE FROM "{esquema}"."_catalogo" WHERE fuente_id=?', [fuente_id])
         for f in filas:
+            campos = ",".join(cols)
+            marcas = ",".join("?" for _ in cols)
+            valores = [fuente_id if c == "fuente_id" else f.get(c, "") for c in cols]
             con.execute(
-                f'INSERT INTO "{esquema}"."_catalogo" '
-                "(fuente_id,tabla,columna,descripcion,instruccion,"
-                "sistema_origen,frecuencia,dueno) VALUES (?,?,?,?,?,?,?,?)",
-                [fuente_id, f.get("tabla",""), f.get("columna",""), f.get("descripcion",""),
-                 f.get("instruccion",""),
-                 f.get("sistema_origen",""), f.get("frecuencia",""), f.get("dueno","")],
+                f'INSERT INTO "{esquema}"."_catalogo" ({campos}) VALUES ({marcas})', valores,
             )
         logger.info("catalogo de '%s': %d filas en %s._catalogo", fuente_id, len(filas), esquema)
 

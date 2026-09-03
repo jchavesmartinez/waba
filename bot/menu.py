@@ -1,6 +1,6 @@
 """Menú inicial de WhatsApp para orientar consultas sin fijar tablas en código."""
 
-from bot import catalogo, dashboard, memoria, whatsapp
+from bot import catalogo, dashboard, edicion, memoria, whatsapp
 
 
 _MAX_FILAS = 10
@@ -37,6 +37,8 @@ def enviar_principal(numero: str, numero_origen: str = "") -> bool:
 def enviar_tablas(cliente: dict, numero: str, accion: str,
                   numero_origen: str = "") -> bool:
     tablas = _tablas(cliente)
+    if accion == "editar":
+        tablas = [t for t in tablas if edicion.politica_desde_tabla(t)]
     if not tablas:
         return whatsapp.enviar_texto(
             numero, "No encontré tablas habilitadas para esta cuenta.", numero_origen,
@@ -102,11 +104,16 @@ def manejar_seleccion(cliente: dict, numero: str, seleccion: str,
             numero_origen,
         )
         return
-    # La capa de datos del bot es deliberadamente de solo lectura. No prometemos
-    # una escritura que aún no tenga confirmación, autorización ni destino fuente.
-    whatsapp.enviar_texto(
-        numero,
-        f"Seleccionó editar *{etiqueta}*. La edición por WhatsApp se habilitará "
-        "cuando esta tabla tenga configurado un origen editable y confirmación de cambios.",
-        numero_origen,
+    politica = edicion.politica_para(cliente, tabla)
+    if not politica:
+        whatsapp.enviar_texto(
+            numero, "Esa tabla no está habilitada para edición.", numero_origen,
+        )
+        return
+    memoria.guardar_intercambio(
+        cliente, numero,
+        f"Seleccionó editar la tabla {etiqueta} desde el menú.",
+        f"Modo edición seleccionado: tabla {etiqueta}. Solicitar datos y confirmar antes de guardar.",
+        estado={"menu": {"accion": accion, "tabla": tabla}},
     )
+    whatsapp.enviar_texto(numero, edicion.resumen_inicio(politica), numero_origen)

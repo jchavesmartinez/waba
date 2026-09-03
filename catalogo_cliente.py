@@ -44,6 +44,19 @@ _KPIS_COLS = ("kpi", "nombre", "descripcion", "preguntas_ejemplo",
               "formula_sql", "tabla", "dimensiones", "unidad",
               "supuestos", "minimo_datos", "instruccion")
 
+# La metadata de edicion es opcional y vive junto a la documentacion del
+# catalogo. Conservarla como datos (en vez de codificarla para una tabla en
+# particular) permite que cada cliente habilite solo las tablas que conoce y
+# mantiene como fuente de verdad.
+_CATALOGO_COLS = (
+    "fuente_id", "tabla", "columna", "descripcion", "instruccion",
+    "sistema_origen", "frecuencia", "dueno",
+    "editable", "acciones_permitidas", "origen_edicion", "clave_primaria",
+    "anulacion_campo", "requerido", "editable_campo", "tipo_validacion",
+    "valores_permitidos", "valor_por_defecto", "calculado_por_sistema",
+    "etiqueta_usuario", "ejemplo",
+)
+
 
 def leer(cliente: dict) -> tuple:
     """
@@ -91,7 +104,7 @@ def _leer_catalogo(libro, cid: str) -> list:
     norm = []
     for f in filas:
         f = {str(k).strip().lower(): str(v).strip() for k, v in f.items()}
-        norm.append({
+        fila = {
             # 'fuente_id' es NUEVO respecto al catalogo por-fuente de antes:
             # como una sola hoja documenta varias fuentes, hace falta saber a
             # cual pertenece cada fila para filtrar correctamente (ver
@@ -105,7 +118,12 @@ def _leer_catalogo(libro, cid: str) -> list:
             "sistema_origen": f.get("sistema_origen", ""),
             "frecuencia": f.get("frecuencia", ""),
             "dueno": f.get("dueño", "") or f.get("dueno", ""),
-        })
+        }
+        # El resto de reglas es deliberadamente opcional y retrocompatible:
+        # una hoja vieja sigue produciendo exactamente el mismo catalogo de
+        # solo lectura, mientras que una hoja nueva puede declarar edicion.
+        fila.update({c: f.get(c, "") for c in _CATALOGO_COLS if c not in fila})
+        norm.append(fila)
     return norm
 
 

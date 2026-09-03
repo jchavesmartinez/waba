@@ -1,0 +1,33 @@
+from bot.edicion import CampoEdicion, PoliticaEdicion, validar_borrador
+
+
+def _politica():
+    return PoliticaEdicion(
+        tabla="gastos_manuales", origen="Google Sheets", clave_primaria="movimiento_id",
+        anulacion_campo="activo", acciones=("crear", "modificar", "anular"),
+        campos={
+            "movimiento_id": CampoEdicion("movimiento_id", "ID", requerido=True,
+                                            editable=False, calculado=True),
+            "fecha": CampoEdicion("fecha", "Fecha", requerido=True, tipo="fecha_iso"),
+            "monto": CampoEdicion("monto", "Monto", requerido=True, tipo="monto_positivo"),
+            "moneda": CampoEdicion("moneda", "Moneda", requerido=True, tipo="lista",
+                                    valores=("CRC", "USD"), defecto="CRC"),
+        },
+    )
+
+
+def test_borrador_normaliza_fecha_y_monto_local():
+    r = validar_borrador(_politica(), "crear", {
+        "fecha": "2026-09-03", "monto": "₡1.234,50", "moneda": "crc",
+    })
+    assert r.listo_para_confirmar
+    assert r.valores == {"fecha": "2026-09-03", "monto": "1234.50", "moneda": "CRC"}
+
+
+def test_borrador_rechaza_fecha_ambigua_y_monto_no_positivo():
+    r = validar_borrador(_politica(), "crear", {
+        "fecha": "03/04/2026", "monto": "0", "moneda": "CRC",
+    })
+    assert not r.listo_para_confirmar
+    assert any("Fecha" in e for e in r.errores)
+    assert any("Monto" in e for e in r.errores)

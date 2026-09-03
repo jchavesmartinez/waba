@@ -744,32 +744,44 @@ class PostgresDestino(Destino):
 
     def escribir_catalogo(self, esquema: str, fuente_id: str, filas: list):
         self.asegurar_esquema(esquema)
+        cols = (
+            "fuente_id", "tabla", "columna", "descripcion", "instruccion",
+            "sistema_origen", "frecuencia", "dueno", "editable",
+            "acciones_permitidas", "origen_edicion", "clave_primaria",
+            "anulacion_campo", "requerido", "editable_campo", "tipo_validacion",
+            "valores_permitidos", "valor_por_defecto", "calculado_por_sistema",
+            "etiqueta_usuario", "ejemplo",
+        )
         with self.conectar().begin() as cx:
             cx.execute(text(
                 f'CREATE TABLE IF NOT EXISTS "{esquema}"."_catalogo" ('
                 "fuente_id TEXT, tabla TEXT, columna TEXT, descripcion TEXT,"
                 "instruccion TEXT,"
-                "sistema_origen TEXT, frecuencia TEXT, dueno TEXT)"
+                "sistema_origen TEXT, frecuencia TEXT, dueno TEXT,"
+                "editable TEXT, acciones_permitidas TEXT, origen_edicion TEXT,"
+                "clave_primaria TEXT, anulacion_campo TEXT, requerido TEXT,"
+                "editable_campo TEXT, tipo_validacion TEXT, valores_permitidos TEXT,"
+                "valor_por_defecto TEXT, calculado_por_sistema TEXT,"
+                "etiqueta_usuario TEXT, ejemplo TEXT)"
             ))
             # Migracion suave: _catalogo creado por una version vieja no tiene
             # 'instruccion'. La agregamos si falta, para no reventar el INSERT ni
             # obligar a recrear la tabla a mano en Neon.
-            cx.execute(text(
-                f'ALTER TABLE "{esquema}"."_catalogo" '
-                "ADD COLUMN IF NOT EXISTS instruccion TEXT"
-            ))
+            for col in cols[4:]:
+                cx.execute(text(
+                    f'ALTER TABLE "{esquema}"."_catalogo" '
+                    f'ADD COLUMN IF NOT EXISTS "{col}" TEXT'
+                ))
             cx.execute(text(f'DELETE FROM "{esquema}"."_catalogo" WHERE fuente_id=:f'),
                        {"f": fuente_id})
             for f in filas:
+                binds = ",".join(f":{c}" for c in cols)
+                campos = ",".join(cols)
+                params = {c: f.get(c, "") for c in cols}
+                params["fuente_id"] = fuente_id
                 cx.execute(text(
-                    f'INSERT INTO "{esquema}"."_catalogo" '
-                    "(fuente_id,tabla,columna,descripcion,instruccion,"
-                    "sistema_origen,frecuencia,dueno) VALUES "
-                    "(:fid,:tab,:col,:des,:ins,:sis,:fre,:due)"),
-                    {"fid": fuente_id, "tab": f.get("tabla",""), "col": f.get("columna",""),
-                     "des": f.get("descripcion",""), "ins": f.get("instruccion",""),
-                     "sis": f.get("sistema_origen",""),
-                     "fre": f.get("frecuencia",""), "due": f.get("dueno","")})
+                    f'INSERT INTO "{esquema}"."_catalogo" ({campos}) VALUES ({binds})'
+                ), params)
         logger.info("catalogo de '%s': %d filas en %s._catalogo", fuente_id, len(filas), esquema)
 
     def escribir_kpis(self, esquema: str, fuente_id: str, filas: list):
