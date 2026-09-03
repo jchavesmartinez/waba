@@ -107,8 +107,11 @@ def manejar_seleccion(cliente: dict, numero: str, seleccion: str,
         else:
             requeridos = [c.etiqueta for c in politica.campos.values()
                           if c.requerido and not c.calculado]
-            mensaje = ("Envíe los datos como `Campo: valor`, uno por línea. "
-                       "Los campos obligatorios son: " + ", ".join(requeridos) + ".")
+            mensaje = ("Describa el gasto en lenguaje natural, por ejemplo: "
+                       "“Ayer gasté ₡12.500 en Walmart para alimentación”. "
+                       "Le preguntaré lo que falte. También puede usar `Campo: valor` "
+                       "si lo prefiere. Los campos obligatorios son: "
+                       + ", ".join(requeridos) + ".")
         whatsapp.enviar_texto(numero, mensaje, numero_origen)
         return
 
