@@ -18,6 +18,15 @@
   const findKpi = (name) => data.kpis.find((k) => k.kpi === name);
   const rowObject = (kpi, row) => Object.fromEntries(kpi.columnas.map((c, i) => [c, row[i]]));
   const keyMatch = (obj, pattern) => Object.keys(obj).find((key) => pattern.test(key));
+  const dimensionFor = (kpi, row) => {
+    const texto = `${kpi.kpi || ""} ${kpi.nombre || ""} ${kpi.descripcion || ""}`.toLowerCase();
+    const preferred = texto.includes("comercio")
+      ? /comercio|descripcion|concepto|nombre|categoria/i
+      : texto.includes("concepto")
+        ? /concepto|descripcion|comercio|nombre|categoria/i
+        : /categoria|comercio|concepto|descripcion|nombre/i;
+    return keyMatch(row, preferred);
+  };
 
   byId("cliente").textContent = data.cliente.nombre;
   byId("periodo").textContent = data.periodo.etiqueta;
@@ -71,7 +80,7 @@
     // Para resultados por categoría/comercio, mostramos primero una lectura
     // visual y dejamos la tabla completa como detalle opcional.
     const rows = kpi.filas.map((row) => rowObject(kpi, row));
-    const dimensionKey = keyMatch(rows[0], /categoria|comercio|concepto|descripcion|nombre/i);
+    const dimensionKey = dimensionFor(kpi, rows[0]);
     const budgetKey = keyMatch(rows[0], /^presupuesto$/i);
     const spentKey = keyMatch(rows[0], /^gastado$|gasto|monto|total/i);
     const availableKey = keyMatch(rows[0], /^disponible$|saldo/i);
@@ -79,7 +88,7 @@
     if (dimensionKey && (budgetKey || spentKey || availableKey) && rows.length > 1) {
       const chart = document.createElement("div"); chart.className = "bar-chart";
       const numericValues = rows.flatMap((row) => [budgetKey, spentKey, availableKey].map((key) => Math.abs(number(row[key]))).filter(Number.isFinite));
-      const max = Math.max(...numericValues, 1);
+      const globalMax = Math.max(...numericValues, 1);
       rows.forEach((row) => {
         const item = document.createElement("div"); item.className = "bar-item";
         const heading = document.createElement("div"); heading.className = "bar-heading";
@@ -88,11 +97,17 @@
         const alert = (Number.isFinite(pct) && pct > 100) || (availableKey && number(row[availableKey]) < 0);
         const flag = document.createElement("span"); flag.className = alert ? "flag flag-danger" : "flag flag-ok"; flag.textContent = alert ? "Excedido" : "En rango";
         heading.append(name, flag); item.append(heading);
+        // Cuando hay presupuesto y gasto, cada fila usa su propio máximo.
+        // Así se ve claramente si el gasto casi llena su presupuesto. Para
+        // gráficos de gasto sin presupuesto conservamos la escala global.
+        const rowMax = budgetKey && spentKey
+          ? Math.max(Math.abs(number(row[budgetKey])) || 0, Math.abs(number(row[spentKey])) || 0, 1)
+          : globalMax;
         [[budgetKey, "Presupuesto", "bar-budget"], [spentKey, "Gastado", "bar-spent"]].filter(([key]) => key).forEach(([key, label, cls]) => {
           const line = document.createElement("div"); line.className = "bar-line";
           const labelEl = document.createElement("span"); labelEl.textContent = label;
           const track = document.createElement("span"); track.className = "bar-track";
-          const fill = document.createElement("span"); fill.className = `bar-fill ${cls}`; fill.style.width = `${Math.min(100, Math.abs(number(row[key])) / max * 100)}%`; track.append(fill);
+          const fill = document.createElement("span"); fill.className = `bar-fill ${cls}`; fill.style.width = `${Math.min(100, Math.abs(number(row[key])) / rowMax * 100)}%`; track.append(fill);
           const value = document.createElement("strong"); value.textContent = format(row[key], key, kpi.unidad);
           line.append(labelEl, track, value); item.append(line);
         });
