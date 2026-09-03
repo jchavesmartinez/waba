@@ -40,6 +40,21 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .leyenda { display: grid; gap: 12px; }
 .leyenda div { display: flex; justify-content: space-between; gap: 20px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 .leyenda span { color: var(--muted); }
+.bar-chart { display: grid; gap: 18px; margin: 22px 0 4px; }
+.bar-item { display: grid; gap: 8px; }
+.bar-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.bar-heading strong { overflow-wrap: anywhere; }
+.flag { border-radius: 999px; padding: 4px 9px; font-size: .7rem; font-weight: 800; white-space: nowrap; }
+.flag-ok { background: #e6f5e9; color: #1b6b40; }
+.flag-danger { background: #fde8e6; color: #ae3f3a; }
+.bar-line { display: grid; grid-template-columns: 72px minmax(80px, 1fr) auto; align-items: center; gap: 10px; color: var(--muted); font-size: .78rem; }
+.bar-track { height: 10px; overflow: hidden; border-radius: 999px; background: #edf1ed; }
+.bar-fill { display: block; height: 100%; border-radius: inherit; min-width: 2px; }
+.bar-budget { background: var(--lime); }
+.bar-spent { background: var(--green); }
+.detalle { margin-top: 22px; }
+.detalle summary { cursor: pointer; color: var(--green); font-size: .82rem; font-weight: 800; }
+.detalle[open] summary { margin-bottom: 12px; }
 .indicadores { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .tabla-wrap { overflow: auto; max-height: 390px; border: 1px solid var(--line); border-radius: 12px; }
 table { width: 100%; border-collapse: collapse; font-size: .86rem; }
@@ -62,6 +77,8 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: var(--
   .card { padding: 15px; min-height: 112px; }
   .card .valor { font-size: 1.25rem; }
   .panel { padding: 17px; }
+  .bar-line { grid-template-columns: 66px minmax(50px, 1fr) auto; gap: 7px; font-size: .72rem; }
+  .bar-line strong { font-size: .72rem; }
   footer { display: grid; }
 }
 @media (max-width: 600px) {

@@ -17,6 +17,7 @@
   };
   const findKpi = (name) => data.kpis.find((k) => k.kpi === name);
   const rowObject = (kpi, row) => Object.fromEntries(kpi.columnas.map((c, i) => [c, row[i]]));
+  const keyMatch = (obj, pattern) => Object.keys(obj).find((key) => pattern.test(key));
 
   byId("cliente").textContent = data.cliente.nombre;
   byId("periodo").textContent = data.periodo.etiqueta;
@@ -43,7 +44,9 @@
       const pct = Math.max(0, Math.min(100, number(summaryRow[pctKey]) || number(summaryRow[spentKey]) / number(summaryRow[budgetKey]) * 100));
       const panel = byId("presupuesto"); panel.hidden = false;
       const donut = document.createElement("div"); donut.className = "donut";
-      donut.style.background = `conic-gradient(var(--green) 0 ${pct}%, var(--lime) ${pct}% 100%)`;
+      const donutPct = Math.min(100, Math.max(0, pct));
+      const donutColor = pct > 100 ? "var(--red)" : "var(--green)";
+      donut.style.background = `conic-gradient(${donutColor} 0 ${donutPct}%, var(--lime) ${donutPct}% 100%)`;
       const strong = document.createElement("strong"); strong.textContent = format(pct, "pct"); donut.append(strong);
       const legend = document.createElement("div"); legend.className = "leyenda";
       [["Gastado", spentKey], ["Disponible", availableKey], ["Presupuesto", budgetKey]].filter(([, k]) => k).forEach(([label, key]) => {
@@ -64,6 +67,39 @@
     panel.append(title);
     if (kpi.descripcion) { const p = document.createElement("p"); p.className = "descripcion"; p.textContent = kpi.descripcion; panel.append(p); }
     if (!kpi.filas.length) { const p = document.createElement("p"); p.className = "vacio"; p.textContent = "Sin registros para este período."; panel.append(p); target.append(panel); return; }
+
+    // Para resultados por categoría/comercio, mostramos primero una lectura
+    // visual y dejamos la tabla completa como detalle opcional.
+    const rows = kpi.filas.map((row) => rowObject(kpi, row));
+    const dimensionKey = keyMatch(rows[0], /categoria|comercio|concepto|descripcion|nombre/i);
+    const budgetKey = keyMatch(rows[0], /^presupuesto$/i);
+    const spentKey = keyMatch(rows[0], /^gastado$|gasto|monto|total/i);
+    const availableKey = keyMatch(rows[0], /^disponible$|saldo/i);
+    const pctKey = keyMatch(rows[0], /pct|porcentaje/i);
+    if (dimensionKey && (budgetKey || spentKey || availableKey) && rows.length > 1) {
+      const chart = document.createElement("div"); chart.className = "bar-chart";
+      const numericValues = rows.flatMap((row) => [budgetKey, spentKey, availableKey].map((key) => Math.abs(number(row[key]))).filter(Number.isFinite));
+      const max = Math.max(...numericValues, 1);
+      rows.forEach((row) => {
+        const item = document.createElement("div"); item.className = "bar-item";
+        const heading = document.createElement("div"); heading.className = "bar-heading";
+        const name = document.createElement("strong"); name.textContent = row[dimensionKey] ?? "Sin nombre";
+        const pct = pctKey ? number(row[pctKey]) : (budgetKey && spentKey ? number(row[spentKey]) / number(row[budgetKey]) * 100 : null);
+        const alert = (Number.isFinite(pct) && pct > 100) || (availableKey && number(row[availableKey]) < 0);
+        const flag = document.createElement("span"); flag.className = alert ? "flag flag-danger" : "flag flag-ok"; flag.textContent = alert ? "Excedido" : "En rango";
+        heading.append(name, flag); item.append(heading);
+        [[budgetKey, "Presupuesto", "bar-budget"], [spentKey, "Gastado", "bar-spent"]].filter(([key]) => key).forEach(([key, label, cls]) => {
+          const line = document.createElement("div"); line.className = "bar-line";
+          const labelEl = document.createElement("span"); labelEl.textContent = label;
+          const track = document.createElement("span"); track.className = "bar-track";
+          const fill = document.createElement("span"); fill.className = `bar-fill ${cls}`; fill.style.width = `${Math.min(100, Math.abs(number(row[key])) / max * 100)}%`; track.append(fill);
+          const value = document.createElement("strong"); value.textContent = format(row[key], key, kpi.unidad);
+          line.append(labelEl, track, value); item.append(line);
+        });
+        chart.append(item);
+      });
+      panel.append(chart);
+    }
     const wrap = document.createElement("div"); wrap.className = "tabla-wrap";
     const table = document.createElement("table");
     const head = document.createElement("thead"); const hr = document.createElement("tr");
@@ -71,7 +107,10 @@
     head.append(hr); table.append(head);
     const body = document.createElement("tbody");
     kpi.filas.forEach((row) => { const tr = document.createElement("tr"); row.forEach((v, i) => { const td = document.createElement("td"); td.dataset.label = clean(kpi.columnas[i]); td.textContent = format(v, kpi.columnas[i], kpi.unidad); tr.append(td); }); body.append(tr); });
-    table.append(body); wrap.append(table); panel.append(wrap); target.append(panel);
+    table.append(body); wrap.append(table);
+    const details = document.createElement("details"); details.className = "detalle";
+    const summaryDetails = document.createElement("summary"); summaryDetails.textContent = "Ver datos detallados";
+    details.append(summaryDetails, wrap); panel.append(details); target.append(panel);
   });
   if (!data.kpis.length) target.innerHTML = '<article class="panel vacio">No hay KPIs habilitados para mostrar.</article>';
 })();
