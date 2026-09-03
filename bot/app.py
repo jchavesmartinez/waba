@@ -40,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 
 import config
 import registry
-from bot import audio, correo, dashboard, entregas, whatsapp
+from bot import audio, correo, dashboard, entregas, menu, whatsapp
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -71,6 +71,11 @@ _AUDIO_NO_DISPONIBLE = (
     "No pude procesar notas de voz en este momento. Escriba la consulta y la "
     "atiendo igual."
 )
+
+_MENU_DISPARADORES = {
+    "menu", "menú", "inicio", "hola", "holaa", "buenas", "buenos dias",
+    "buenos días", "buenas tardes", "buenas noches",
+}
 _AUDIO_MUY_GRANDE = (
     "La nota de voz es demasiado grande. Envíe una nota más corta o escriba "
     "la consulta."
@@ -186,6 +191,14 @@ def _atender(numero: str, texto: str, numero_origen: str = "") -> None:
     if respuesta.texto:
         whatsapp.enviar_texto(numero, respuesta.texto, numero_origen)
 
+    # El menú solo se muestra con saludo o pedido explícito. Una pregunta de
+    # datos directa sigue funcionando como siempre, sin obligar al usuario a
+    # navegar por botones antes de consultar.
+    if str(texto or "").strip().casefold() in _MENU_DISPARADORES:
+        cliente = registry.resolver(numero)
+        if cliente:
+            menu.enviar_principal(numero, numero_origen)
+            return
     try:
         cliente = registry.resolver(numero) if respuesta.adjuntos else None
     except Exception as e:  # noqa: BLE001
@@ -216,6 +229,23 @@ def _atender(numero: str, texto: str, numero_origen: str = "") -> None:
         )
         if pendiente:
             _reintentar_entrega(cliente, pendiente)
+
+
+def _atender_interactivo(numero: str, seleccion: str,
+                         numero_origen: str = "") -> None:
+    """Resuelve una pulsación de menú sin pasar su ID al LLM."""
+    try:
+        cliente = registry.resolver(numero)
+        if not cliente:
+            whatsapp.enviar_texto(numero, _NO_REGISTRADO, numero_origen)
+            return
+        menu.manejar_seleccion(cliente, numero, seleccion, numero_origen)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Error atendiendo menú de %s: %s", numero, e)
+        whatsapp.enviar_texto(
+            numero, "No pude abrir esa opción. Escriba “menú” para intentarlo de nuevo.",
+            numero_origen,
+        )
 
 
 def _reintentar_entrega(cliente: dict, pendiente: entregas.Reintento) -> None:
@@ -515,6 +545,23 @@ async def webhook(request: Request, tareas: BackgroundTasks):
                 if tipo == "text":
                     texto = (msg.get("text", {}).get("body") or "").strip()
                     tareas.add_task(_atender, numero, texto, origen)
+                    continue
+
+                if tipo == "interactive":
+                    interactivo = msg.get("interactive") or {}
+                    respuesta_menu = (
+                        interactivo.get("list_reply")
+                        or interactivo.get("button_reply")
+                        or {}
+                    )
+                    seleccion = str(respuesta_menu.get("id", "") or "").strip()
+                    if seleccion.startswith("menu:"):
+                        tareas.add_task(_atender_interactivo, numero, seleccion, origen)
+                    else:
+                        tareas.add_task(
+                            whatsapp.enviar_texto, numero,
+                            "No reconocí esa opción. Escriba “menú” para empezar.", origen,
+                        )
                     continue
 
                 if tipo == "audio":

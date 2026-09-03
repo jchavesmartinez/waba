@@ -227,6 +227,30 @@ def enviar_texto(numero_destino: str, texto: str,
     return True
 
 
+def enviar_lista(numero_destino: str, cuerpo: str, boton: str,
+                 secciones: list[dict], numero_origen: str = "") -> bool:
+    """Envía un menú interactivo de WhatsApp.
+
+    Las filas llevan un ``id`` opaco que vuelve por el webhook; la decisión de
+    qué significa cada id queda del lado del bot, nunca en texto escrito por el
+    usuario. Meta admite hasta diez filas por sección.
+    """
+    if not _hay_credenciales():
+        return False
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": numero_destino,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": _recortar(cuerpo, 1024)},
+            "action": {"button": boton[:20], "sections": secciones},
+        },
+    }
+    return _post_mensaje(payload, "menú interactivo", numero_origen)
+
+
 # --- Adjuntos: subir y mandar --------------------------------------------
 
 def subir_media(contenido: bytes, nombre: str, mime: str,
