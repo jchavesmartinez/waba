@@ -70,6 +70,49 @@ def _coincide(real: object, buscado: object, campo: str) -> bool:
     return normal_a == normal_b or normal_b in normal_a
 
 
+def _resolver_referencias(libro, politica: PoliticaEdicion,
+                          valores: dict[str, object]) -> dict[str, object]:
+    """Convierte referencias legibles declaradas por metadata a sus llaves.
+
+    Un campo con generador ``concepto_a_linea_id`` acepta el concepto que ve el
+    cliente y guarda el ``linea_id`` estable del origen presupuestario. La hoja
+    de referencia se descubre por sus encabezados, sin asumir un nombre de
+    pestaña ni posiciones fijas.
+    """
+    salida = dict(valores)
+    for nombre, campo in politica.campos.items():
+        if campo.generador != "concepto_a_linea_id" or not salida.get(nombre):
+            continue
+        candidatos = []
+        for hoja_ref in getattr(libro, "worksheets", lambda: [])():
+            try:
+                encabezados = _encabezados(hoja_ref)
+            except Exception:
+                continue
+            normalizados = {_comparable(h): h for h in encabezados}
+            col_concepto = normalizados.get("concepto")
+            col_linea = normalizados.get("linea id") or normalizados.get("linea_id")
+            if not col_concepto or not col_linea:
+                continue
+            filas = hoja_ref.get_all_values()
+            i_concepto, i_linea = encabezados.index(col_concepto), encabezados.index(col_linea)
+            for fila in filas[1:]:
+                concepto = fila[i_concepto] if i_concepto < len(fila) else ""
+                linea = fila[i_linea] if i_linea < len(fila) else ""
+                if concepto and linea and _coincide(concepto, salida[nombre], "texto"):
+                    candidatos.append(str(linea).strip())
+        candidatos = list(dict.fromkeys(candidatos))
+        if len(candidatos) == 1:
+            salida[nombre] = candidatos[0]
+        elif not candidatos:
+            raise ErrorEscritura(
+                f"no encontré el concepto presupuestario '{salida[nombre]}'")
+        else:
+            raise ErrorEscritura(
+                f"el concepto presupuestario '{salida[nombre]}' es ambiguo")
+    return salida
+
+
 def buscar_registros(cliente: dict, politica: PoliticaEdicion,
                      criterios: dict[str, object]) -> list[dict[str, str]]:
     """Busca candidatos en el origen sin exponer la llave técnica al cliente."""
@@ -111,7 +154,7 @@ def aplicar_confirmado(cliente: dict, politica: PoliticaEdicion, accion: str,
         raise ErrorEscritura("faltan columnas declaradas en la hoja: " + ", ".join(faltan))
 
     if accion == "crear":
-        salida = dict(valores)
+        salida = _resolver_referencias(libro, politica, dict(valores))
         for nombre, campo in politica.campos.items():
             if campo.calculado:
                 indice = encabezados.index(nombre) + 1
