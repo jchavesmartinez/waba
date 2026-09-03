@@ -101,11 +101,9 @@ def manejar_seleccion(cliente: dict, numero: str, seleccion: str,
             f"Edición iniciada: {accion_edicion} en {etiqueta}.", estado=estado,
         )
         if accion_edicion == "anular":
-            mensaje = ("Indique el identificador del registro a anular, por ejemplo:\n"
-                       f"*{politica.campos[politica.clave_primaria].etiqueta}:* MAN-20260903-AB12CD34")
+            mensaje = "Describa el registro que desea anular, por ejemplo: “Anula el gasto de Walmart del 22 de agosto”."
         elif accion_edicion == "modificar":
-            mensaje = ("Indique el identificador y los campos a cambiar, uno por línea. Por ejemplo:\n"
-                       f"*{politica.campos[politica.clave_primaria].etiqueta}:* MAN-20260903-AB12CD34\n*Monto:* 12500")
+            mensaje = "Describa el cambio en lenguaje natural, por ejemplo: “Cambia el gasto de Walmart del 22 de agosto a ₡220.000”."
         else:
             requeridos = [c.etiqueta for c in politica.campos.values()
                           if c.requerido and not c.calculado]

@@ -7,9 +7,11 @@ vienen de ``PoliticaEdicion`` y de la fuente declarada en la metadata.
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal, InvalidOperation
+import unicodedata
 import secrets
 
-from gclient import abrir_libro_escritura
+from gclient import abrir_libro, abrir_libro_escritura
 from bot.edicion import PoliticaEdicion
 
 
@@ -47,6 +49,47 @@ def _encabezados(hoja) -> list[str]:
     if not encabezados:
         raise ErrorEscritura("la hoja de destino no tiene encabezados")
     return encabezados
+
+
+def _comparable(valor: object) -> str:
+    return " ".join(unicodedata.normalize("NFKD", str(valor or "")).encode("ascii", "ignore").decode().casefold().split())
+
+
+def _coincide(real: object, buscado: object, campo: str) -> bool:
+    a, b = str(real or "").strip(), str(buscado or "").strip()
+    if not a or not b:
+        return False
+    if campo in {"monto", "monto_moneda"}:
+        try:
+            return Decimal(a.replace(".", "").replace(",", ".")) == Decimal(b)
+        except (InvalidOperation, ValueError):
+            pass
+    if campo in {"fecha", "fecha_transaccion"}:
+        return a[:10] == b[:10]
+    normal_a, normal_b = _comparable(a), _comparable(b)
+    return normal_a == normal_b or normal_b in normal_a
+
+
+def buscar_registros(cliente: dict, politica: PoliticaEdicion,
+                     criterios: dict[str, object]) -> list[dict[str, str]]:
+    """Busca candidatos en el origen sin exponer la llave técnica al cliente."""
+    fuente = _fuente(cliente, politica)
+    libro = abrir_libro(fuente["config"]["spreadsheet_id"])
+    try:
+        hoja = libro.worksheet(politica.hoja_origen)
+    except Exception as exc:
+        raise ErrorEscritura("no encontré la hoja de origen configurada") from exc
+    encabezados = _encabezados(hoja)
+    filas = hoja.get_all_values()
+    resultados = []
+    for fila in filas[1:]:
+        registro = {nombre: fila[i] if i < len(fila) else ""
+                    for i, nombre in enumerate(encabezados)}
+        criterios_validos = {c: v for c, v in criterios.items() if c in registro}
+        if criterios_validos and all(_coincide(registro.get(c), v, c)
+                                     for c, v in criterios_validos.items()):
+            resultados.append(registro)
+    return resultados
 
 
 def aplicar_confirmado(cliente: dict, politica: PoliticaEdicion, accion: str,

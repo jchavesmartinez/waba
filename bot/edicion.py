@@ -257,11 +257,12 @@ def _campos_desde_texto(politica: PoliticaEdicion, texto: str) -> dict[str, str]
     return salida
 
 
-def _extraer_natural(politica: PoliticaEdicion, texto: str) -> dict[str, str]:
+def _extraer_natural(politica: PoliticaEdicion, texto: str,
+                     accion: str = "crear") -> tuple[dict[str, str], dict[str, str]]:
     """Extrae campos claros de una frase natural; omite lo ambiguo o ausente."""
     campos = {n: c for n, c in politica.campos.items() if not c.calculado and c.editable}
     if not campos or len(_normalizar(texto).split()) <= 1:
-        return {}
+        return {}, {}
     propiedades = {n: {"type": "string"} for n in campos}
     aliases = "; ".join(f"{n} = {c.etiqueta}" for n, c in campos.items())
     sistema = (
@@ -269,27 +270,41 @@ def _extraer_natural(politica: PoliticaEdicion, texto: str) -> dict[str, str]:
         "Incluye una propiedad únicamente cuando el mensaje la expresa con claridad; "
         "no inventes, no completes con suposiciones y no incluyas propiedades vacías. "
         "Convierte fechas relativas (hoy, ayer) a AAAA-MM-DD usando la fecha actual. "
-        "Conserva el importe como texto y usa exactamente los nombres de propiedad."
+        "Conserva el importe como texto y usa exactamente los nombres de propiedad. "
+        "Para modificar, separa los datos que identifican el registro (criterios) "
+        "de los valores que se desean cambiar (cambios). Para crear, pon todo en cambios."
     )
-    contenido = (f"Fecha actual en la zona del negocio: {fecha_local().isoformat()}\n"
+    contenido = (f"Acción: {accion}\nFecha actual en la zona del negocio: {fecha_local().isoformat()}\n"
                  f"Campos disponibles y sus etiquetas: {aliases}\n"
                  f"Mensaje del usuario: {texto}")
     try:
         respuesta = llm.generar_texto(
             config.BOT_MODELO_KPIS, contenido, system=sistema,
             max_tokens=300, thinking_level="minimal",
-            response_schema={"type": "object", "properties": propiedades,
+            response_schema={"type": "object", "properties": {
+                "criterios": {"type": "object", "properties": propiedades,
+                               "additionalProperties": False},
+                "cambios": {"type": "object", "properties": propiedades,
                              "additionalProperties": False},
+            }, "additionalProperties": False},
         )
         bruto = re.search(r"\{.*\}", respuesta.texto or "", re.DOTALL)
         if not bruto:
-            return {}
+            return {}, {}
         datos = json.loads(bruto.group(0))
-        return {n: str(v).strip() for n, v in datos.items()
-                if n in campos and str(v).strip()}
+        if accion == "crear":
+            cambios = datos.get("cambios") or datos
+            return ({n: str(v).strip() for n, v in cambios.items()
+                     if n in campos and str(v).strip()}, {})
+        criterios = datos.get("criterios") or {}
+        cambios = datos.get("cambios") or {}
+        return ({n: str(v).strip() for n, v in criterios.items()
+                 if n in campos and str(v).strip()},
+                {n: str(v).strip() for n, v in cambios.items()
+                 if n in campos and str(v).strip()})
     except Exception as exc:  # noqa: BLE001
         logger.info("extracción natural de edición no disponible: %s", exc)
-        return {}
+        return {}, {}
 
 
 def _texto_previa(politica: PoliticaEdicion, accion: str, valores: dict) -> str:
@@ -298,10 +313,6 @@ def _texto_previa(politica: PoliticaEdicion, accion: str, valores: dict) -> str:
         campo = politica.campos.get(nombre)
         if campo and nombre != politica.clave_primaria:
             lineas.append(f"• *{campo.etiqueta}:* {valor}")
-    if accion != "crear" and politica.clave_primaria in valores:
-        campo = politica.campos.get(politica.clave_primaria)
-        lineas.insert(0, f"• *{campo.etiqueta if campo else politica.clave_primaria}:* "
-                           f"{valores[politica.clave_primaria]}")
     verbo = {"crear": "crear", "modificar": "modificar", "anular": "anular"}[accion]
     return (f"Revisá este cambio para *{' '.join(politica.tabla.split('_'))}*: "
             f"se va a *{verbo}* este registro:\n\n" + "\n".join(lineas) +
@@ -335,7 +346,7 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
                              estado={"edicion": estado})
         memoria.registrar_edicion(cliente, numero, politica.tabla, resultado)
         verbo = {"crear": "creado", "modificar": "modificado", "anular": "anulado"}[resultado["accion"]]
-        return Respuesta(f"Listo. El registro *{resultado['clave']}* fue {verbo} correctamente.",
+        return Respuesta(f"Listo. El registro fue {verbo} correctamente.",
                          estado={"edicion": {}})
 
     accion = str(estado.get("accion") or "")
@@ -348,21 +359,49 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
                              estado={"edicion": {"tabla": politica.tabla, "paso": "accion", "valores": {}}})
         estado = {"tabla": politica.tabla, "accion": accion, "paso": "campos", "valores": {}}
         if accion == "anular":
-            return Respuesta("Indique el identificador del registro a anular, por ejemplo:\n"
-                             f"*{politica.campos[politica.clave_primaria].etiqueta}:* MAN-20260903-AB12CD34",
+            return Respuesta("Describa el registro que desea anular, por ejemplo: “Anula el gasto de Walmart del 22 de agosto”.",
                              estado={"edicion": estado})
         if accion == "modificar":
-            return Respuesta("Indique el identificador y los campos a cambiar, uno por línea. Por ejemplo:\n"
-                             f"*{politica.campos[politica.clave_primaria].etiqueta}:* MAN-20260903-AB12CD34\n"
-                             "*Monto:* 12500",
+            return Respuesta("Describa el cambio en lenguaje natural, por ejemplo: “Cambia el gasto de Walmart del 22 de agosto a ₡220.000”.",
                              estado={"edicion": estado})
 
     valores = dict(estado.get("valores") or {})
     valores.update(_campos_desde_texto(politica, pregunta))
     # Cuando el usuario escribe una frase natural, el extractor entiende solo
     # lo explícito y deja que la validación pregunte por lo que falte.
+    criterios_naturales = {}
+    cambios_naturales = {}
     if ":" not in str(pregunta):
-        valores.update(_extraer_natural(politica, pregunta))
+        criterios_naturales, cambios_naturales = _extraer_natural(politica, pregunta, accion)
+        valores.update(cambios_naturales if accion == "modificar" else criterios_naturales)
+    # Para modificar/anular, la llave primaria se resuelve internamente. El
+    # cliente identifica el registro con lenguaje natural; si hay ambigüedad,
+    # solicitamos un dato adicional sin revelar el ID técnico.
+    if accion in {"modificar", "anular"} and not valores.get(politica.clave_primaria):
+        from bot import escritura_google_sheets
+        criterios = dict(criterios_naturales or valores)
+        # En una modificación, el monto suele ser el nuevo valor; no lo uses
+        # para localizar el importe anterior del registro.
+        if accion == "modificar" and len(criterios) > 1:
+            criterios.pop("monto", None)
+        try:
+            candidatos = escritura_google_sheets.buscar_registros(cliente, politica, criterios)
+        except escritura_google_sheets.ErrorEscritura as exc:
+            return Respuesta(f"No pude buscar el registro: {exc}.",
+                             estado={"edicion": {"tabla": politica.tabla, "accion": accion,
+                                                  "paso": "campos", "valores": valores}})
+        if len(candidatos) == 1:
+            valores[politica.clave_primaria] = candidatos[0].get(politica.clave_primaria, "")
+        elif len(candidatos) > 1:
+            return Respuesta("Encontré varios registros que coinciden. Indique un dato adicional, "
+                             "como la fecha exacta, el comercio o el monto original.",
+                             estado={"edicion": {"tabla": politica.tabla, "accion": accion,
+                                                  "paso": "campos", "valores": valores}})
+        elif criterios:
+            return Respuesta("No encontré un registro con esos datos. Indique una descripción "
+                             "más precisa o la fecha del movimiento.",
+                             estado={"edicion": {"tabla": politica.tabla, "accion": accion,
+                                                  "paso": "campos", "valores": valores}})
     validado = validar_borrador(politica, accion, valores)
     if not validado.listo_para_confirmar:
         detalles = []
