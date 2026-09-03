@@ -4,7 +4,9 @@ from bot.edicion import CampoEdicion, PoliticaEdicion, validar_borrador
 def _politica():
     return PoliticaEdicion(
         tabla="gastos_manuales", origen="Google Sheets", clave_primaria="movimiento_id",
-        anulacion_campo="activo", acciones=("crear", "modificar", "anular"),
+        anulacion_campo="activo", origen_tipo="google_sheets",
+        origen_fuente_id="finanzas", hoja_origen="gastos_manuales",
+        acciones=("crear", "modificar", "anular"),
         campos={
             "movimiento_id": CampoEdicion("movimiento_id", "ID", requerido=True,
                                             editable=False, calculado=True),
@@ -31,3 +33,9 @@ def test_borrador_rechaza_fecha_ambigua_y_monto_no_positivo():
     assert not r.listo_para_confirmar
     assert any("Fecha" in e for e in r.errores)
     assert any("Monto" in e for e in r.errores)
+
+
+def test_modificar_exige_id_pero_no_aplica_valores_por_defecto():
+    r = validar_borrador(_politica(), "modificar", {"movimiento_id": "MAN-01"})
+    assert r.listo_para_confirmar
+    assert r.valores == {"movimiento_id": "MAN-01"}

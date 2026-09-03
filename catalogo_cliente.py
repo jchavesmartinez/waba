@@ -52,9 +52,10 @@ _CATALOGO_COLS = (
     "fuente_id", "tabla", "columna", "descripcion", "instruccion",
     "sistema_origen", "frecuencia", "dueno",
     "editable", "acciones_permitidas", "origen_edicion", "clave_primaria",
-    "anulacion_campo", "requerido", "editable_campo", "tipo_validacion",
+    "origen_tipo", "origen_fuente_id", "hoja_origen", "anulacion_campo",
+    "requerido", "editable_campo", "tipo_validacion",
     "valores_permitidos", "valor_por_defecto", "calculado_por_sistema",
-    "etiqueta_usuario", "ejemplo",
+    "generador", "etiqueta_usuario", "ejemplo",
 )
 
 

@@ -1,5 +1,5 @@
 """
-Clientes de Google de solo lectura.
+Clientes de Google con lectura predeterminada y escritura confirmada.
 
 Un mismo service account autentica:
   - Google Sheets: Sheet maestro, fuentes y catalogos.
@@ -24,8 +24,9 @@ import config
 
 logger = logging.getLogger("fachavi.gclient")
 
-# Sheets y Calendar son de solo lectura, a proposito: aunque la credencial se
-# filtre, no permite modificar ni borrar esos recursos. Vertex usa el scope de
+# Sheets de ingesta y Calendar son de solo lectura, a propósito. La única
+# excepción es abrir_libro_escritura(), llamado por el adaptador confirmado de
+# edición. Vertex usa el scope de
 # Google Cloud, pero las acciones reales quedan limitadas por los roles IAM del
 # service account; en este proyecto solo debe recibir Vertex AI User.
 #
@@ -44,9 +45,11 @@ logger = logging.getLogger("fachavi.gclient")
 #      credencial completa y con ella las hojas de todos los clientes.
 #   3. Activar la auditoria de acceso de Google Cloud para esta cuenta.
 _SCOPES_SHEETS = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+_SCOPES_SHEETS_ESCRITURA = ["https://www.googleapis.com/auth/spreadsheets"]
 _SCOPES_CALENDAR = ["https://www.googleapis.com/auth/calendar.readonly"]
 _SCOPES_VERTEX = ["https://www.googleapis.com/auth/cloud-platform"]
 _gc = None
+_gc_escritura = None
 _calendar_creds = None
 _vertex_creds = None
 # B-10: el cliente se guardaba en una global sin proteccion. En el bot, dos
@@ -89,6 +92,25 @@ def _cliente():
 def abrir_libro(spreadsheet_id: str):
     """Abre un libro de Google Sheets por su ID."""
     return _cliente().open_by_key(spreadsheet_id)
+
+
+def abrir_libro_escritura(spreadsheet_id: str):
+    """Abre un Sheet con el scope de escritura, solo para adaptadores aprobados.
+
+    Reutiliza la misma identidad de servicio, pero no el cliente readonly. Que
+    una hoja este compartida como editor no cambia el minimo privilegio del
+    lector de ingesta; este camino se invoca exclusivamente despues de la
+    confirmacion explicita de una edicion.
+    """
+    global _gc_escritura
+    if _gc_escritura is None:
+        with _lock:
+            if _gc_escritura is None:
+                creds = Credentials.from_service_account_info(
+                    _info_credenciales(), scopes=_SCOPES_SHEETS_ESCRITURA
+                )
+                _gc_escritura = gspread.authorize(creds)
+    return _gc_escritura.open_by_key(spreadsheet_id)
 
 
 def credenciales_calendar():

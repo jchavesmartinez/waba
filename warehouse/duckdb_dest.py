@@ -636,9 +636,10 @@ class DuckDBDestino(Destino):
             "fuente_id", "tabla", "columna", "descripcion", "instruccion",
             "sistema_origen", "frecuencia", "dueno", "editable",
             "acciones_permitidas", "origen_edicion", "clave_primaria",
-            "anulacion_campo", "requerido", "editable_campo", "tipo_validacion",
+            "origen_tipo", "origen_fuente_id", "hoja_origen", "anulacion_campo",
+            "requerido", "editable_campo", "tipo_validacion",
             "valores_permitidos", "valor_por_defecto", "calculado_por_sistema",
-            "etiqueta_usuario", "ejemplo",
+            "generador", "etiqueta_usuario", "ejemplo",
         )
         con.execute(
             f'CREATE TABLE IF NOT EXISTS "{esquema}"."_catalogo" ('
@@ -646,10 +647,11 @@ class DuckDBDestino(Destino):
             "instruccion VARCHAR,"
             "sistema_origen VARCHAR, frecuencia VARCHAR, dueno VARCHAR,"
             "editable VARCHAR, acciones_permitidas VARCHAR, origen_edicion VARCHAR,"
-            "clave_primaria VARCHAR, anulacion_campo VARCHAR, requerido VARCHAR,"
+            "clave_primaria VARCHAR, origen_tipo VARCHAR, origen_fuente_id VARCHAR,"
+            "hoja_origen VARCHAR, anulacion_campo VARCHAR, requerido VARCHAR,"
             "editable_campo VARCHAR, tipo_validacion VARCHAR, valores_permitidos VARCHAR,"
             "valor_por_defecto VARCHAR, calculado_por_sistema VARCHAR,"
-            "etiqueta_usuario VARCHAR, ejemplo VARCHAR)"
+            "generador VARCHAR, etiqueta_usuario VARCHAR, ejemplo VARCHAR)"
         )
         # Migracion suave para _catalogo creado por una version previa.
         for col in cols[4:]:

@@ -748,9 +748,10 @@ class PostgresDestino(Destino):
             "fuente_id", "tabla", "columna", "descripcion", "instruccion",
             "sistema_origen", "frecuencia", "dueno", "editable",
             "acciones_permitidas", "origen_edicion", "clave_primaria",
-            "anulacion_campo", "requerido", "editable_campo", "tipo_validacion",
+            "origen_tipo", "origen_fuente_id", "hoja_origen", "anulacion_campo",
+            "requerido", "editable_campo", "tipo_validacion",
             "valores_permitidos", "valor_por_defecto", "calculado_por_sistema",
-            "etiqueta_usuario", "ejemplo",
+            "generador", "etiqueta_usuario", "ejemplo",
         )
         with self.conectar().begin() as cx:
             cx.execute(text(
@@ -759,10 +760,11 @@ class PostgresDestino(Destino):
                 "instruccion TEXT,"
                 "sistema_origen TEXT, frecuencia TEXT, dueno TEXT,"
                 "editable TEXT, acciones_permitidas TEXT, origen_edicion TEXT,"
-                "clave_primaria TEXT, anulacion_campo TEXT, requerido TEXT,"
+                "clave_primaria TEXT, origen_tipo TEXT, origen_fuente_id TEXT,"
+                "hoja_origen TEXT, anulacion_campo TEXT, requerido TEXT,"
                 "editable_campo TEXT, tipo_validacion TEXT, valores_permitidos TEXT,"
                 "valor_por_defecto TEXT, calculado_por_sistema TEXT,"
-                "etiqueta_usuario TEXT, ejemplo TEXT)"
+                "generador TEXT, etiqueta_usuario TEXT, ejemplo TEXT)"
             ))
             # Migracion suave: _catalogo creado por una version vieja no tiene
             # 'instruccion'. La agregamos si falta, para no reventar el INSERT ni

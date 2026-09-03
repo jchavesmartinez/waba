@@ -55,6 +55,23 @@ _DDL = (
     CREATE INDEX IF NOT EXISTS ix_conv_cliente_numero_fecha
         ON "_bot".conversaciones (cliente_id, numero, creado_en DESC)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS "_bot".ediciones (
+        id          BIGSERIAL PRIMARY KEY,
+        cliente_id  TEXT        NOT NULL,
+        numero      TEXT        NOT NULL,
+        tabla       TEXT        NOT NULL,
+        accion      TEXT        NOT NULL,
+        clave       TEXT        NOT NULL DEFAULT '',
+        anterior    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+        nuevo       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+        creado_en   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS ix_ediciones_cliente_numero_fecha
+        ON "_bot".ediciones (cliente_id, numero, creado_en DESC)
+    """,
 )
 
 
@@ -190,3 +207,25 @@ def olvidar(cliente: dict, numero: str) -> None:
             )
     except Exception as e:  # noqa: BLE001
         logger.warning("[%s] no se pudo olvidar: %s", cliente.get("cliente_id"), e)
+
+
+def registrar_edicion(cliente: dict, numero: str, tabla: str, resultado: dict) -> None:
+    """Deja trazabilidad del cambio confirmado; nunca relanza al usuario."""
+    try:
+        _asegurar_tabla(cliente)
+        with _engine(cliente).begin() as cx:
+            cx.execute(text("""
+                INSERT INTO "_bot".ediciones
+                    (cliente_id, numero, tabla, accion, clave, anterior, nuevo)
+                VALUES (:cid, :num, :tabla, :accion, :clave,
+                        CAST(:anterior AS JSONB), CAST(:nuevo AS JSONB))
+            """), {
+                "cid": cliente["cliente_id"], "num": numero, "tabla": tabla,
+                "accion": str(resultado.get("accion") or ""),
+                "clave": str(resultado.get("clave") or ""),
+                "anterior": json.dumps(resultado.get("anterior") or {}, ensure_ascii=False),
+                "nuevo": json.dumps(resultado.get("valores") or {}, ensure_ascii=False),
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.error("[%s] la edición se aplicó pero no se pudo auditar: %s",
+                     cliente.get("cliente_id"), e)

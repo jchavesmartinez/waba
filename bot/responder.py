@@ -38,7 +38,7 @@ from collections import defaultdict
 
 import config
 import registry
-from bot import (artefactos, catalogo, correo, dashboard, formato, intencion, kpis,
+from bot import (artefactos, catalogo, correo, dashboard, edicion, formato, intencion, kpis,
                  memoria, nl2sql, seguimiento, warehouse_ro)
 from bot.salida import Respuesta
 from bot.tiempo import fecha_local
@@ -387,6 +387,17 @@ def responder(numero: str, pregunta: str) -> Respuesta:
 
     # La memoria es best-effort: si falla, seguimos sin historial.
     historial = memoria.cargar_historial(cliente, numero)
+
+    # Una edición iniciada desde el menú toma prioridad sobre el clasificador
+    # conversacional. Así textos como "Monto: 12000" nunca terminan como SQL,
+    # y la escritura sigue requiriendo la confirmación explícita del usuario.
+    respuesta_edicion = edicion.procesar_mensaje(cliente, numero, pregunta, historial)
+    if respuesta_edicion is not None:
+        memoria.guardar_intercambio(
+            cliente, numero, pregunta, respuesta_edicion.texto,
+            sql=respuesta_edicion.sql, estado=respuesta_edicion.estado,
+        )
+        return respuesta_edicion
 
     # Un mismo turno puede pedir las dos acciones: "crea un PDF ... y envialo
     # a persona@empresa.com". En ese caso primero se consulta/genera el archivo

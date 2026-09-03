@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 import re
 
 from bot import catalogo
+from bot.salida import Respuesta
 
 
 _SI = {"si", "sí", "true", "1", "yes"}
@@ -75,6 +76,7 @@ class CampoEdicion:
     valores: tuple[str, ...] = ()
     defecto: str = ""
     calculado: bool = False
+    generador: str = ""
     ejemplo: str = ""
 
 
@@ -84,6 +86,9 @@ class PoliticaEdicion:
     origen: str
     clave_primaria: str
     anulacion_campo: str
+    origen_tipo: str
+    origen_fuente_id: str
+    hoja_origen: str
     acciones: tuple[str, ...]
     campos: dict[str, CampoEdicion] = field(default_factory=dict)
 
@@ -119,6 +124,7 @@ def politica_desde_tabla(tabla) -> PoliticaEdicion | None:
             valores=tuple(_lista(fila.get("valores_permitidos"))),
             defecto=str(fila.get("valor_por_defecto") or "").strip(),
             calculado=_si(fila.get("calculado_por_sistema")),
+            generador=str(fila.get("generador") or "").strip().casefold(),
             ejemplo=str(fila.get("ejemplo") or "").strip(),
         )
     return PoliticaEdicion(
@@ -126,6 +132,9 @@ def politica_desde_tabla(tabla) -> PoliticaEdicion | None:
         origen=str(tabla.configuracion.get("origen_edicion") or "").strip(),
         clave_primaria=str(tabla.configuracion.get("clave_primaria") or "").strip(),
         anulacion_campo=str(tabla.configuracion.get("anulacion_campo") or "").strip(),
+        origen_tipo=str(tabla.configuracion.get("origen_tipo") or "").strip().casefold(),
+        origen_fuente_id=str(tabla.configuracion.get("origen_fuente_id") or "").strip(),
+        hoja_origen=str(tabla.configuracion.get("hoja_origen") or "").strip(),
         acciones=acciones,
         campos=campos,
     )
@@ -149,10 +158,19 @@ def validar_borrador(politica: PoliticaEdicion, accion: str,
     faltantes: list[str] = []
     errores: list[str] = []
     for nombre, campo in politica.campos.items():
-        valor = valores.get(nombre, campo.defecto)
+        # Los valores por defecto pertenecen a una creación. En una modificación
+        # no deben sobrescribir campos que el usuario no mencionó.
+        valor = valores.get(nombre, campo.defecto if accion == "crear" else "")
         if campo.calculado:
             # Por seguridad, los ids y marcas calculadas no se aceptan desde el
-            # mensaje. El adaptador de origen los asigna al confirmar.
+            # mensaje al crear. Para modificar/anular, la llave calculada sí se
+            # requiere únicamente para localizar el registro existente.
+            if accion != "crear" and nombre == politica.clave_primaria:
+                clave = str(valores.get(nombre, "")).strip()
+                if clave:
+                    salida[nombre] = clave
+                else:
+                    faltantes.append(campo.etiqueta)
             continue
         if valor in (None, ""):
             if accion == "crear" and campo.requerido:
@@ -186,6 +204,137 @@ def resumen_inicio(politica: PoliticaEdicion) -> str:
     return (
         f"La edición de *{' '.join(politica.tabla.split('_'))}* quedó configurada "
         f"para: *{acciones}*. Los campos obligatorios serán: {etiquetas}. "
-        "La captura y confirmación se activarán al conectar el origen de escritura; "
-        "por ahora no se modificará ningún dato."
+        "Escriba primero la acción que desea realizar: crear, modificar o anular. "
+        "Luego puede enviar los datos como `Campo: valor`, uno por línea. "
+        "Nada se guarda sin una vista previa y su confirmación explícita."
     )
+
+
+def _normalizar(texto: object) -> str:
+    return re.sub(r"\s+", " ", str(texto or "").strip().casefold().replace("_", " "))
+
+
+def _estado(historial: list) -> dict | None:
+    """Recupera solo el último flujo de edición pendiente de esta conversación."""
+    for turno in reversed(historial):
+        if turno.get("rol") != "assistant":
+            continue
+        estado = turno.get("estado") or {}
+        edicion = estado.get("edicion")
+        if isinstance(edicion, dict):
+            return edicion or None
+        menu = estado.get("menu") or {}
+        if menu.get("accion") == "editar" and menu.get("tabla"):
+            return {"tabla": menu["tabla"], "paso": "accion", "valores": {}}
+    return None
+
+
+def _accion(texto: str) -> str:
+    valor = _normalizar(texto)
+    return valor if valor in _ACCIONES else ""
+
+
+def _campos_desde_texto(politica: PoliticaEdicion, texto: str) -> dict[str, str]:
+    """Reconoce `Etiqueta: valor` usando solo los nombres declarados en metadata."""
+    aliases = {}
+    for nombre, campo in politica.campos.items():
+        aliases[_normalizar(nombre)] = nombre
+        aliases[_normalizar(campo.etiqueta)] = nombre
+    salida = {}
+    for linea in str(texto or "").splitlines():
+        if ":" not in linea:
+            continue
+        etiqueta, valor = linea.split(":", 1)
+        nombre = aliases.get(_normalizar(etiqueta))
+        if nombre:
+            salida[nombre] = valor.strip()
+    return salida
+
+
+def _texto_previa(politica: PoliticaEdicion, accion: str, valores: dict) -> str:
+    lineas = []
+    for nombre, valor in valores.items():
+        campo = politica.campos.get(nombre)
+        if campo and nombre != politica.clave_primaria:
+            lineas.append(f"• *{campo.etiqueta}:* {valor}")
+    if accion != "crear" and politica.clave_primaria in valores:
+        campo = politica.campos.get(politica.clave_primaria)
+        lineas.insert(0, f"• *{campo.etiqueta if campo else politica.clave_primaria}:* "
+                           f"{valores[politica.clave_primaria]}")
+    verbo = {"crear": "crear", "modificar": "modificar", "anular": "anular"}[accion]
+    return (f"Revisá este cambio para *{' '.join(politica.tabla.split('_'))}*: "
+            f"se va a *{verbo}* este registro:\n\n" + "\n".join(lineas) +
+            "\n\nResponda *Confirmar* para aplicarlo o *Cancelar* para descartarlo.")
+
+
+def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list) -> Respuesta | None:
+    """Avanza un flujo de edición; devuelve None cuando no hay edición en curso."""
+    estado = _estado(historial)
+    if not estado:
+        return None
+    politica = politica_para(cliente, str(estado.get("tabla") or ""))
+    if not politica:
+        return Respuesta("La tabla que estaba editando ya no está habilitada.",
+                         estado={"edicion": {}})
+
+    texto = _normalizar(pregunta)
+    if texto in {"cancelar", "cancela", "cancel"}:
+        return Respuesta("Listo, descarté la edición. No se modificó ningún dato.",
+                         estado={"edicion": {}})
+    if estado.get("paso") == "confirmar":
+        if texto not in {"confirmar", "confirmo", "sí", "si"}:
+            return Respuesta("La edición sigue pendiente. Responda *Confirmar* para aplicarla "
+                             "o *Cancelar* para descartarla.", estado={"edicion": estado})
+        from bot import escritura_google_sheets, memoria
+        try:
+            resultado = escritura_google_sheets.aplicar_confirmado(
+                cliente, politica, estado["accion"], estado["valores"])
+        except escritura_google_sheets.ErrorEscritura as exc:
+            return Respuesta(f"No pude aplicar el cambio: {exc}. No se modificó ningún dato.",
+                             estado={"edicion": estado})
+        memoria.registrar_edicion(cliente, numero, politica.tabla, resultado)
+        verbo = {"crear": "creado", "modificar": "modificado", "anular": "anulado"}[resultado["accion"]]
+        return Respuesta(f"Listo. El registro *{resultado['clave']}* fue {verbo} correctamente.",
+                         estado={"edicion": {}})
+
+    accion = str(estado.get("accion") or "")
+    if not accion:
+        accion = _accion(pregunta)
+        if not accion or accion not in politica.acciones:
+            permitidas = ", ".join(politica.acciones)
+            return Respuesta(f"¿Qué desea hacer con *{' '.join(politica.tabla.split('_'))}*? "
+                             f"Escriba una acción: {permitidas}.",
+                             estado={"edicion": {"tabla": politica.tabla, "paso": "accion", "valores": {}}})
+        estado = {"tabla": politica.tabla, "accion": accion, "paso": "campos", "valores": {}}
+        if accion == "anular":
+            return Respuesta("Indique el identificador del registro a anular, por ejemplo:\n"
+                             f"*{politica.campos[politica.clave_primaria].etiqueta}:* MAN-20260903-AB12CD34",
+                             estado={"edicion": estado})
+        if accion == "modificar":
+            return Respuesta("Indique el identificador y los campos a cambiar, uno por línea. Por ejemplo:\n"
+                             f"*{politica.campos[politica.clave_primaria].etiqueta}:* MAN-20260903-AB12CD34\n"
+                             "*Monto:* 12500",
+                             estado={"edicion": estado})
+
+    valores = dict(estado.get("valores") or {})
+    valores.update(_campos_desde_texto(politica, pregunta))
+    validado = validar_borrador(politica, accion, valores)
+    if not validado.listo_para_confirmar:
+        detalles = []
+        if validado.faltantes:
+            detalles.append("Faltan: " + ", ".join(validado.faltantes) + ".")
+        if validado.errores:
+            detalles.extend(validado.errores)
+        return Respuesta("Todavía no puedo mostrar la vista previa. " + "\n".join(detalles) +
+                         "\nEnvíelos como `Campo: valor`, uno por línea.",
+                         estado={"edicion": {"tabla": politica.tabla, "accion": accion,
+                                              "paso": "campos", "valores": valores}})
+    if accion == "modificar" and set(validado.valores) == {politica.clave_primaria}:
+        return Respuesta("Indique al menos un campo adicional para modificar; el identificador "
+                         "solo sirve para encontrar el registro.",
+                         estado={"edicion": {"tabla": politica.tabla, "accion": accion,
+                                              "paso": "campos", "valores": valores}})
+    nuevo = {"tabla": politica.tabla, "accion": accion, "paso": "confirmar",
+             "valores": validado.valores}
+    return Respuesta(_texto_previa(politica, accion, validado.valores),
+                     estado={"edicion": nuevo})
