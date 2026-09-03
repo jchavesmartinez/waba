@@ -296,7 +296,12 @@ def filtrar_filas_por_contexto(columnas, filas, estado: dict):
     claves = ["linea_id"] if filtros.get("linea_id") else ["concepto", "categoria", "titular"]
     for clave in claves:
         esperado = filtros.get(clave)
-        aliases = _GRUPOS_FILTRO[clave]
+        # El estado conversacional puede contener una clave antigua o inferida
+        # por el planificador que no aplica al resultado actual. Nunca debe
+        # convertir ese dato en un KeyError ni en un filtro fantasma.
+        aliases = _GRUPOS_FILTRO.get(clave, ())
+        if not aliases:
+            continue
         indice = next((nombres.index(a) for a in aliases if a in nombres), None)
         if indice is None or esperado in (None, ""):
             continue
