@@ -50,7 +50,7 @@ def cargar_kpis(cliente: dict) -> list:
     except Exception as e:  # noqa: BLE001
         logger.info("[%s] sin tabla _kpis (%s)", cliente.get("cliente_id"), e)
         return []
-    out = []
+    candidatos = {}
     for f in filas:
         f = {str(k).strip().lower(): ("" if v is None else str(v).strip())
              for k, v in f.items()}
@@ -62,8 +62,16 @@ def cargar_kpis(cliente: dict) -> list:
         if not catalogo.puede_bot(f.get("instruccion", ""),
                                   etiqueta=f"el KPI '{f.get('kpi')}'"):
             continue
-        out.append(f)
-    return out
+        nombre = f["kpi"]
+        # El catálogo consolidado del cliente es la definición de mayor
+        # prioridad. El modelo semántico global queda como fallback y no debe
+        # sobrescribir una fórmula específica del cliente.
+        fuente = f.get("fuente_id", "").lower()
+        prioridad = 0 if fuente in {"_cliente", "metadata_cliente_a"} else 1
+        anterior = candidatos.get(nombre)
+        if anterior is None or prioridad < anterior[0]:
+            candidatos[nombre] = (prioridad, f)
+    return [f for _, f in candidatos.values()]
 
 
 # B-31: con muchos KPIs definidos el prompt se vuelve caro y el reconocimiento

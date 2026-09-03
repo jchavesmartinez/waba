@@ -203,6 +203,24 @@ def _ejecutar_con_auditoria(cliente: dict, sql: str, limite, origen: str):
     return columnas, filas, query_id
 
 
+def _limitar_top_solicitado(kpi: str, pregunta: str, columnas, filas):
+    """Aplica el N pedido en consultas de ranking de comercios."""
+    if kpi != "gasto_por_comercio":
+        return filas
+    texto = str(pregunta or "").lower()
+    match = re.search(
+        r"\b(?:top|los|las)\s+(\d{1,3})\b|\b(\d{1,3})\s+(?:comercios|conceptos)\b",
+        texto,
+    )
+    if not match:
+        return filas
+    tope = int(match.group(1) or match.group(2))
+    if tope < 1 or len(filas) <= tope:
+        return filas
+    logger.info("ranking %s limitado a top %d (de %d filas)", kpi, tope, len(filas))
+    return filas[:tope]
+
+
 def _reconciliar_presupuesto_fuente(cliente, ctx, columnas, filas):
     """Ata ``presupuesto`` al monto mensual raw sin sumar filas de un JOIN."""
     nombres = [str(c).strip().lower().replace(" ", "_") for c in columnas]
@@ -736,6 +754,9 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             logger.info("[%s] resultado acotado por contexto: %s",
                         cid, sorted(filtros_aplicados))
             filas = filas_filtradas
+
+    filas = _limitar_top_solicitado(plan.get("kpi", ""), pregunta_efectiva,
+                                    columnas, filas)
 
     ok_resultado, motivo_resultado = seguimiento.validar_resultado(
         columnas, filas, contexto=estado_previo,
