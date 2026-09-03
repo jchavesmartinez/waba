@@ -298,8 +298,10 @@ def _extraer_natural(politica: PoliticaEdicion, texto: str,
         datos = json.loads(bruto.group(0))
         if accion == "crear":
             cambios = datos.get("cambios") or datos
-            return ({}, {n: str(v).strip() for n, v in cambios.items()
-                         if n in campos and str(v).strip()})
+            # Se conserva el contrato histórico: para crear, el primer
+            # elemento de la tupla contiene los valores del nuevo registro.
+            return ({n: str(v).strip() for n, v in cambios.items()
+                     if n in campos and str(v).strip()}, {})
         criterios = datos.get("criterios") or {}
         cambios = datos.get("cambios") or {}
         return ({n: str(v).strip() for n, v in criterios.items()
@@ -384,7 +386,7 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
         # cambios son los campos que se deben actualizar; ambos deben quedar
         # disponibles para la búsqueda y la validación posterior.
         if accion == "crear":
-            valores.update(cambios_naturales)
+            valores.update(criterios_naturales)
         else:
             valores.update(criterios_naturales)
             valores.update(cambios_naturales)
