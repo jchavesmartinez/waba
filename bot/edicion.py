@@ -330,7 +330,9 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
                          estado={"edicion": {}})
 
     texto = _normalizar(pregunta)
-    if texto in {"cancelar", "cancela", "cancel"}:
+    if texto in {"cancelar", "cancela", "cancel", "salir", "terminar",
+                 "cancelar edicion", "cancelar edición", "salir de edicion",
+                 "salir de edición", "terminar edicion", "terminar edición"}:
         return Respuesta("Listo, descarté la edición. No se modificó ningún dato.",
                          estado={"edicion": {}})
     if estado.get("paso") == "confirmar":
