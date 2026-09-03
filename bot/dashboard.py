@@ -38,6 +38,10 @@ _SOLICITUD = re.compile(
 )
 _CACHE: dict[tuple[str, str, str], tuple[float, dict]] = {}
 _CACHE_LOCK = threading.Lock()
+_MESES = (
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+)
 
 
 class EnlaceInvalido(ValueError):
@@ -88,7 +92,37 @@ def _periodo_actual() -> dict:
 
 
 def periodo_solicitado(pregunta: str) -> dict:
-    return seguimiento.periodo_explicito(pregunta) or _periodo_actual()
+    explicito = seguimiento.periodo_explicito(pregunta)
+    if explicito:
+        return explicito
+
+    # Si se indicó un mes y un año de cuatro dígitos que no es válido (por
+    # ejemplo, "agosto 2926"), conservamos el mes y corregimos el año al
+    # vigente. Así un typo no hace que el dashboard cambie silenciosamente al
+    # mes actual.
+    texto = str(pregunta or "").lower()
+    mes = next(
+        (numero for numero, nombre in enumerate(_MESES, start=1)
+         if re.search(rf"\b{nombre}\b", texto)),
+        None,
+    )
+    anio = re.search(r"\b\d{4}\b", texto)
+    if mes and anio:
+        hoy = fecha_local()
+        anio_vigente = hoy.year
+        inicio = date(anio_vigente, mes, 1)
+        fin = (
+            date(anio_vigente + 1, 1, 1)
+            if mes == 12
+            else date(anio_vigente, mes + 1, 1)
+        )
+        return {
+            "inicio": inicio.isoformat(),
+            "fin_exclusivo": fin.isoformat(),
+            "granularidad": "mes",
+        }
+
+    return _periodo_actual()
 
 
 def _etiqueta_periodo(periodo: dict) -> str:
