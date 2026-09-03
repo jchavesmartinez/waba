@@ -298,8 +298,8 @@ def _extraer_natural(politica: PoliticaEdicion, texto: str,
         datos = json.loads(bruto.group(0))
         if accion == "crear":
             cambios = datos.get("cambios") or datos
-            return ({n: str(v).strip() for n, v in cambios.items()
-                     if n in campos and str(v).strip()}, {})
+            return ({}, {n: str(v).strip() for n, v in cambios.items()
+                         if n in campos and str(v).strip()})
         criterios = datos.get("criterios") or {}
         cambios = datos.get("cambios") or {}
         return ({n: str(v).strip() for n, v in criterios.items()
