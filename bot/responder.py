@@ -812,6 +812,12 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # muestra de siempre. Un prompt con 5.000 filas cuesta plata, tarda y no
     # mejora la frase "te mando el detalle en Excel".
     muestra = filas[:config.BOT_MAX_FILAS]
+    # La respuesta de WhatsApp es una vista para personas: no mostrar llaves
+    # técnicas como linea_id, pero conservar columnas/filas originales para
+    # estado conversacional, auditoría y adjuntos.
+    columnas_texto, muestra_texto = nl2sql.ocultar_columnas_tecnicas(
+        columnas, muestra, pregunta,
+    )
     estado_resultado = seguimiento.crear_estado(
         pregunta, sql, plan.get("kpi", ""), unidad_kpi,
         columnas, filas, previo=estado_previo,
@@ -830,7 +836,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             )
         else:
             texto = nl2sql.redactar_respuesta(
-                pregunta, columnas, muestra, historial=historial, sql=sql,
+                pregunta, columnas_texto, muestra_texto, historial=historial, sql=sql,
                 unidad=unidad_kpi,
                 temas_habilitados=catalogo.resumir_habilitados(ctx),
             )
@@ -840,7 +846,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         if not filas:
             texto = "No encontré datos para eso."
         else:
-            texto = nl2sql.tabla_texto(columnas, muestra, tope=10)
+            texto = nl2sql.tabla_texto(columnas_texto, muestra_texto, tope=10)
 
     # El redactor a veces dibuja un grafico con caracteres (barras de |, ejes de
     # _). En el celular eso se desalinea y queda ilegible. Se saca SIEMPRE, pero

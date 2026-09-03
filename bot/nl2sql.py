@@ -849,6 +849,29 @@ def _datos_para_analisis(columnas, filas, max_caracteres: int = 16000) -> str:
     return "\n".join(lineas)
 
 
+_COLUMNAS_TECNICAS = {
+    "linea_id", "linea_presupuesto_id", "_clave", "_origen", "_modelo_id",
+}
+
+
+def ocultar_columnas_tecnicas(columnas, filas, pregunta: str = ""):
+    """Quita identificadores internos de la presentacion textual normal.
+
+    El resultado canonico se conserva intacto para estado, auditoria y
+    adjuntos. Si el usuario pide expresamente un identificador, se mantiene.
+    """
+    texto = _normalizar_para_columnas(pregunta)
+    if any(re.search(rf"\b{re.escape(c.replace('_', ' '))}\b", texto)
+           for c in _COLUMNAS_TECNICAS):
+        return list(columnas), list(filas)
+    indices = [i for i, c in enumerate(columnas)
+               if str(c).strip().lower() not in _COLUMNAS_TECNICAS]
+    if len(indices) == len(columnas):
+        return list(columnas), list(filas)
+    return ([columnas[i] for i in indices],
+            [[fila[i] for i in indices] for fila in filas])
+
+
 def _redactar_analisis(pregunta: str, columnas, filas, sql: str = "") -> str:
     """Pide conclusiones al modelo usando solo cifras ya calculadas por SQL."""
     sistema = (
