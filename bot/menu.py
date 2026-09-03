@@ -10,6 +10,10 @@ def _id_tabla(accion: str, tabla: str) -> str:
     return f"menu:{accion}:tabla:{tabla}"
 
 
+def _id_accion_edicion(tabla: str, accion: str) -> str:
+    return f"menu:editar:accion:{tabla}:{accion}"
+
+
 def _tablas(cliente: dict) -> list:
     ctx = catalogo.construir_contexto(cliente)
     return list(getattr(ctx, "permitidas", []) or [])
@@ -81,6 +85,35 @@ def manejar_seleccion(cliente: dict, numero: str, seleccion: str,
         )
         return
 
+    accion_partes = seleccion.split(":", 4)
+    if (len(accion_partes) == 5 and accion_partes[:3] == ["menu", "editar", "accion"]):
+        tabla, accion_edicion = accion_partes[3], accion_partes[4]
+        politica = edicion.politica_para(cliente, tabla)
+        if not politica or accion_edicion not in politica.acciones:
+            whatsapp.enviar_texto(numero, "Esa acción ya no está disponible. Escriba “menú” para actualizar las opciones.", numero_origen)
+            return
+        etiqueta = " ".join(tabla.replace("_", " ").split())
+        estado = {"edicion": {"tabla": tabla, "accion": accion_edicion,
+                                "paso": "campos", "valores": {}}}
+        memoria.guardar_intercambio(
+            cliente, numero,
+            f"Seleccionó {accion_edicion} en la tabla {etiqueta} desde el menú.",
+            f"Edición iniciada: {accion_edicion} en {etiqueta}.", estado=estado,
+        )
+        if accion_edicion == "anular":
+            mensaje = ("Indique el identificador del registro a anular, por ejemplo:\n"
+                       f"*{politica.campos[politica.clave_primaria].etiqueta}:* MAN-20260903-AB12CD34")
+        elif accion_edicion == "modificar":
+            mensaje = ("Indique el identificador y los campos a cambiar, uno por línea. Por ejemplo:\n"
+                       f"*{politica.campos[politica.clave_primaria].etiqueta}:* MAN-20260903-AB12CD34\n*Monto:* 12500")
+        else:
+            requeridos = [c.etiqueta for c in politica.campos.values()
+                          if c.requerido and not c.calculado]
+            mensaje = ("Envíe los datos como `Campo: valor`, uno por línea. "
+                       "Los campos obligatorios son: " + ", ".join(requeridos) + ".")
+        whatsapp.enviar_texto(numero, mensaje, numero_origen)
+        return
+
     partes = seleccion.split(":", 3)
     if len(partes) != 4 or partes[0] != "menu" or partes[2] != "tabla":
         whatsapp.enviar_texto(numero, "No reconocí esa opción. Escriba “menú” para empezar.", numero_origen)
@@ -110,10 +143,21 @@ def manejar_seleccion(cliente: dict, numero: str, seleccion: str,
             numero, "Esa tabla no está habilitada para edición.", numero_origen,
         )
         return
-    memoria.guardar_intercambio(
-        cliente, numero,
-        f"Seleccionó editar la tabla {etiqueta} desde el menú.",
-        f"Modo edición seleccionado: tabla {etiqueta}. Solicitar datos y confirmar antes de guardar.",
-        estado={"menu": {"accion": accion, "tabla": tabla}},
-    )
-    whatsapp.enviar_texto(numero, edicion.resumen_inicio(politica), numero_origen)
+    acciones = list(politica.acciones)
+    if len(acciones) <= 3:
+        whatsapp.enviar_botones(
+            numero,
+            f"¿Qué desea hacer con *{etiqueta}*?",
+            [{"id": _id_accion_edicion(tabla, accion_edicion),
+              "title": accion_edicion.capitalize()}
+             for accion_edicion in acciones],
+            numero_origen,
+        )
+        return
+    # Meta admite solo tres botones: preservamos el menú de lista si una
+    # política futura declarara más acciones.
+    filas = [{"id": _id_accion_edicion(tabla, accion_edicion),
+              "title": accion_edicion.capitalize(), "description": "Acción permitida"}
+             for accion_edicion in acciones[:_MAX_FILAS]]
+    whatsapp.enviar_lista(numero, f"¿Qué desea hacer con *{etiqueta}*?", "Elegir acción",
+                          [{"title": "Acciones", "rows": filas}], numero_origen)

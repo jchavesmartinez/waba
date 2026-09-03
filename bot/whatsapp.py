@@ -251,6 +251,37 @@ def enviar_lista(numero_destino: str, cuerpo: str, boton: str,
     return _post_mensaje(payload, "menú interactivo", numero_origen)
 
 
+def enviar_botones(numero_destino: str, cuerpo: str, botones: list[dict],
+                   numero_origen: str = "") -> bool:
+    """Envía hasta tres acciones rápidas de WhatsApp.
+
+    Los ids siguen siendo opacos y los genera el bot; WhatsApp devuelve el id
+    seleccionado como ``button_reply``. Para más de tres alternativas se debe
+    usar ``enviar_lista``.
+    """
+    if not _hay_credenciales():
+        return False
+    botones = list(botones or [])[:3]
+    if not botones:
+        return False
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": numero_destino,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": _recortar(cuerpo, 1024)},
+            "action": {"buttons": [
+                {"type": "reply", "reply": {"id": str(b["id"])[:256],
+                                             "title": str(b["title"])[:20]}}
+                for b in botones
+            ]},
+        },
+    }
+    return _post_mensaje(payload, "botones interactivos", numero_origen)
+
+
 # --- Adjuntos: subir y mandar --------------------------------------------
 
 def subir_media(contenido: bytes, nombre: str, mime: str,
