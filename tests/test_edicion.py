@@ -1,4 +1,5 @@
 from bot.edicion import CampoEdicion, PoliticaEdicion, validar_borrador
+import bot.edicion as edicion
 
 
 def _politica():
@@ -39,3 +40,11 @@ def test_modificar_exige_id_pero_no_aplica_valores_por_defecto():
     r = validar_borrador(_politica(), "modificar", {"movimiento_id": "MAN-01"})
     assert r.listo_para_confirmar
     assert r.valores == {"movimiento_id": "MAN-01"}
+
+
+def test_extraer_natural_usa_solo_campos_de_metadata(monkeypatch):
+    class Respuesta:
+        texto = '{"fecha":"2026-09-02","monto":"12500"}'
+    monkeypatch.setattr(edicion.llm, "generar_texto", lambda *a, **k: Respuesta())
+    r = edicion._extraer_natural(_politica(), "El 2026-09-02 gasté 12.500")
+    assert r == {"fecha": "2026-09-02", "monto": "12500"}

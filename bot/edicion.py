@@ -14,14 +14,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+import json
+import logging
 import re
 
+import config
 from bot import catalogo
 from bot.salida import Respuesta
+from bot.tiempo import fecha_local
+import llm
 
 
 _SI = {"si", "sí", "true", "1", "yes"}
 _ACCIONES = {"crear", "modificar", "anular"}
+logger = logging.getLogger("fachavi.bot.edicion")
 
 
 def _si(valor: object) -> bool:
@@ -251,6 +257,41 @@ def _campos_desde_texto(politica: PoliticaEdicion, texto: str) -> dict[str, str]
     return salida
 
 
+def _extraer_natural(politica: PoliticaEdicion, texto: str) -> dict[str, str]:
+    """Extrae campos claros de una frase natural; omite lo ambiguo o ausente."""
+    campos = {n: c for n, c in politica.campos.items() if not c.calculado and c.editable}
+    if not campos or len(_normalizar(texto).split()) <= 1:
+        return {}
+    propiedades = {n: {"type": "string"} for n in campos}
+    aliases = "; ".join(f"{n} = {c.etiqueta}" for n, c in campos.items())
+    sistema = (
+        "Extraes datos para un registro de una tabla. Responde SOLO JSON. "
+        "Incluye una propiedad únicamente cuando el mensaje la expresa con claridad; "
+        "no inventes, no completes con suposiciones y no incluyas propiedades vacías. "
+        "Convierte fechas relativas (hoy, ayer) a AAAA-MM-DD usando la fecha actual. "
+        "Conserva el importe como texto y usa exactamente los nombres de propiedad."
+    )
+    contenido = (f"Fecha actual en la zona del negocio: {fecha_local().isoformat()}\n"
+                 f"Campos disponibles y sus etiquetas: {aliases}\n"
+                 f"Mensaje del usuario: {texto}")
+    try:
+        respuesta = llm.generar_texto(
+            config.BOT_MODELO_KPIS, contenido, system=sistema,
+            max_tokens=300, thinking_level="minimal",
+            response_schema={"type": "object", "properties": propiedades,
+                             "additionalProperties": False},
+        )
+        bruto = re.search(r"\{.*\}", respuesta.texto or "", re.DOTALL)
+        if not bruto:
+            return {}
+        datos = json.loads(bruto.group(0))
+        return {n: str(v).strip() for n, v in datos.items()
+                if n in campos and str(v).strip()}
+    except Exception as exc:  # noqa: BLE001
+        logger.info("extracción natural de edición no disponible: %s", exc)
+        return {}
+
+
 def _texto_previa(politica: PoliticaEdicion, accion: str, valores: dict) -> str:
     lineas = []
     for nombre, valor in valores.items():
@@ -318,6 +359,10 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
 
     valores = dict(estado.get("valores") or {})
     valores.update(_campos_desde_texto(politica, pregunta))
+    # Cuando el usuario escribe una frase natural, el extractor entiende solo
+    # lo explícito y deja que la validación pregunte por lo que falte.
+    if ":" not in str(pregunta):
+        valores.update(_extraer_natural(politica, pregunta))
     validado = validar_borrador(politica, accion, valores)
     if not validado.listo_para_confirmar:
         detalles = []
