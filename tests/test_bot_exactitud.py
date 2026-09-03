@@ -4,8 +4,34 @@ from types import SimpleNamespace
 from datetime import datetime
 import pandas as pd
 
-from bot import intencion, kpis, nl2sql
+from bot import intencion, kpis, nl2sql, responder
 from sources.base import _limpiar_numero
+
+
+def test_ranking_implicito_mayor_gasto_devuelve_una_fila():
+    filas = [("CRC", "Alimentacion", 900), ("CRC", "Vivienda", 700)]
+
+    resultado = responder._limitar_top_solicitado(
+        "gasto_por_categoria",
+        "Dame la categoría con el mayor gasto",
+        ["moneda", "categoria", "gasto_neto"],
+        filas,
+    )
+
+    assert resultado == filas[:1]
+
+
+def test_ranking_sin_superlativo_conserva_todas_las_filas():
+    filas = [("CRC", "Alimentacion", 900), ("CRC", "Vivienda", 700)]
+
+    resultado = responder._limitar_top_solicitado(
+        "gasto_por_categoria",
+        "Dame el gasto por categoría",
+        ["moneda", "categoria", "gasto_neto"],
+        filas,
+    )
+
+    assert resultado == filas
 
 
 def test_presupuesto_se_redacta_con_totales_que_vienen_del_sql():

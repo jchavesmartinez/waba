@@ -204,17 +204,43 @@ def _ejecutar_con_auditoria(cliente: dict, sql: str, limite, origen: str):
 
 
 def _limitar_top_solicitado(kpi: str, pregunta: str, columnas, filas):
-    """Aplica el N pedido en consultas de ranking de comercios."""
-    if kpi != "gasto_por_comercio":
-        return filas
+    """Acota rankings explicitos e implicitos a lo que pidio el usuario.
+
+    La formula del KPI es la fuente canonica del calculo y normalmente ya
+    ordena el resultado. Esta capa solo materializa la intencion de ranking:
+    ``top 5`` y tambien expresiones naturales como ``la categoria con mayor
+    gasto`` o ``donde mas gaste``. El LLM puede reconocer la intencion, pero
+    esta defensa evita mostrar todas las filas si no la representa en el plan.
+    """
     texto = str(pregunta or "").lower()
+    # Limites explicitos: top 5, los 5, 5 comercios/conceptos.
     match = re.search(
-        r"\b(?:top|los|las)\s+(\d{1,3})\b|\b(\d{1,3})\s+(?:comercios|conceptos)\b",
+        r"\b(?:top|los|las)\s+(\d{1,3})\b|\b(\d{1,3})\s+(?:comercios|conceptos|categorias|categorías)\b",
         texto,
     )
-    if not match:
+    tope = int(match.group(1) or match.group(2)) if match else None
+
+    # Limite implicito: la forma singular y los superlativos piden una sola
+    # fila, aunque no usen la palabra "top". No se activa para "categorias"
+    # en plural sin un superlativo, que correctamente debe listar todas.
+    if tope is None:
+        singular = bool(re.search(
+            r"\b(?:la|el|cual|qué|que)\s+(?:es\s+)?(?:la\s+)?(?:categor[ií]a|comercio|concepto)\b",
+            texto,
+        ))
+        superlativo = bool(re.search(
+            r"\b(?:mayor|máximo|máxima|principal|más\s+(?:alto|alta|grande|gast[eé]|gasto)|menos|mínimo|mínima)\b",
+            texto,
+        ))
+        donde_mas = bool(re.search(
+            r"\b(?:dónde|donde|en\s+qué|en\s+que)\s+más\s+(?:gast[eé]|gasto|dinero)\b",
+            texto,
+        ))
+        if (singular and superlativo) or donde_mas:
+            tope = 1
+
+    if tope is None:
         return filas
-    tope = int(match.group(1) or match.group(2))
     if tope < 1 or len(filas) <= tope:
         return filas
     logger.info("ranking %s limitado a top %d (de %d filas)", kpi, tope, len(filas))
