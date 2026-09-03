@@ -232,6 +232,10 @@ def _estado(historial: list) -> dict | None:
         menu = estado.get("menu") or {}
         if menu.get("accion") == "editar" and menu.get("tabla"):
             return {"tabla": menu["tabla"], "paso": "accion", "valores": {}}
+        # Cualquier otra selección de menú (consultar, dashboard o pregunta
+        # libre) es una barrera: no debe reactivar una edición vieja.
+        if menu:
+            return None
     return None
 
 
