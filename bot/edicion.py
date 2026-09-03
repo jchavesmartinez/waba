@@ -184,7 +184,8 @@ def resumen_inicio(politica: PoliticaEdicion) -> str:
     requeridos = [c for c in politica.campos.values() if c.requerido and not c.calculado]
     etiquetas = ", ".join(c.etiqueta for c in requeridos)
     return (
-        f"Puede *{acciones}* registros de *{' '.join(politica.tabla.split('_'))}*. "
-        f"Para crear uno, indíqueme: {etiquetas}. "
-        "Validaré el formato y le mostraré una vista previa antes de guardar."
+        f"La edición de *{' '.join(politica.tabla.split('_'))}* quedó configurada "
+        f"para: *{acciones}*. Los campos obligatorios serán: {etiquetas}. "
+        "La captura y confirmación se activarán al conectar el origen de escritura; "
+        "por ahora no se modificará ningún dato."
     )
