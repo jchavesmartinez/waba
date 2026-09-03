@@ -437,4 +437,8 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
     nuevo = {"tabla": politica.tabla, "accion": accion, "paso": "confirmar",
              "valores": validado.valores}
     return Respuesta(_texto_previa(politica, accion, validado.valores),
-                     estado={"edicion": nuevo})
+                     estado={"edicion": nuevo},
+                     botones=[
+                         {"id": "edicion:confirmar", "title": "Confirmar"},
+                         {"id": "edicion:cancelar", "title": "Cancelar"},
+                     ])

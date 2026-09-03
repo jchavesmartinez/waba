@@ -46,6 +46,8 @@ class Respuesta:
     # seguimiento no tenga que reconstruir concepto, periodo o cifras leyendo
     # prosa. Nunca se muestra al usuario.
     estado: dict = field(default_factory=dict)
+    # Acciones rápidas opcionales que WhatsApp muestra debajo del texto.
+    botones: list = field(default_factory=list)
 
     def __str__(self) -> str:      # compatibilidad con codigo viejo/tests
         return self.texto

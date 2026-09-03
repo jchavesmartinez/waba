@@ -190,6 +190,8 @@ def _atender(numero: str, texto: str, numero_origen: str = "") -> None:
     # respuesta se leeria peor por ahorrarse un mensaje.
     if respuesta.texto:
         whatsapp.enviar_texto(numero, respuesta.texto, numero_origen)
+    if respuesta.botones:
+        whatsapp.enviar_botones(numero, "¿Deseas aplicar este cambio?", respuesta.botones, numero_origen)
 
     # El menú solo se muestra con saludo o pedido explícito. Una pregunta de
     # datos directa sigue funcionando como siempre, sin obligar al usuario a
@@ -555,7 +557,13 @@ async def webhook(request: Request, tareas: BackgroundTasks):
                         or {}
                     )
                     seleccion = str(respuesta_menu.get("id", "") or "").strip()
-                    if seleccion.startswith("menu:"):
+                    if seleccion in {"edicion:confirmar", "edicion:cancelar"}:
+                        texto_edicion = {
+                            "edicion:confirmar": "confirmar",
+                            "edicion:cancelar": "cancelar",
+                        }[seleccion]
+                        tareas.add_task(_atender, numero, texto_edicion, origen)
+                    elif seleccion.startswith("menu:"):
                         tareas.add_task(_atender_interactivo, numero, seleccion, origen)
                     else:
                         tareas.add_task(
