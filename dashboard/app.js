@@ -16,6 +16,21 @@
     return String(value);
   };
   const findKpi = (name) => data.kpis.find((k) => k.kpi === name);
+  // El dashboard presenta siempre las tres dimensiones mensuales en un orden
+  // estable, independientemente del orden en que lleguen desde metadata.
+  const presentacion = (kpi) => {
+    const id = String(kpi.kpi || "").toLowerCase();
+    if (id === "gasto_por_categoria" || id === "ejecucion_presupuesto_mes" || id.includes("presupuesto_categoria")) {
+      return { titulo: "Categoría mensual", orden: 0 };
+    }
+    if (id === "ejecucion_presupuesto_concepto" || id === "gasto_por_concepto" || id.includes("presupuesto_concepto")) {
+      return { titulo: "Concepto mensual", orden: 1 };
+    }
+    if (id === "gasto_por_comercio" || id.includes("presupuesto_comercio")) {
+      return { titulo: "Comercio mensual", orden: 2 };
+    }
+    return { titulo: kpi.nombre, orden: 10 };
+  };
   const rowObject = (kpi, row) => Object.fromEntries(kpi.columnas.map((c, i) => [c, row[i]]));
   const keyMatch = (obj, pattern) => Object.keys(obj).find((key) => pattern.test(key));
   const dimensionFor = (kpi, row) => {
@@ -83,10 +98,12 @@
   }
 
   const target = byId("indicadores");
-  const visible = data.kpis.filter((k) => k !== summary);
+  const visible = data.kpis
+    .filter((k) => k !== summary)
+    .sort((a, b) => presentacion(a).orden - presentacion(b).orden);
   visible.forEach((kpi) => {
     const panel = document.createElement("article"); panel.className = "panel";
-    const title = document.createElement("h2"); title.textContent = kpi.nombre;
+    const title = document.createElement("h2"); title.textContent = presentacion(kpi).titulo;
     panel.append(title);
     if (kpi.descripcion) { const p = document.createElement("p"); p.className = "descripcion"; p.textContent = kpi.descripcion; panel.append(p); }
     if (!kpi.filas.length) { const p = document.createElement("p"); p.className = "vacio"; p.textContent = "Sin registros para este período."; panel.append(p); target.append(panel); return; }
