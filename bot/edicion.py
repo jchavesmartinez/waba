@@ -325,6 +325,23 @@ def _texto_previa(politica: PoliticaEdicion, accion: str, valores: dict) -> str:
             "\n\nResponda *Confirmar* para aplicarlo o *Cancelar* para descartarlo.")
 
 
+def _texto_registro_encontrado(politica: PoliticaEdicion,
+                               registro: dict[str, object]) -> str:
+    """Presenta el registro identificado sin exponer su llave técnica."""
+    lineas = []
+    for nombre, valor in registro.items():
+        if (nombre == politica.clave_primaria or nombre.endswith("_id")
+                or valor in (None, "")):
+            continue
+        campo = politica.campos.get(nombre)
+        etiqueta = campo.etiqueta if campo else nombre
+        lineas.append(f"• *{etiqueta}:* {valor}")
+    detalle = "\n".join(lineas) or "(sin datos visibles)"
+    return ("Encontré este registro en *" + " ".join(politica.tabla.split("_")) + ":\n\n"
+            + detalle + "\n\n¿Qué deseas cambiar? Puedes indicar varios campos "
+            "en un mismo mensaje, por ejemplo: “cambia el monto y la descripción”.")
+
+
 def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list) -> Respuesta | None:
     """Avanza un flujo de edición; devuelve None cuando no hay edición en curso."""
     estado = _estado(historial)
@@ -408,6 +425,19 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
                                                   "paso": "campos", "valores": valores}})
         if len(candidatos) == 1:
             valores[politica.clave_primaria] = candidatos[0].get(politica.clave_primaria, "")
+            if accion == "modificar":
+                # La primera coincidencia solo identifica el registro. Los
+                # cambios se capturan en el siguiente mensaje para que el
+                # cliente vea qué encontró el bot antes de editarlo.
+                identificado = candidatos[0]
+                return Respuesta(
+                    _texto_registro_encontrado(politica, identificado),
+                    estado={"edicion": {"tabla": politica.tabla,
+                                         "accion": accion,
+                                         "paso": "cambios",
+                                         "valores": {politica.clave_primaria:
+                                                     valores[politica.clave_primaria]}}},
+                )
         elif len(candidatos) > 1:
             return Respuesta("Encontré varios registros que coinciden. Indique un dato adicional, "
                              "como la fecha exacta, el comercio o el monto original.",
@@ -430,10 +460,10 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
                          estado={"edicion": {"tabla": politica.tabla, "accion": accion,
                                               "paso": "campos", "valores": valores}})
     if accion == "modificar" and set(validado.valores) == {politica.clave_primaria}:
-        return Respuesta("Indique al menos un campo adicional para modificar; el identificador "
-                         "solo sirve para encontrar el registro.",
+        return Respuesta("Indique qué desea cambiar. Puede modificar varios campos en un mismo "
+                         "mensaje, por ejemplo: “monto: 25000” y “descripción: cena”.",
                          estado={"edicion": {"tabla": politica.tabla, "accion": accion,
-                                              "paso": "campos", "valores": valores}})
+                                              "paso": "cambios", "valores": valores}})
     nuevo = {"tabla": politica.tabla, "accion": accion, "paso": "confirmar",
              "valores": validado.valores}
     return Respuesta(_texto_previa(politica, accion, validado.valores),
