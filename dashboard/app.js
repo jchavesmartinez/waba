@@ -20,12 +20,26 @@
   const keyMatch = (obj, pattern) => Object.keys(obj).find((key) => pattern.test(key));
   const dimensionFor = (kpi, row) => {
     const texto = `${kpi.kpi || ""} ${kpi.nombre || ""} ${kpi.descripcion || ""}`.toLowerCase();
-    const preferred = texto.includes("comercio")
-      ? /comercio|descripcion|concepto|nombre|categoria/i
+    // Prefer the exact dimension named by the KPI. A concept KPI can also
+    // return `categoria` for context, but that must not replace `concepto` as
+    // the chart label merely because it appears first in the SQL result.
+    const exact = texto.includes("comercio")
+      ? /^comercio$/i
       : texto.includes("concepto")
-        ? /concepto|descripcion|comercio|nombre|categoria/i
+        ? /^concepto$/i
+        : texto.includes("categoria")
+          ? /^categoria$/i
+          : null;
+    if (exact) {
+      const exactKey = keyMatch(row, exact);
+      if (exactKey) return exactKey;
+    }
+    const fallback = texto.includes("comercio")
+      ? /descripcion|comercio|concepto|nombre|categoria/i
+      : texto.includes("concepto")
+        ? /concepto|descripcion|comercio|nombre/i
         : /categoria|comercio|concepto|descripcion|nombre/i;
-    return keyMatch(row, preferred);
+    return keyMatch(row, fallback);
   };
 
   byId("cliente").textContent = data.cliente.nombre;
