@@ -387,7 +387,9 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
             return Respuesta("Describa el registro que desea anular, por ejemplo: “Anula el gasto de Walmart del 22 de agosto”.",
                              estado={"edicion": estado})
         if accion == "modificar":
-            return Respuesta("Describa el cambio en lenguaje natural, por ejemplo: “Cambia el gasto de Walmart del 22 de agosto a ₡220.000”.",
+            return Respuesta("Para encontrar el registro que desea modificar, descríbalo en lenguaje natural, "
+                             "por ejemplo: “Busca el gasto de Walmart del 22 de agosto”. "
+                             "Después de mostrárselo, le preguntaré qué desea cambiar.",
                              estado={"edicion": estado})
 
     valores = dict(estado.get("valores") or {})
