@@ -6,8 +6,10 @@ vienen de ``PoliticaEdicion`` y de la fuente declarada en la metadata.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
+import re
 import unicodedata
 import secrets
 
@@ -61,13 +63,34 @@ def _coincide(real: object, buscado: object, campo: str) -> bool:
         return False
     if campo in {"monto", "monto_moneda"}:
         try:
-            return Decimal(a.replace(".", "").replace(",", ".")) == Decimal(b)
+            real_n = Decimal(a.replace(".", "").replace(",", "."))
+            buscado_n = Decimal(b.replace(".", "").replace(",", "."))
+            if real_n == buscado_n:
+                return True
+            # A natural-language amount such as “cerca de 195 mil” may not
+            # be exact. Limit the tolerance to 5% (with a CRC 100 minimum)
+            # so a nearby value can identify a record without broad matches.
+            margen = max(abs(buscado_n) * Decimal("0.05"), Decimal("100"))
+            return abs(real_n - buscado_n) <= margen
         except (InvalidOperation, ValueError):
             pass
     if campo in {"fecha", "fecha_transaccion"}:
-        return a[:10] == b[:10]
+        try:
+            fecha_a = datetime.fromisoformat(a[:10]).date()
+            fecha_b = datetime.fromisoformat(b[:10]).date()
+            return abs((fecha_a - fecha_b).days) <= 3
+        except ValueError:
+            return a[:10] == b[:10]
     normal_a, normal_b = _comparable(a), _comparable(b)
-    return normal_a == normal_b or normal_b in normal_a
+    if normal_a == normal_b or normal_b in normal_a:
+        return True
+    # Also tolerate small spelling/spacing differences (e.g. “extremetech”
+    # vs “EXTREME TECH”), while requiring a reasonably strong similarity.
+    compact_a = re.sub(r"[^a-z0-9]", "", normal_a)
+    compact_b = re.sub(r"[^a-z0-9]", "", normal_b)
+    if compact_a and compact_b and (compact_b in compact_a or compact_a in compact_b):
+        return True
+    return SequenceMatcher(None, normal_a, normal_b).ratio() >= 0.84
 
 
 def _resolver_referencias(libro, politica: PoliticaEdicion,

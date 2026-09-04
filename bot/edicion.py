@@ -342,6 +342,27 @@ def _texto_registro_encontrado(politica: PoliticaEdicion,
             "en un mismo mensaje, por ejemplo: “cambia el monto y la descripción”.")
 
 
+def _texto_candidatos(politica: PoliticaEdicion,
+                      candidatos: list[dict[str, object]]) -> str:
+    """Muestra coincidencias legibles para que el cliente pueda precisarlas."""
+    bloques = []
+    for indice, registro in enumerate(candidatos[:5], 1):
+        visibles = []
+        for nombre, valor in registro.items():
+            if (nombre == politica.clave_primaria or nombre.endswith("_id")
+                    or valor in (None, "")):
+                continue
+            campo = politica.campos.get(nombre)
+            etiqueta = campo.etiqueta if campo else nombre
+            if nombre in {"fecha", "descripcion", "monto", "moneda", "categoria"}:
+                visibles.append(f"{etiqueta}: {valor}")
+        bloques.append(f"{indice}. " + " · ".join(visibles))
+    extra = "" if len(candidatos) <= 5 else f"\n(y {len(candidatos) - 5} coincidencias más)"
+    return ("Encontré varias coincidencias:\n\n" + "\n".join(bloques) + extra
+            + "\n\n¿Cuál deseas modificar? Indica un dato que las diferencie, "
+              "como la fecha exacta, el comercio o el monto original.")
+
+
 def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list) -> Respuesta | None:
     """Avanza un flujo de edición; devuelve None cuando no hay edición en curso."""
     estado = _estado(historial)
@@ -441,8 +462,7 @@ def procesar_mensaje(cliente: dict, numero: str, pregunta: str, historial: list)
                                                      valores[politica.clave_primaria]}}},
                 )
         elif len(candidatos) > 1:
-            return Respuesta("Encontré varios registros que coinciden. Indique un dato adicional, "
-                             "como la fecha exacta, el comercio o el monto original.",
+            return Respuesta(_texto_candidatos(politica, candidatos),
                              estado={"edicion": {"tabla": politica.tabla, "accion": accion,
                                                   "paso": "campos", "valores": valores}})
         elif criterios:
