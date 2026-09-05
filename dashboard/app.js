@@ -33,6 +33,7 @@
   };
   const rowObject = (kpi, row) => Object.fromEntries(kpi.columnas.map((c, i) => [c, row[i]]));
   const keyMatch = (obj, pattern) => Object.keys(obj).find((key) => pattern.test(key));
+  const normalized = (value) => String(value ?? "").trim().toLocaleLowerCase("es").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const dimensionFor = (kpi, row) => {
     const texto = `${kpi.kpi || ""} ${kpi.nombre || ""} ${kpi.descripcion || ""}`.toLowerCase();
     // Prefer the exact dimension named by the KPI. A concept KPI can also
@@ -57,13 +58,128 @@
     return keyMatch(row, fallback);
   };
 
+  const metricKeys = (row) => ({
+    budget: keyMatch(row, /^presupuesto$|monto_presupuestado|presupuesto_mensual/i),
+    spent: keyMatch(row, /^gastado$|gasto_neto|gasto|monto|total/i),
+    available: keyMatch(row, /^disponible$|saldo/i),
+    pct: keyMatch(row, /pct|porcentaje/i),
+  });
+
+  const appendMetricBars = (container, row) => {
+    const keys = metricKeys(row);
+    const numeric = [keys.budget, keys.spent].map((key) => key && Math.abs(number(row[key]))).filter(Number.isFinite);
+    if (!numeric.length) return;
+    const max = Math.max(...numeric, 1);
+    [[keys.budget, "Presupuesto", "bar-budget"], [keys.spent, "Gastado", "bar-spent"]]
+      .filter(([key]) => key)
+      .forEach(([key, label, cls]) => {
+        const line = document.createElement("div"); line.className = "bar-line";
+        const labelEl = document.createElement("span"); labelEl.textContent = label;
+        const track = document.createElement("span"); track.className = "bar-track";
+        const fill = document.createElement("span"); fill.className = `bar-fill ${cls}`;
+        fill.style.width = `${Math.min(100, Math.abs(number(row[key])) / max * 100)}%`;
+        track.append(fill);
+        const value = document.createElement("strong"); value.textContent = format(row[key], key);
+        line.append(labelEl, track, value); container.append(line);
+      });
+  };
+
+  const renderHierarchy = (target) => {
+    const byIdInsensitive = (ids) => data.kpis.find((k) => ids.includes(String(k.kpi || "").toLowerCase()));
+    const conceptKpi = byIdInsensitive(["ejecucion_presupuesto_concepto", "gasto_por_concepto"]);
+    const categoryKpi = byIdInsensitive(["gasto_por_categoria", "ejecucion_presupuesto_mes"]);
+    const commerceKpi = byIdInsensitive(["gasto_por_comercio"]);
+    if (!conceptKpi && !categoryKpi) return new Set();
+
+    const concepts = (conceptKpi || categoryKpi).filas.map((row) => rowObject(conceptKpi || categoryKpi, row));
+    const categories = new Map();
+    const conceptRows = [];
+    concepts.forEach((row) => {
+      const categoryKey = keyMatch(row, /^categoria$|categoría/i);
+      const conceptKey = keyMatch(row, /^concepto$|rubro/i);
+      const category = row[categoryKey] || "Sin categoría";
+      const concept = conceptKey ? row[conceptKey] : null;
+      const bucket = categories.get(normalized(category)) || { name: category, rows: [], totals: {} };
+      bucket.rows.push(row);
+      categories.set(normalized(category), bucket);
+      if (concept) conceptRows.push({ row, category: normalized(category), name: concept });
+    });
+
+    // Si el KPI de conceptos ya trae presupuesto/gasto por linea, sumar esos
+    // valores produce el encabezado de categoría sin otra consulta.
+    categories.forEach((bucket) => {
+      const sample = bucket.rows[0];
+      const keys = metricKeys(sample);
+      bucket.totals = { ...sample };
+      if (keys.budget) bucket.totals[keys.budget] = bucket.rows.reduce((sum, row) => sum + (number(row[keys.budget]) || 0), 0);
+      if (keys.spent) bucket.totals[keys.spent] = bucket.rows.reduce((sum, row) => sum + (number(row[keys.spent]) || 0), 0);
+      if (keys.available) bucket.totals[keys.available] = (number(bucket.totals[keys.budget]) || 0) - (number(bucket.totals[keys.spent]) || 0);
+    });
+
+    const movements = commerceKpi ? commerceKpi.filas.map((row) => rowObject(commerceKpi, row)) : [];
+    const movementName = (row) => row[keyMatch(row, /^comercio$|descripcion|concepto|nombre/i)] || "Movimiento";
+    const movementCategory = (row) => normalized(row[keyMatch(row, /^categoria$|categoría/i)]);
+    const movementConcept = (row) => normalized(row[keyMatch(row, /^concepto$|rubro/i)]);
+    const usedMovements = new Set();
+
+    const panel = document.createElement("article"); panel.className = "panel panel-jerarquia";
+    const title = document.createElement("h2"); title.textContent = "Gasto mensual por categoría"; panel.append(title);
+    const description = document.createElement("p"); description.className = "descripcion";
+    description.textContent = "Expande una categoría para ver sus conceptos y cada movimiento asociado."; panel.append(description);
+    const tree = document.createElement("div"); tree.className = "jerarquia";
+
+    categories.forEach((bucket) => {
+      const categoryDetails = document.createElement("details"); categoryDetails.className = "nivel nivel-categoria";
+      const categorySummary = document.createElement("summary");
+      const categoryHeading = document.createElement("span"); categoryHeading.className = "nivel-titulo"; categoryHeading.textContent = bucket.name;
+      const categoryMeta = document.createElement("span"); categoryMeta.className = "nivel-meta";
+      const categoryKeys = metricKeys(bucket.totals);
+      categoryMeta.textContent = categoryKeys.spent ? `Gastado: ${format(bucket.totals[categoryKeys.spent], categoryKeys.spent)}` : "";
+      categorySummary.append(categoryHeading, categoryMeta); categoryDetails.append(categorySummary);
+      const conceptsWrap = document.createElement("div"); conceptsWrap.className = "nivel-hijos";
+      const rows = bucket.rows.filter((row) => keyMatch(row, /^concepto$|rubro/i));
+      rows.forEach((row) => {
+        const conceptKey = keyMatch(row, /^concepto$|rubro/i);
+        const conceptDetails = document.createElement("details"); conceptDetails.className = "nivel nivel-concepto";
+        const conceptSummary = document.createElement("summary");
+        const conceptHeading = document.createElement("span"); conceptHeading.className = "nivel-titulo"; conceptHeading.textContent = row[conceptKey];
+        const conceptKeys = metricKeys(row); const conceptMeta = document.createElement("span"); conceptMeta.className = "nivel-meta";
+        conceptMeta.textContent = conceptKeys.spent ? `Gastado: ${format(row[conceptKeys.spent], conceptKeys.spent)}` : "";
+        conceptSummary.append(conceptHeading, conceptMeta); conceptDetails.append(conceptSummary);
+        const conceptBody = document.createElement("div"); conceptBody.className = "nivel-detalle"; appendMetricBars(conceptBody, row);
+        const matches = movements.filter((movement, index) => {
+          const sameConcept = movementConcept(movement) === normalized(row[conceptKey]);
+          const sameCategory = movementCategory(movement) && movementCategory(movement) === normalized(bucket.name);
+          const sameName = normalized(movementName(movement)) === normalized(row[conceptKey]);
+          if ((sameConcept || sameName) && (!movementCategory(movement) || sameCategory)) { usedMovements.add(index); return true; }
+          return false;
+        });
+        if (matches.length) {
+          const movementList = document.createElement("ul"); movementList.className = "movimientos";
+          matches.forEach((movement) => {
+            const item = document.createElement("li");
+            const name = document.createElement("span"); name.textContent = movementName(movement);
+            const keys = metricKeys(movement); const value = document.createElement("strong");
+            value.textContent = keys.spent ? format(movement[keys.spent], keys.spent, commerceKpi.unidad) : "";
+            item.append(name, value); movementList.append(item);
+          });
+          conceptBody.append(movementList);
+        }
+        conceptDetails.append(conceptBody); conceptsWrap.append(conceptDetails);
+      });
+      categoryDetails.append(conceptsWrap); tree.append(categoryDetails);
+    });
+    panel.append(tree); target.append(panel);
+    return new Set([conceptKpi, categoryKpi, commerceKpi].filter(Boolean));
+  };
+
   byId("cliente").textContent = data.cliente.nombre;
   byId("periodo").textContent = data.periodo.etiqueta;
   byId("actualizado").textContent = "Actualizado: " + new Date(data.actualizado_en).toLocaleString("es-CR");
 
   const summary = findKpi("presupuesto_disponible") || data.kpis.find((k) => k.filas.length === 1 && k.columnas.some((c) => /presupuesto/i.test(c)));
   const summaryRow = summary?.filas?.[0] ? rowObject(summary, summary.filas[0]) : null;
-  const summaryKeys = summaryRow ? Object.keys(summaryRow).filter((k) => !/pct/i.test(k)).slice(0, 4) : [];
+  const summaryKeys = summaryRow ? Object.keys(summaryRow).filter((k) => !/pct|gasto.?neto/i.test(k)).slice(0, 4) : [];
   const cards = byId("resumen");
   summaryKeys.forEach((key) => {
     const card = document.createElement("article");
@@ -98,8 +214,11 @@
   }
 
   const target = byId("indicadores");
+  const hierarchyKpis = renderHierarchy(target);
   const visible = data.kpis
     .filter((k) => k !== summary)
+    .filter((k) => !hierarchyKpis.has(k))
+    .filter((k) => !/^(gasto_total|gasto_neto)$/i.test(String(k.kpi || "")))
     .sort((a, b) => presentacion(a).orden - presentacion(b).orden);
   visible.forEach((kpi) => {
     const panel = document.createElement("article"); panel.className = "panel";

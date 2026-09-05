@@ -55,6 +55,24 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .detalle { margin-top: 22px; }
 .detalle summary { cursor: pointer; color: var(--green); font-size: .82rem; font-weight: 800; }
 .detalle[open] summary { margin-bottom: 12px; }
+.panel-jerarquia { grid-column: 1 / -1; }
+.jerarquia { display: grid; gap: 10px; margin-top: 18px; }
+.nivel { border: 1px solid var(--line); border-radius: 12px; background: #fbfdf9; }
+.nivel summary { cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; }
+.nivel summary::-webkit-details-marker { display: none; }
+.nivel summary::before { content: "＋"; color: var(--green); font-size: 1.05rem; font-weight: 700; }
+.nivel[open] > summary::before { content: "−"; }
+.nivel-titulo { font-weight: 760; overflow-wrap: anywhere; }
+.nivel-meta { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+.nivel-categoria > summary { background: #f1f8e9; border-radius: 12px; font-size: 1rem; }
+.nivel-hijos { display: grid; gap: 8px; padding: 0 10px 10px 28px; }
+.nivel-concepto { background: #fff; }
+.nivel-concepto > summary { padding: 12px 14px; font-size: .92rem; }
+.nivel-detalle { padding: 0 14px 14px 42px; }
+.nivel-detalle .bar-line { margin-top: 8px; }
+.movimientos { display: grid; gap: 6px; margin: 14px 0 0; padding: 0; list-style: none; }
+.movimientos li { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: .82rem; }
+.movimientos strong { color: var(--ink); white-space: nowrap; }
 .indicadores { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .tabla-wrap { overflow: auto; max-height: 390px; border: 1px solid var(--line); border-radius: 12px; }
 table { width: 100%; border-collapse: collapse; font-size: .86rem; }
@@ -79,6 +97,10 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: var(--
   .panel { padding: 17px; }
   .bar-line { grid-template-columns: 66px minmax(50px, 1fr) auto; gap: 7px; font-size: .72rem; }
   .bar-line strong { font-size: .72rem; }
+  .nivel summary { padding: 12px; }
+  .nivel-hijos { padding-left: 14px; }
+  .nivel-detalle { padding-left: 30px; }
+  .nivel-meta { font-size: .7rem; }
   footer { display: grid; }
 }
 @media (max-width: 600px) {
