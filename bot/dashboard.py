@@ -245,6 +245,101 @@ def _ejecutar_kpis(cliente: dict, periodo: dict) -> list[dict]:
     return resultados
 
 
+def _tabla_por_nombre(ctx, nombres: tuple[str, ...]):
+    buscadas = {n.lower() for n in nombres}
+    return next((t for t in ctx.permitidas
+                 if str(t.tabla_logica).strip().lower() in buscadas), None)
+
+
+def _columnas_de(tabla) -> set[str]:
+    return {str(c).strip().lower() for c in (tabla.columnas_config or {})}
+
+
+def _identificador(valor: str) -> str:
+    """Cita un identificador que ya fue obtenido de information_schema."""
+    return '"' + str(valor).replace('"', '""') + '"'
+
+
+def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
+    """Obtiene movimientos con su linea presupuestaria para el árbol del dashboard.
+
+    Es deliberadamente opcional y metadata-driven: si un cliente no tiene las
+    tablas/columnas que permiten relacionar presupuesto con movimientos, el
+    dashboard conserva sus KPIs planos en lugar de inventar asociaciones.
+    """
+    presupuesto = _tabla_por_nombre(ctx, ("presupuesto",))
+    transacciones = _tabla_por_nombre(ctx, ("transacciones", "finanzas__transacciones"))
+    manuales = _tabla_por_nombre(ctx, ("gastos_manuales", "gastos manuales"))
+    if not presupuesto or not (transacciones or manuales):
+        return []
+
+    pcols = _columnas_de(presupuesto)
+    if not {"linea_id", "categoria", "concepto"}.issubset(pcols):
+        return []
+    inicio = str(periodo.get("inicio", ""))
+    fin = str(periodo.get("fin_exclusivo", ""))
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", inicio) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", fin):
+        return []
+
+    partes = []
+    if transacciones:
+        cols = _columnas_de(transacciones)
+        requeridas = {"linea_presupuesto_id", "fecha_transaccion", "monto", "monto_moneda", "tipo_transaccion"}
+        if requeridas.issubset(cols) and ("comercio" in cols):
+            tabla = _identificador(transacciones.tabla_real)
+            partes.append(
+                f"SELECT CAST(t.linea_presupuesto_id AS text) AS linea_id, "
+                f"t.fecha_transaccion AS fecha, t.comercio AS descripcion, "
+                f"t.monto_moneda AS moneda, "
+                f"CASE WHEN UPPER(t.tipo_transaccion) IN ('REVERSO','ANULACION') "
+                f"THEN -t.monto ELSE t.monto END AS monto "
+                f"FROM {tabla} t WHERE t.fecha_transaccion >= DATE '{inicio}' "
+                f"AND t.fecha_transaccion < DATE '{fin}'"
+            )
+    if manuales:
+        cols = _columnas_de(manuales)
+        requeridas = {"linea_presupuesto_id", "fecha", "descripcion", "monto", "moneda", "tipo_movimiento", "activo", "incluir_en_gasto"}
+        if requeridas.issubset(cols):
+            tabla = _identificador(manuales.tabla_real)
+            partes.append(
+                f"SELECT CAST(g.linea_presupuesto_id AS text) AS linea_id, "
+                f"g.fecha AS fecha, g.descripcion AS descripcion, "
+                f"UPPER(COALESCE(NULLIF(g.moneda,''),'CRC')) AS moneda, "
+                f"CASE WHEN UPPER(g.tipo_movimiento)='REVERSO' THEN -g.monto ELSE g.monto END AS monto "
+                f"FROM {tabla} g WHERE LOWER(TRIM(g.activo))='si' "
+                f"AND LOWER(TRIM(g.incluir_en_gasto))='si' "
+                f"AND UPPER(g.tipo_movimiento) IN ('GASTO','REVERSO') "
+                f"AND g.fecha >= DATE '{inicio}' AND g.fecha < DATE '{fin}'"
+            )
+    if not partes:
+        return []
+
+    ptabla = _identificador(presupuesto.tabla_real)
+    sql = (
+        "WITH movimientos AS (" + " UNION ALL ".join(partes) + ") "
+        f"SELECT m.linea_id, p.categoria, p.concepto, m.fecha, m.descripcion, m.moneda, m.monto "
+        f"FROM movimientos m LEFT JOIN {ptabla} p "
+        "ON TRIM(CAST(p.linea_id AS text)) = TRIM(m.linea_id) "
+        "WHERE m.linea_id IS NOT NULL "
+        "ORDER BY p.categoria, p.concepto, m.fecha"
+    )
+    ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
+    if not ok:
+        logger.warning("consulta de movimientos del dashboard rechazada: %s", motivo)
+        return []
+    try:
+        columnas, filas = warehouse_ro.ejecutar(
+            cliente, sql, limite=int(config.DASHBOARD_MAX_FILAS_POR_KPI) * 10,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("no se pudieron cargar movimientos del dashboard: %s", exc)
+        return []
+    return [
+        {str(col): _serializable(valor) for col, valor in zip(columnas, fila)}
+        for fila in filas
+    ]
+
+
 def generar_snapshot(cliente: dict, periodo: dict) -> dict:
     clave = (
         str(cliente.get("cliente_id", "")),
@@ -258,6 +353,7 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
         if guardado and ahora - guardado[0] <= ttl:
             return guardado[1]
 
+    ctx = catalogo.construir_contexto(cliente)
     snapshot = {
         "cliente": {
             "id": str(cliente.get("cliente_id", "")),
@@ -271,6 +367,7 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
             ZoneInfo(config.BOT_TIMEZONE)
         ).isoformat(timespec="minutes"),
         "kpis": _ejecutar_kpis(cliente, periodo),
+        "movimientos": _movimientos_jerarquia(cliente, ctx, periodo) if not ctx.error_lectura else [],
     }
     with _CACHE_LOCK:
         _CACHE[clave] = (ahora, snapshot)

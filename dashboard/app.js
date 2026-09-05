@@ -116,8 +116,11 @@
       if (keys.available) bucket.totals[keys.available] = (number(bucket.totals[keys.budget]) || 0) - (number(bucket.totals[keys.spent]) || 0);
     });
 
-    const movements = commerceKpi ? commerceKpi.filas.map((row) => rowObject(commerceKpi, row)) : [];
+    const movements = Array.isArray(data.movimientos) && data.movimientos.length
+      ? data.movimientos
+      : (commerceKpi ? commerceKpi.filas.map((row) => rowObject(commerceKpi, row)) : []);
     const movementName = (row) => row[keyMatch(row, /^comercio$|descripcion|concepto|nombre/i)] || "Movimiento";
+    const movementLine = (row) => normalized(row[keyMatch(row, /^linea_id$|linea_presupuesto_id/i)]);
     const movementCategory = (row) => normalized(row[keyMatch(row, /^categoria$|categoría/i)]);
     const movementConcept = (row) => normalized(row[keyMatch(row, /^concepto$|rubro/i)]);
     const usedMovements = new Set();
@@ -134,24 +137,32 @@
       const categoryHeading = document.createElement("span"); categoryHeading.className = "nivel-titulo"; categoryHeading.textContent = bucket.name;
       const categoryMeta = document.createElement("span"); categoryMeta.className = "nivel-meta";
       const categoryKeys = metricKeys(bucket.totals);
-      categoryMeta.textContent = categoryKeys.spent ? `Gastado: ${format(bucket.totals[categoryKeys.spent], categoryKeys.spent)}` : "";
+      categoryMeta.textContent = [
+        categoryKeys.budget && `Presupuesto: ${format(bucket.totals[categoryKeys.budget], categoryKeys.budget)}`,
+        categoryKeys.spent && `Gastado: ${format(bucket.totals[categoryKeys.spent], categoryKeys.spent)}`,
+      ].filter(Boolean).join(" · ");
       categorySummary.append(categoryHeading, categoryMeta); categoryDetails.append(categorySummary);
       const conceptsWrap = document.createElement("div"); conceptsWrap.className = "nivel-hijos";
       const rows = bucket.rows.filter((row) => keyMatch(row, /^concepto$|rubro/i));
       rows.forEach((row) => {
         const conceptKey = keyMatch(row, /^concepto$|rubro/i);
+        const conceptLineKey = keyMatch(row, /^linea_id$|linea_presupuesto_id/i);
         const conceptDetails = document.createElement("details"); conceptDetails.className = "nivel nivel-concepto";
         const conceptSummary = document.createElement("summary");
         const conceptHeading = document.createElement("span"); conceptHeading.className = "nivel-titulo"; conceptHeading.textContent = row[conceptKey];
         const conceptKeys = metricKeys(row); const conceptMeta = document.createElement("span"); conceptMeta.className = "nivel-meta";
-        conceptMeta.textContent = conceptKeys.spent ? `Gastado: ${format(row[conceptKeys.spent], conceptKeys.spent)}` : "";
+        conceptMeta.textContent = [
+          conceptKeys.budget && `Presupuesto: ${format(row[conceptKeys.budget], conceptKeys.budget)}`,
+          conceptKeys.spent && `Gastado: ${format(row[conceptKeys.spent], conceptKeys.spent)}`,
+        ].filter(Boolean).join(" · ");
         conceptSummary.append(conceptHeading, conceptMeta); conceptDetails.append(conceptSummary);
         const conceptBody = document.createElement("div"); conceptBody.className = "nivel-detalle"; appendMetricBars(conceptBody, row);
         const matches = movements.filter((movement, index) => {
+          const sameLine = conceptLineKey && movementLine(movement) && movementLine(movement) === normalized(row[conceptLineKey]);
           const sameConcept = movementConcept(movement) === normalized(row[conceptKey]);
           const sameCategory = movementCategory(movement) && movementCategory(movement) === normalized(bucket.name);
           const sameName = normalized(movementName(movement)) === normalized(row[conceptKey]);
-          if ((sameConcept || sameName) && (!movementCategory(movement) || sameCategory)) { usedMovements.add(index); return true; }
+          if ((sameLine || sameConcept || sameName) && (!movementCategory(movement) || sameCategory)) { usedMovements.add(index); return true; }
           return false;
         });
         if (matches.length) {
@@ -160,7 +171,7 @@
             const item = document.createElement("li");
             const name = document.createElement("span"); name.textContent = movementName(movement);
             const keys = metricKeys(movement); const value = document.createElement("strong");
-            value.textContent = keys.spent ? format(movement[keys.spent], keys.spent, commerceKpi.unidad) : "";
+            value.textContent = keys.spent ? format(movement[keys.spent], keys.spent, movement.moneda || commerceKpi?.unidad) : "";
             item.append(name, value); movementList.append(item);
           });
           conceptBody.append(movementList);
