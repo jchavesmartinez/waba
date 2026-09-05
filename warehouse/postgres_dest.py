@@ -802,13 +802,22 @@ class PostgresDestino(Destino):
         self.asegurar_esquema(esquema)
         cols = ("kpi", "nombre", "descripcion", "preguntas_ejemplo", "formula_sql",
                 "tabla", "dimensiones", "unidad", "supuestos", "minimo_datos",
-                "instruccion")
+                "instruccion", "tipo_resultado", "detalle_kpi", "clave_entidad",
+                "orden_default", "periodo_default", "moneda_default", "aliases")
         ids_nuevos = {str(f.get("kpi", "")).strip().lower() for f in filas if f.get("kpi")}
         with self.conectar().begin() as cx:
             cx.execute(text(
                 f'CREATE TABLE IF NOT EXISTS "{esquema}"."_kpis" ('
                 "fuente_id TEXT, " + ", ".join(f"{c} TEXT" for c in cols) + ")"
             ))
+            # Migración retrocompatible para clientes cuyo _kpis fue creado
+            # antes del contrato de continuidad. Los campos son opcionales:
+            # metadata antigua sigue funcionando igual.
+            for c in cols:
+                cx.execute(text(
+                    f'ALTER TABLE "{esquema}"."_kpis" '
+                    f'ADD COLUMN IF NOT EXISTS "{c}" TEXT'
+                ))
             # Solo esta fuente: no se pisan los KPIs de las otras.
             cx.execute(text(f'DELETE FROM "{esquema}"."_kpis" WHERE fuente_id=:f'),
                        {"f": fuente_id})

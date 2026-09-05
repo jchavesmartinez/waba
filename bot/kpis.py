@@ -166,6 +166,15 @@ def _kpis_texto(kpis: list, pregunta: str = "") -> str:
         if k.get("unidad"): campos.append(f"unidad: {k['unidad']}")
         if k.get("supuestos"): campos.append(f"supuestos: {k['supuestos']}")
         if k.get("minimo_datos"): campos.append(f"minimo_datos: {k['minimo_datos']}")
+        # Contrato opcional de presentación/continuidad. Se mantiene
+        # totalmente impulsado por metadata para que un cliente nuevo no
+        # requiera cambios de código.
+        for campo in (
+            "tipo_resultado", "detalle_kpi", "clave_entidad", "orden_default",
+            "periodo_default", "moneda_default", "aliases",
+        ):
+            if k.get(campo):
+                campos.append(f"{campo}: {k[campo]}")
         if k.get("instruccion"):
             campos.append(f"instruccion (contrato): {k['instruccion']}")
         bloques.append("- " + "\n  ".join(campos))
@@ -543,6 +552,13 @@ def _historial_compacto(historial) -> str:
                     "kpi": estado.get("kpi", ""),
                     "filtros": estado.get("filtros", {}),
                     "periodo": estado.get("periodo", {}),
+                    "modo": estado.get("modo", ""),
+                    "seleccion": estado.get("seleccion", {}),
+                    "columnas": estado.get("columnas", [])[:20],
+                    "fila_seleccionada": (
+                        estado.get("filas", [])[:1]
+                        if estado.get("seleccion") else []
+                    ),
                 }, ensure_ascii=False, separators=(",", ":"))
             )
         bloques.append(bloque)

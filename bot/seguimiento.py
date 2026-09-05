@@ -12,8 +12,10 @@ import json
 import re
 import unicodedata
 from calendar import monthrange
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+
+from bot.tiempo import fecha_local
 
 
 _MAX_FILAS_ESTADO = 200
@@ -131,7 +133,8 @@ def tiene_periodo_explicito(pregunta: str) -> bool:
     t = _normalizar(pregunta)
     meses = "|".join(_MESES)
     return bool(re.search(
-        rf"\b(?:hoy|ayer|este mes|mes pasado|{meses}|20\d{{2}})\b|"
+        rf"\b(?:hoy|ayer|anteayer|esta semana|semana pasada|este mes|"
+        rf"mes pasado|ultimos?\s+\d+\s+dias?|{meses}|20\d{{2}})\b|"
         r"\b\d{1,2}[/.-]\d{1,2}",
         t,
     ))
@@ -145,6 +148,40 @@ def periodo_explicito(pregunta: str) -> dict:
     los demás formatos continúan por el camino que ya interpreta text-to-SQL.
     """
     t = _normalizar(pregunta)
+    hoy = fecha_local()
+
+    def rango(inicio: date, fin_exclusivo: date, granularidad: str = "rango"):
+        return {
+            "inicio": inicio.isoformat(),
+            "fin_inclusivo": (fin_exclusivo - timedelta(days=1)).isoformat(),
+            "fin_exclusivo": fin_exclusivo.isoformat(),
+            "granularidad": granularidad,
+        }
+
+    if re.search(r"\banteayer\b", t):
+        return rango(hoy - timedelta(days=2), hoy - timedelta(days=1), "dia")
+    if re.search(r"\bayer\b", t):
+        return rango(hoy - timedelta(days=1), hoy, "dia")
+    if re.search(r"\bhoy\b", t):
+        return rango(hoy, hoy + timedelta(days=1), "dia")
+    if re.search(r"\besta semana\b", t):
+        inicio = hoy - timedelta(days=hoy.weekday())
+        return rango(inicio, hoy + timedelta(days=1), "semana")
+    if re.search(r"\bsemana pasada\b", t):
+        fin = hoy - timedelta(days=hoy.weekday())
+        return rango(fin - timedelta(days=7), fin, "semana")
+    m_dias = re.search(r"\bultimos?\s+(\d+)\s+d[ií]as?\b", t)
+    if m_dias:
+        cantidad = max(int(m_dias.group(1)), 1)
+        return rango(hoy - timedelta(days=cantidad - 1), hoy + timedelta(days=1), "rango")
+    if re.search(r"\beste mes\b", t):
+        inicio = hoy.replace(day=1)
+        fin = (inicio.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return rango(inicio, fin, "mes")
+    if re.search(r"\bmes pasado\b", t):
+        fin = hoy.replace(day=1)
+        inicio = (fin - timedelta(days=1)).replace(day=1)
+        return rango(inicio, fin, "mes")
     mes = next((numero for nombre, numero in _MESES.items()
                 if re.search(rf"\b{nombre}\b", t)), None)
     anio_m = re.search(r"\b(20\d{2})\b", t)
@@ -161,6 +198,89 @@ def periodo_explicito(pregunta: str) -> dict:
         "fin_inclusivo": f"{anio:04d}-{mes:02d}-{ultimo:02d}",
         "fin_exclusivo": fin_exclusivo,
         "granularidad": "mes",
+    }
+
+
+def modo_resultado(pregunta: str, columnas=None, filas=None) -> str:
+    """Clasifica la forma del resultado para continuarla sin adivinar."""
+    texto = _normalizar(pregunta)
+    if es_consulta_composicion(pregunta):
+        return "detalle"
+    if re.search(r"\b(?:por|agrupad[oa]s?\s+por)\s+(?:categoria|concepto|comercio|moneda)\b", texto):
+        return "desglose"
+    if re.search(r"\b(?:presupuesto|disponible|porcentaje|exced|sobregir)\b", texto):
+        return "desglose" if len(filas or []) > 1 else "resumen"
+    return "resumen"
+
+
+def _indice_numerico(columnas, preferidos):
+    nombres = [_nombre(c) for c in columnas]
+    for candidato in preferidos:
+        for i, nombre in enumerate(nombres):
+            if candidato in nombre:
+                return i
+    return None
+
+
+def resolver_referencia(pregunta: str, historial: list):
+    """Resuelve referencias al resultado anterior sobre filas verificadas."""
+    estado = ultimo_estado(historial)
+    if not estado or not estado.get("filas") or not estado.get("columnas"):
+        return None
+    t = _normalizar(pregunta)
+    # Una pregunta completa con fecha/mes siempre abre un contexto nuevo. Las
+    # referencias de atributos ("su presupuesto") solo son seguras después de
+    # que este resolver haya seleccionado una fila explícita.
+    if tiene_periodo_explicito(pregunta):
+        return None
+    seleccion_explicita = bool(re.search(
+        r"\b(?:primero|primera|ultimo|ultima|mayor|menor|que\s+mas|que\s+menos)\b",
+        t,
+    ))
+    if not seleccion_explicita and not estado.get("seleccion"):
+        return None
+    if not re.search(
+        r"\b(?:el|la|los|las)\s+(?:primero|primera|ultimo|ultima|mayor|menor|"
+        r"que\s+mas|que\s+menos)\b|\b(?:su|ese|esa|esos|esas|de\s+esos|de\s+esas)\b",
+        t,
+    ) and not re.search(r"^y\s+.*\b(?:presupuesto|gastado|disponible|porcentaje)\b", t):
+        return None
+    columnas = list(estado.get("columnas") or [])
+    filas = [tuple(f) for f in estado.get("filas") or []]
+    if not filas:
+        return None
+    i_gastado = _indice_numerico(
+        columnas, ("gastado", "gasto_neto", "gasto", "total", "monto"),
+    )
+    i_exceso = _indice_numerico(columnas, ("exceso", "sobregiro"))
+    i_disponible = _indice_numerico(columnas, ("disponible", "saldo"))
+    indice = 0
+    criterio = "primero"
+    if re.search(r"\b(?:ultimo|ultima)\b", t):
+        indice, criterio = len(filas) - 1, "ultimo"
+    elif re.search(r"\b(?:menor|menos)\b", t):
+        i = i_disponible if "disponible" in t and i_disponible is not None else i_gastado
+        valores = [(_decimal(fila[i]), n) for n, fila in enumerate(filas)] if i is not None else []
+        valores = [(valor, n) for valor, n in valores if valor is not None]
+        if valores:
+            indice, criterio = min(valores)[1], "menor"
+    elif re.search(r"\b(?:mayor|mas|más)\b", t):
+        i = i_exceso if ("exced" in t or "sobregir" in t) and i_exceso is not None else i_gastado
+        valores = [(_decimal(fila[i]), n) for n, fila in enumerate(filas)] if i is not None else []
+        valores = [(valor, n) for valor, n in valores if valor is not None]
+        if valores:
+            indice, criterio = max(valores)[1], "mayor"
+    seleccionada = [filas[indice]]
+    estado_nuevo = dict(estado)
+    estado_nuevo["filas"] = [[_json_valor(v) for v in seleccionada[0]]]
+    estado_nuevo["filas_totales"] = 1
+    estado_nuevo["seleccion"] = {"indice": indice, "criterio": criterio}
+    estado_nuevo["modo"] = "resumen"
+    return {
+        "columnas": columnas,
+        "filas": seleccionada,
+        "estado": estado_nuevo,
+        "sql": estado.get("sql", ""),
     }
 
 
@@ -231,6 +351,9 @@ def crear_estado(pregunta: str, sql: str, kpi: str, unidad: str,
         "filtros": filtros,
         "periodo": _periodo_resultado(pregunta, columnas, filas, previo),
         "filas_totales": len(filas),
+        "modo": modo_resultado(pregunta, columnas, filas),
+        "dimensiones": [str(c) for c in columnas],
+        "orden": "consulta",
     }
     canonico = json.dumps(base, ensure_ascii=False, sort_keys=True,
                           separators=(",", ":"))

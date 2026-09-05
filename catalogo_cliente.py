@@ -42,7 +42,10 @@ KPIS_SHEET = "_kpis"
 
 _KPIS_COLS = ("kpi", "nombre", "descripcion", "preguntas_ejemplo",
               "formula_sql", "tabla", "dimensiones", "unidad",
-              "supuestos", "minimo_datos", "instruccion")
+              "supuestos", "minimo_datos", "instruccion",
+              "tipo_resultado", "detalle_kpi", "clave_entidad",
+              "orden_default", "periodo_default", "moneda_default",
+              "aliases")
 
 # La metadata de edicion es opcional y vive junto a la documentacion del
 # catalogo. Conservarla como datos (en vez de codificarla para una tabla en

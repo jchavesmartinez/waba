@@ -247,6 +247,50 @@ def _limitar_top_solicitado(kpi: str, pregunta: str, columnas, filas):
     return filas[:tope]
 
 
+def _pide_total_sin_desglose(pregunta: str) -> bool:
+    """Detecta un total simple aunque el planificador haya elegido detalle."""
+    texto = nl2sql._normalizar_para_columnas(pregunta)
+    if not re.search(r"\b(?:cuanto|cuantos|total|suma)\b.*\b(?:gast|gasto|consum)", texto):
+        return False
+    if re.search(r"\b(?:por|agrupad[oa]s?\s+por|cuales|que gastos|movimientos|detalle|componen|conforman|mayor|menor|top)\b", texto):
+        return False
+    return True
+
+
+def _consolidar_total_si_corresponde(pregunta: str, columnas, filas):
+    """Suma filas de detalle cuando la pregunta pide solo el total.
+
+    Es una defensa genérica contra un KPI de detalle escogido por el modelo:
+    no inventa datos ni altera filtros, únicamente agrega el monto ya devuelto
+    por PostgreSQL por moneda.
+    """
+    if not _pide_total_sin_desglose(pregunta) or len(filas) <= 1:
+        return columnas, filas
+    nombres = [str(c).strip().lower().replace(" ", "_") for c in columnas]
+    i_monto = next((nombres.index(c) for c in
+                    ("gasto_neto", "gastado", "monto_crc", "monto", "importe", "total")
+                    if c in nombres), None)
+    if i_monto is None:
+        return columnas, filas
+    i_moneda = next((nombres.index(c) for c in
+                     ("moneda", "monto_moneda", "currency", "codigo_moneda")
+                     if c in nombres), None)
+    from decimal import Decimal, InvalidOperation
+    totales = {}
+    for fila in filas:
+        try:
+            monto = Decimal(str(fila[i_monto]).replace(",", "."))
+        except (InvalidOperation, ValueError, TypeError):
+            return columnas, filas
+        moneda = str(fila[i_moneda]).strip() if i_moneda is not None else ""
+        totales[moneda] = totales.get(moneda, Decimal("0")) + monto
+    if not totales:
+        return columnas, filas
+    etiqueta = "gasto_neto" if "gasto_neto" in nombres else "gastado"
+    salida = [(moneda, total) for moneda, total in totales.items()]
+    return (["moneda", etiqueta], salida)
+
+
 def _reconciliar_presupuesto_fuente(cliente, ctx, columnas, filas):
     """Ata ``presupuesto`` al monto mensual raw sin sumar filas de un JOIN."""
     nombres = [str(c).strip().lower().replace(" ", "_") for c in columnas]
@@ -536,6 +580,29 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         _ultimo_sql_seguro(historial, ctx.tablas_reales)
         if seguimiento_archivo or seguimiento_datos else ""
     )
+
+    # Las referencias a un resultado verificado ("el primero", "la que más",
+    # "su presupuesto") no deben volver a pasar por el planificador. Se
+    # resuelven sobre las filas persistidas y así conservan exactamente el
+    # orden, filtros y cifras que el usuario acaba de ver.
+    if fmt == formato.TEXTO and not sql_reutilizado:
+        referencia = seguimiento.resolver_referencia(pregunta, historial)
+        if referencia is not None:
+            columnas_ref, filas_ref = nl2sql.ocultar_columnas_tecnicas(
+                referencia["columnas"], referencia["filas"], pregunta,
+            )
+            try:
+                texto_ref = nl2sql.redactar_respuesta(
+                    pregunta, columnas_ref, filas_ref,
+                    historial=historial, sql=referencia.get("sql", ""),
+                )
+            except Exception:  # noqa: BLE001
+                texto_ref = nl2sql.tabla_texto(columnas_ref, filas_ref, tope=1)
+            return Respuesta(
+                texto_ref, sql=referencia.get("sql", ""),
+                estado=referencia.get("estado", {}),
+            )
+
     pregunta_efectiva, confirma_detalle = _confirmacion_de_detalle(
         pregunta, historial,
     )
@@ -625,6 +692,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
 
     # 1) Conseguir el SQL: del KPI (definicion canonica) o del text-to-SQL libre.
     sql = sql_reutilizado
+    periodo_actual = seguimiento.periodo_explicito(pregunta_efectiva)
     if plan["accion"] == "usar_kpi" and plan.get("sql"):
         sql = plan["sql"]
         filtros_kpi = dict(estado_previo.get("filtros") or {})
@@ -638,7 +706,6 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         if elegido:
             for clave, valor in kpis.defaults_de(elegido).items():
                 filtros_kpi.setdefault(clave, valor)
-        periodo_actual = seguimiento.periodo_explicito(pregunta_efectiva)
         periodo_kpi = periodo_actual or estado_previo.get("periodo") or {}
         if not periodo_kpi and kpis.admite_periodo_parametrizado(sql):
             hoy = fecha_local()
@@ -702,6 +769,13 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 "CONTEXTO ESTRUCTURADO OBLIGATORIO DEL RESULTADO ANTERIOR: "
                 f"{contexto}. Conserva esos filtros salvo que el usuario los "
                 "cambie explicitamente."
+            )
+        if periodo_actual:
+            pregunta_sql += (
+                "\n\nPERIODO DETERMINISTICO (no lo cambies): usa exactamente el rango "
+                f"{periodo_actual['inicio']} inclusive hasta "
+                f"{periodo_actual['fin_exclusivo']} exclusivo en la columna de "
+                "fecha disponible."
             )
         if seguimiento.es_consulta_composicion(pregunta_efectiva):
             pregunta_sql += (
@@ -873,6 +947,13 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             logger.info("[%s] resultado acotado por contexto: %s",
                         cid, sorted(filtros_aplicados))
             filas = filas_filtradas
+
+    # Si se pidio una cifra total y el modelo devolvio movimientos, consolida
+    # localmente los montos exactos por moneda antes de redactar. Esto evita
+    # mostrar una lista cuando la intención era un único total.
+    columnas, filas = _consolidar_total_si_corresponde(
+        pregunta_efectiva, columnas, filas,
+    )
 
     filas = _limitar_top_solicitado(plan.get("kpi", ""), pregunta_efectiva,
                                     columnas, filas)

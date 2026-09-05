@@ -281,6 +281,41 @@ def test_periodo_explicito_extrae_rango_mensual():
     }
 
 
+def test_periodos_relativos_se_resuelven_con_fecha_del_negocio(monkeypatch):
+    from datetime import date
+    monkeypatch.setattr(seguimiento, "fecha_local", lambda: date(2026, 9, 5))
+    assert seguimiento.periodo_explicito("gastos de ayer") == {
+        "inicio": "2026-09-04", "fin_inclusivo": "2026-09-04",
+        "fin_exclusivo": "2026-09-05", "granularidad": "dia",
+    }
+    assert seguimiento.periodo_explicito("gastos esta semana")["fin_exclusivo"] == "2026-09-06"
+
+
+def test_referencia_selecciona_mayor_y_conserva_fila_para_seguimiento():
+    estado = seguimiento.crear_estado(
+        "gastos por concepto", "SELECT 1", "ejecucion", "CRC",
+        ["concepto", "gastado", "presupuesto"],
+        [("A", 100, 200), ("B", 900, 1000)],
+    )
+    resultado = seguimiento.resolver_referencia(
+        "¿Cuál fue el que más gasté?",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+    )
+    assert resultado["filas"] == [("B", 900, 1000)]
+    assert resultado["estado"]["seleccion"]["criterio"] == "mayor"
+
+
+def test_total_simple_consolida_movimientos_por_moneda():
+    columnas, filas = R._consolidar_total_si_corresponde(
+        "¿Cuánto gasté en alimentación?",
+        ["comercio", "moneda", "monto"],
+        [("A", "CRC", 100), ("B", "CRC", 250), ("C", "USD", 4)],
+    )
+    assert columnas == ["moneda", "gastado"]
+    assert ("CRC", 350) in filas
+    assert ("USD", 4) in filas
+
+
 def test_reconciliador_rechaza_porcentaje_con_denominador_anual():
     ok, motivo = seguimiento.validar_resultado(
         ["concepto", "presupuesto", "gastado", "disponible", "porcentaje_consumido"],
