@@ -41,6 +41,7 @@ CLASIFICACION_SHEET = "_clasificacion"
 CATEGORIAS_SHEET = "_categorias"
 OVERRIDES_SHEET = "_overrides"
 JOINS_SHEET = "_joins"
+MOVIMIENTOS_CANONICOS_SHEET = "_movimientos_canonicos"
 
 _MODELOS_COLS = (
     "modelo_id",        # identificador unico dentro del cliente
@@ -110,6 +111,37 @@ _OVERRIDES_COLS = (
     "nota",             # por que (para auditoria; el motor no lo usa)
 )
 
+# Una fila por fuente que alimenta un modelo de movimientos consolidado. No hay
+# nombres de columnas ni tablas codificados por cliente: esta pestaña describe
+# cómo proyectar CUALQUIER origen hacia el contrato comun de movimientos.
+_MOVIMIENTOS_CANONICOS_COLS = (
+    "modelo_id",
+    "fuente",                 # etiqueta trazable: bac, manual, pos, etc.
+    "capa_origen",            # raw (default) | semantic
+    "tabla_origen",
+    "filtro",                 # SQL opcional, administrado por el cliente
+    "fecha",
+    "descripcion",
+    "categoria",
+    "linea_presupuesto_id",
+    "concepto",
+    "moneda",
+    "monto",
+    "tipo_movimiento",
+    "titular",
+    "medio_pago",
+    "clave",
+    "activo",                 # columna si/no opcional
+    "incluir_en_gasto",       # columna si/no opcional
+    "signo",                  # positivo | reversos_negativos
+    "capa_referencia",        # raw (default) | semantic
+    "tabla_referencia",       # lookup opcional, normalmente presupuesto
+    "llave_referencia_origen",
+    "llave_referencia",
+    "categoria_referencia",
+    "concepto_referencia",
+)
+
 
 def leer(cliente: dict) -> dict:
     """
@@ -124,7 +156,8 @@ def leer(cliente: dict) -> dict:
     cid = cliente.get("cliente_id", "")
     spreadsheet_id = str(cliente.get("catalogo_spreadsheet_id", "")).strip()
     vacio = {"modelos": [], "campos": [], "clasificacion": [],
-             "categorias": [], "overrides": [], "joins": []}
+             "categorias": [], "overrides": [], "joins": [],
+             "movimientos_canonicos": []}
 
     if not spreadsheet_id:
         return vacio
@@ -165,6 +198,9 @@ def leer(cliente: dict) -> dict:
             libro, cid, JOINS_SHEET, _JOINS_COLS,
             clave="tabla_auxiliar", silencioso=True)
             if _es_si(j.get("activo", "si"))],
+        "movimientos_canonicos": _leer_pestania(
+            libro, cid, MOVIMIENTOS_CANONICOS_SHEET,
+            _MOVIMIENTOS_CANONICOS_COLS, clave="modelo_id", silencioso=True),
     }
 
 
@@ -257,6 +293,12 @@ def joins_de(metadata: dict, modelo_id: str) -> list:
 def overrides_de(metadata: dict, modelo_id: str) -> list:
     return [o for o in metadata.get("overrides", [])
             if o.get("modelo_id") == modelo_id]
+
+
+def movimientos_canonicos_de(metadata: dict, modelo_id: str) -> list:
+    """Configuraciones de fuentes que alimentan un movimiento consolidado."""
+    return [m for m in metadata.get("movimientos_canonicos", [])
+            if m.get("modelo_id") == modelo_id]
 
 
 def _a_entero(valor, defecto: int) -> int:

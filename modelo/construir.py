@@ -31,6 +31,7 @@ import sys
 import catalogo_cliente
 import config
 from .metadata import leer as leer_metadata
+from .movimientos_canonicos import construir as construir_movimientos_canonicos
 from .motor import Modelo
 import registry
 from warehouse import crear_destino
@@ -70,6 +71,23 @@ def construir_cliente(destino, cliente: dict, probar: bool = False) -> dict:
         logger.info("[%s] sin modelos declarados; se limpia su metadata semantica.", cid)
 
     for fila in metadata["modelos"]:
+        if str(fila.get("extractor", "")).strip().lower() == "movimientos_canonicos":
+            try:
+                resultado = construir_movimientos_canonicos(
+                    destino, cid, esquema_raw, esquema_sem, fila, metadata, probar)
+            except Exception as e:  # noqa: BLE001
+                msg = (f"[{cid}] fallo la construccion de "
+                       f"'{fila.get('tabla_destino') or fila.get('modelo_id')}': "
+                       f"{type(e).__name__}: {e}")
+                logger.exception(msg)
+                total["alertas"].append(msg)
+                continue
+            total["modelos"] += 1
+            total["filas"] += resultado["filas"]
+            total["rechazos"] += resultado["rechazos"]
+            total["alertas"] += resultado["alertas"]
+            tablas_construidas.add(fila.get("tabla_destino") or fila.get("modelo_id"))
+            continue
         try:
             modelo = Modelo(fila, metadata)
         except RuntimeError as e:

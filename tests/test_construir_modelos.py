@@ -17,6 +17,7 @@ from modelo.construir import (
     nombre_esquema_semantico,
 )
 from modelo.motor import Modelo
+from modelo.movimientos_canonicos import construir as construir_movimientos
 from warehouse.duckdb_dest import DuckDBDestino
 
 
@@ -228,3 +229,68 @@ def test_modelos_publica_catalogo_y_kpis_sin_copiar_datos_a_raw(monkeypatch):
     # No existe ninguna escritura de la tabla de negocio en raw: estas son
     # exclusivamente las dos tablas pequenas de metadata.
     assert {e[0] for e in escritos} == {"catalogo", "kpis"}
+
+
+def test_movimientos_canonicos_unifica_fuentes_y_resuelve_presupuesto(destino):
+    """El contrato común no depende de cómo cada fuente nombre sus columnas."""
+    con = destino.conectar()
+    con.execute('CREATE SCHEMA "raw_cliente_a"')
+    con.execute(
+        'CREATE TABLE "semantic_cliente_a"."finanzas__transacciones" '
+        '(fecha_transaccion TIMESTAMP, comercio VARCHAR, cuenta_contable VARCHAR, '
+        'linea_presupuesto_id VARCHAR, concepto VARCHAR, monto_moneda VARCHAR, '
+        'monto DOUBLE, tipo_transaccion VARCHAR, _clave VARCHAR)')
+    con.execute(
+        "INSERT INTO \"semantic_cliente_a\".\"finanzas__transacciones\" VALUES "
+        "('2026-09-01 10:00:00','Tienda BAC','Alimentacion','gas_comidas',"
+        "'Comidas afuera','CRC',1000,'COMPRA','bac-1')")
+    con.execute(
+        'CREATE TABLE "raw_cliente_a"."gastos_manuales" '
+        '(movimiento_id VARCHAR, fecha DATE, descripcion VARCHAR, categoria VARCHAR, '
+        'linea_presupuesto_id VARCHAR, monto DOUBLE, moneda VARCHAR, '
+        'tipo_movimiento VARCHAR, activo VARCHAR, incluir_en_gasto VARCHAR)')
+    con.execute(
+        "INSERT INTO \"raw_cliente_a\".\"gastos_manuales\" VALUES "
+        "('man-1','2026-09-02','SINPE restaurante','','gas_comidas',2000,'CRC',"
+        "'GASTO','si','si'),"
+        "('man-2','2026-09-03','Reverso restaurante','','gas_comidas',500,'CRC',"
+        "'REVERSO','si','si'),"
+        "('man-3','2026-09-03','No consolidar','','gas_comidas',900,'CRC',"
+        "'GASTO','si','no')")
+    con.execute(
+        'CREATE TABLE "raw_cliente_a"."presupuesto" '
+        '(linea_id VARCHAR, categoria VARCHAR, concepto VARCHAR)')
+    con.execute(
+        "INSERT INTO \"raw_cliente_a\".\"presupuesto\" VALUES "
+        "('gas_comidas','Alimentacion','Comidas afuera')")
+
+    metadata = {"movimientos_canonicos": [
+        {"modelo_id": "movimientos", "fuente": "bac", "capa_origen": "semantic",
+         "tabla_origen": "finanzas__transacciones", "fecha": "fecha_transaccion",
+         "descripcion": "comercio", "categoria": "cuenta_contable",
+         "linea_presupuesto_id": "linea_presupuesto_id", "concepto": "concepto",
+         "moneda": "monto_moneda", "monto": "monto", "tipo_movimiento": "tipo_transaccion",
+         "clave": "_clave", "signo": "reversos_negativos"},
+        {"modelo_id": "movimientos", "fuente": "manual", "capa_origen": "raw",
+         "tabla_origen": "gastos_manuales", "fecha": "fecha", "descripcion": "descripcion",
+         "categoria": "categoria", "linea_presupuesto_id": "linea_presupuesto_id",
+         "moneda": "moneda", "monto": "monto", "tipo_movimiento": "tipo_movimiento",
+         "clave": "movimiento_id", "activo": "activo", "incluir_en_gasto": "incluir_en_gasto",
+         "signo": "reversos_negativos", "tabla_referencia": "presupuesto",
+         "llave_referencia_origen": "linea_presupuesto_id", "llave_referencia": "linea_id",
+         "categoria_referencia": "categoria", "concepto_referencia": "concepto"},
+    ]}
+    resultado = construir_movimientos(
+        destino, "cliente_a", "raw_cliente_a", "semantic_cliente_a",
+        {"modelo_id": "movimientos", "tabla_destino": "finanzas__movimientos"},
+        metadata)
+
+    assert resultado["filas"] == 3
+    filas = con.execute(
+        'SELECT fuente, descripcion, categoria, concepto, monto_neto '
+        'FROM "semantic_cliente_a"."finanzas__movimientos" ORDER BY _clave').fetchall()
+    assert filas == [
+        ("bac", "Tienda BAC", "Alimentacion", "Comidas afuera", 1000.0),
+        ("manual", "SINPE restaurante", "Alimentacion", "Comidas afuera", 2000.0),
+        ("manual", "Reverso restaurante", "Alimentacion", "Comidas afuera", -500.0),
+    ]
