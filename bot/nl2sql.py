@@ -61,6 +61,16 @@ _SISTEMA_SQL = (
     "comercios, productos), compara sin distinguir mayusculas, espacios NI "
     "tildes. PostgreSQL puede no tener unaccent: usa TRANSLATE(LOWER(TRIM(columna)), "
     "'áéíóúüñ', 'aeiouun') y aplica el mismo TRANSLATE al literal.\n"
+    "- Si el usuario pregunta la clasificacion de un registro ya identificado "
+    "('que cuenta contable tiene', 'a que categoria/concepto pertenece'), incluye "
+    "explicitamente en el SELECT los campos de clasificacion disponibles. En "
+    "transacciones, cuenta_contable es la categoria y concepto o "
+    "linea_presupuesto_id identifica el concepto presupuestario. No devuelvas "
+    "solo comercio, fecha y monto cuando se pidio esa informacion.\n"
+    "- Si un comercio o descripcion parece tener una pequena variacion "
+    "ortografica, conserva los filtros de fecha, monto y moneda y usa coincidencias "
+    "parciales por fragmentos distintivos (ILIKE) para encontrar el nombre real; "
+    "no inventes un nombre ni elimines los demas filtros.\n"
     "- Una pregunta de COMPOSICION ('que gastos conforman X', 'cuales son esos "
     "movimientos') sin periodo NO significa mes actual: lista el historial que "
     "coincide con el concepto y muestra su fecha. Solo aplica un mes cuando el "
@@ -88,6 +98,86 @@ def _extraer_sql(texto: str) -> str:
     t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
     t = re.sub(r"\s*```$", "", t)
     return t.strip().rstrip(";").strip()
+
+
+def pide_atributos_registro(pregunta: str) -> bool:
+    """Detecta preguntas que necesitan campos de clasificacion del registro.
+
+    Se excluyen consultas agregadas ('por categoria/concepto'), porque esas ya
+    describen su propia granularidad y no requieren forzar columnas de detalle.
+    """
+    texto = _normalizar_para_columnas(pregunta)
+    if re.search(r"\b(?:por|agrupad[oa]s?\s+por)\s+(?:la\s+)?(?:categoria|concepto|comercio)\b", texto):
+        return False
+    return bool(re.search(
+        r"\b(?:cuenta\s+contable|clasificacion|categoria|concepto)\b", texto
+    ) and re.search(
+        r"\b(?:que|cual|cuales|dime|indica|muestra|tiene|pertenece|corresponde|es)\b",
+        texto,
+    ))
+
+
+def campos_solicitados(pregunta: str, schema_text: str = "") -> list[str]:
+    """Mapea la clasificacion pedida a columnas realmente disponibles."""
+    texto = _normalizar_para_columnas(pregunta)
+    esquema = _normalizar_para_columnas(schema_text).replace("_", " ")
+    campos = []
+    pide_categoria = bool(re.search(r"\b(?:cuenta\s+contable|categoria|clasificacion)\b", texto))
+    pide_concepto = bool(re.search(r"\bconcepto(?:\s+presupuestario)?\b", texto))
+    if pide_categoria:
+        if "cuenta contable" in esquema:
+            campos.append("cuenta_contable")
+        elif "categoria" in esquema:
+            campos.append("categoria")
+    if pide_concepto:
+        if "concepto" in esquema:
+            campos.append("concepto")
+        elif "linea presupuesto id" in esquema:
+            campos.append("linea_presupuesto_id")
+    return campos
+
+
+def _columnas_proyectadas(sql: str) -> tuple[set[str], bool]:
+    """Devuelve columnas/alias del SELECT y si proyecta '*'."""
+    try:
+        arbol = sqlglot.parse_one(sql or "", read="postgres")
+        select = arbol.find(exp.Select) if not isinstance(arbol, exp.Select) else arbol
+        if select is None:
+            return set(), False
+        nombres, tiene_asterisco = set(), False
+        for expresion in select.expressions:
+            if isinstance(expresion, exp.Star):
+                tiene_asterisco = True
+                continue
+            alias = expresion.alias_or_name
+            if alias:
+                nombres.add(_normalizar_para_columnas(alias).replace(" ", "_"))
+            for columna in expresion.find_all(exp.Column):
+                if columna.name:
+                    nombres.add(_normalizar_para_columnas(columna.name).replace(" ", "_"))
+        return nombres, tiene_asterisco
+    except Exception:  # noqa: BLE001
+        return set(), False
+
+
+def faltan_campos_solicitados(pregunta: str, sql: str, schema_text: str = "") -> list[str]:
+    """Indica campos pedidos que el SELECT omitio, para permitir un reintento."""
+    requeridos = campos_solicitados(pregunta, schema_text)
+    if not requeridos:
+        return []
+    proyectadas, tiene_asterisco = _columnas_proyectadas(sql)
+    if tiene_asterisco:
+        return []
+    return [campo for campo in requeridos if campo not in proyectadas]
+
+
+def puede_reintentar_nombre_aproximado(pregunta: str) -> bool:
+    """Limita el reintento tolerante a busquedas identificables de registros."""
+    texto = _normalizar_para_columnas(pregunta)
+    tiene_objeto = bool(re.search(r"\b(?:gasto|gastos|movimiento|movimientos|transaccion|transacciones|comercio|descripcion)\b", texto))
+    tiene_contexto = bool(re.search(r"\b(?:de|del|en|por)\b", texto))
+    tiene_fecha = bool(re.search(r"\b(?:hoy|ayer|mes|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|20\d{2})\b", texto))
+    return tiene_objeto and tiene_contexto and tiene_fecha
 
 
 def _historial_texto(historial) -> str:

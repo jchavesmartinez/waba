@@ -568,6 +568,11 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             # El planificador conserva la autoridad sobre la relacion y el
             # contexto; solo se impide usar un KPI de resumen para pedir filas.
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
+        if nl2sql.pide_atributos_registro(pregunta_efectiva):
+            # Una pregunta de clasificacion necesita la fila identificada y sus
+            # campos (cuenta contable/concepto), no un KPI agregado que pueda
+            # devolver solo totales o repetir el ultimo resumen.
+            plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
 
     estado_previo = seguimiento.contexto_segun_plan(historial, plan)
     relacion_plan = plan.get("relacion", "nueva")
@@ -717,6 +722,40 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 logger.warning("[%s] SQL invalido tras reintento (%s): %s", cid, motivo, sql)
                 return Respuesta(_no_seguro(catalogo.resumir_habilitados(ctx)))
 
+        # El modelo puede producir una consulta valida pero insuficiente: por
+        # ejemplo, seleccionar comercio/fecha/monto cuando el usuario pidio la
+        # cuenta contable y el concepto. Se corrige una sola vez antes de leer
+        # la base, conservando la semantica y los filtros de la pregunta.
+        faltan = nl2sql.faltan_campos_solicitados(
+            pregunta_efectiva, sql, ctx.schema_text,
+        )
+        if faltan:
+            correccion_campos = (
+                "El SQL es valido pero no proyecta los campos solicitados: "
+                + ", ".join(faltan)
+                + ". Incluyelos explicitamente en SELECT (no devuelvas solo "
+                "comercio, fecha y monto), manteniendo los filtros y joins "
+                "originales."
+            )
+            sql_campos = nl2sql.generar_sql(
+                pregunta_sql, ctx.schema_text, correccion=correccion_campos,
+                sql_previo=sql, historial=historial_sql,
+            )
+            ok_campos, motivo_campos = nl2sql.validar_sql(
+                sql_campos, ctx.tablas_reales,
+            )
+            if ok_campos:
+                ok_campos, motivo_campos = nl2sql.validar_granularidad(
+                    pregunta_efectiva, sql_campos,
+                )
+            if ok_campos:
+                sql = sql_campos
+            else:
+                logger.warning(
+                    "[%s] SQL sin campos solicitados y reintento invalido (%s)",
+                    cid, motivo_campos,
+                )
+
     # 2) Ejecutar en solo-lectura.
     #
     # Para un archivo se levanta el tope de filas. El limite de 200 existe para
@@ -768,6 +807,43 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                     query_id = query_id_nuevo
             except Exception as e:  # noqa: BLE001
                 logger.warning("[%s] fallo reintento de composicion: %s", cid, e)
+
+    # Una pequena errata en el nombre (por ejemplo, "Rogar" por "Roga") no
+    # debe ocultar una fila cuando fecha/importe permiten identificarla. Se
+    # relaja solo el texto, nunca el periodo ni el monto, y se reutiliza el
+    # resultado unicamente si el segundo SELECT encuentra filas.
+    if (not filas and nl2sql.puede_reintentar_nombre_aproximado(pregunta_efectiva)
+            and not seguimiento.es_consulta_composicion(pregunta_efectiva)):
+        correccion_nombre = (
+            "La consulta devolvio cero filas. Puede haber una variacion "
+            "ortografica en el comercio o descripcion. Conserva fecha, monto "
+            "y moneda; relaja solo ese texto con coincidencias parciales por "
+            "fragmentos distintivos usando ILIKE y devuelve el nombre real."
+        )
+        sql_nombre = nl2sql.generar_sql(
+            pregunta_sql if 'pregunta_sql' in locals() else pregunta_efectiva,
+            ctx.schema_text, correccion=correccion_nombre,
+            sql_previo=sql, historial=historial_sql,
+        )
+        ok_nombre, motivo_nombre = nl2sql.validar_sql(
+            sql_nombre, ctx.tablas_reales,
+        )
+        if ok_nombre:
+            ok_nombre, motivo_nombre = nl2sql.validar_granularidad(
+                pregunta_efectiva, sql_nombre,
+            )
+        if ok_nombre:
+            try:
+                columnas_nuevas, filas_nuevas, query_id_nuevo = _ejecutar_con_auditoria(
+                    cliente, sql_nombre, limite, "reintento_nombre_aproximado",
+                )
+                if filas_nuevas:
+                    sql, columnas, filas = sql_nombre, columnas_nuevas, filas_nuevas
+                    query_id = query_id_nuevo
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[%s] fallo reintento de nombre aproximado: %s", cid, e)
+        else:
+            logger.info("[%s] reintento tolerante rechazado (%s)", cid, motivo_nombre)
 
     # Reconciliacion independiente del denominador. Una consulta libre puede
     # duplicar monto_mensual al unir presupuesto con movimientos; antes el

@@ -62,3 +62,28 @@ def test_reintento_sql_recibe_mas_tokens(monkeypatch):
     )
 
     assert llamada["max_tokens"] == max(nl2sql._MAX_TOKENS_SQL * 2, 2400)
+
+
+def test_pregunta_de_clasificacion_exige_campos_del_registro():
+    pregunta = "¿Cuál es la cuenta contable y categoría de ese gasto?"
+    assert nl2sql.pide_atributos_registro(pregunta)
+    assert not nl2sql.pide_atributos_registro("¿Cuánto gasté por concepto presupuestario?")
+
+
+def test_detecta_campos_de_clasificacion_omitidos_del_select():
+    pregunta = "¿Cuál es la cuenta contable y concepto de ese gasto?"
+    sql = "SELECT comercio, fecha_transaccion, monto FROM transacciones"
+    esquema = "transacciones(comercio, fecha_transaccion, monto, cuenta_contable, concepto)"
+    assert nl2sql.faltan_campos_solicitados(pregunta, sql, esquema) == [
+        "cuenta_contable", "concepto",
+    ]
+    assert nl2sql.faltan_campos_solicitados(
+        pregunta, "SELECT * FROM transacciones", esquema,
+    ) == []
+
+
+def test_nombre_aproximado_reintenta_solo_con_contexto_identificable():
+    assert nl2sql.puede_reintentar_nombre_aproximado(
+        "El gasto de Rogar Cent Med y Dental del 4 de septiembre de 2026"
+    )
+    assert not nl2sql.puede_reintentar_nombre_aproximado("¿Dónde gasté más?")
