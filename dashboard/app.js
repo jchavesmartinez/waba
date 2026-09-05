@@ -119,7 +119,13 @@
     const movements = Array.isArray(data.movimientos) && data.movimientos.length
       ? data.movimientos
       : (commerceKpi ? commerceKpi.filas.map((row) => rowObject(commerceKpi, row)) : []);
-    const movementName = (row) => row[keyMatch(row, /^comercio$|descripcion|concepto|nombre/i)] || "Movimiento";
+    const movementName = (row) => {
+      const comercio = keyMatch(row, /^comercio$/i);
+      const descripcion = keyMatch(row, /^descripcion$|^descripción$/i);
+      const nombre = keyMatch(row, /^nombre$/i);
+      const concepto = keyMatch(row, /^concepto$/i);
+      return row[comercio || descripcion || nombre || concepto] || "Movimiento";
+    };
     const movementLine = (row) => normalized(row[keyMatch(row, /^linea_id$|linea_presupuesto_id/i)]);
     const movementCategory = (row) => normalized(row[keyMatch(row, /^categoria$|categoría/i)]);
     const movementConcept = (row) => normalized(row[keyMatch(row, /^concepto$|rubro/i)]);
@@ -169,10 +175,14 @@
           const movementList = document.createElement("ul"); movementList.className = "movimientos";
           matches.forEach((movement) => {
             const item = document.createElement("li");
-            const name = document.createElement("span"); name.textContent = movementName(movement);
+            const detail = document.createElement("span");
+            const name = document.createElement("strong"); name.textContent = movementName(movement);
+            const fechaKey = keyMatch(movement, /^fecha$|fecha_transaccion/i);
+            const date = document.createElement("small"); date.textContent = fechaKey ? String(movement[fechaKey]).slice(0, 10) : "";
+            detail.append(name, date);
             const keys = metricKeys(movement); const value = document.createElement("strong");
             value.textContent = keys.spent ? format(movement[keys.spent], keys.spent, movement.moneda || commerceKpi?.unidad) : "";
-            item.append(name, value); movementList.append(item);
+            item.append(detail, value); movementList.append(item);
           });
           conceptBody.append(movementList);
         }
