@@ -243,7 +243,10 @@ def resolver_referencia(pregunta: str, historial: list):
         r"\b(?:el|la|los|las)\s+(?:primero|primera|ultimo|ultima|mayor|menor|"
         r"que\s+mas|que\s+menos)\b|\b(?:su|ese|esa|esos|esas|de\s+esos|de\s+esas)\b",
         t,
-    ) and not re.search(r"^y\s+.*\b(?:presupuesto|gastado|disponible|porcentaje)\b", t):
+    ) and not re.search(
+        r"^[¿?¡!\s]*y\s+.*\b(?:presupuesto|gastado|disponible|porcentaje)\b",
+        t,
+    ):
         return None
     columnas = list(estado.get("columnas") or [])
     filas = [tuple(f) for f in estado.get("filas") or []]
