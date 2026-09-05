@@ -136,7 +136,7 @@ def _seleccionar_kpis(kpis: list, pregunta: str) -> list:
         )))
         secundarios = _tokens(" ".join((
             kpi.get("descripcion", ""), kpi.get("dimensiones", ""),
-            kpi.get("supuestos", ""),
+            kpi.get("supuestos", ""), kpi.get("instruccion", ""),
         )))
         score = 3 * len(consulta & principales) + len(consulta & secundarios)
         puntuados.append((score, -pos, kpi))
@@ -166,6 +166,8 @@ def _kpis_texto(kpis: list, pregunta: str = "") -> str:
         if k.get("unidad"): campos.append(f"unidad: {k['unidad']}")
         if k.get("supuestos"): campos.append(f"supuestos: {k['supuestos']}")
         if k.get("minimo_datos"): campos.append(f"minimo_datos: {k['minimo_datos']}")
+        if k.get("instruccion"):
+            campos.append(f"instruccion (contrato): {k['instruccion']}")
         bloques.append("- " + "\n  ".join(campos))
     return "\n".join(bloques)
 
@@ -220,6 +222,26 @@ _FILTROS_SALIDA = {
 
 _PARAMETRO_PERIODO_INICIO = "{{periodo_inicio}}"
 _PARAMETRO_PERIODO_FIN = "{{periodo_fin}}"
+_DEFAULT_MONEDA_RE = re.compile(
+    r"(?:default|por defecto|predeterminad[oa]).{0,80}?"
+    r"\bmoneda\b\s*(?:es|:|=)?\s*([A-Z]{3})\b",
+    re.IGNORECASE,
+)
+
+
+def defaults_de(kpi: dict | None) -> dict:
+    """Lee defaults declarados por metadata sin codificar un cliente.
+
+    Un KPI puede declarar, por ejemplo, ``Default moneda: CRC`` en
+    ``supuestos``. El valor se aplica solo cuando el usuario no indicó esa
+    dimensión; así la metadata decide la moneda presupuestaria de cada cliente
+    y el bot no mezcla monedas por accidente.
+    """
+    if not kpi:
+        return {}
+    texto = " ".join(str(kpi.get(c, "") or "") for c in ("supuestos", "instruccion"))
+    match = _DEFAULT_MONEDA_RE.search(texto)
+    return {"moneda": match.group(1).upper()} if match else {}
 
 
 def admite_periodo_parametrizado(sql: str) -> bool:
@@ -359,6 +381,9 @@ _SISTEMA = (
     "- usar_kpi: un KPI del catalogo calza claro y tenes los parametros. Pone su "
     "id exacto en 'kpi' y deja 'sql' VACIO. La aplicacion ejecutara la formula_sql "
     "canonica; vos NO la copies, adaptes ni reescribas.\n"
+    "- La 'instruccion (contrato)' de cada KPI es obligatoria: describe la "
+    "unidad, el alcance y la forma de responder. Respétala al elegir el KPI; "
+    "no conviertas un total en un desglose ni un desglose en un total.\n"
     "- pedir_contexto: si calzan VARIOS KPIs o falta un parametro clave (ej: piden "
     "'el mejor' y hay KPI por unidades y por ingreso; o 'crecimiento' sin periodo). "
     "En 'mensaje' hace UNA pregunta corta para desambiguar. No inventes la respuesta.\n"

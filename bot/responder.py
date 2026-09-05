@@ -632,6 +632,12 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         # jamás escribe SQL: el valor solo se aplica si la fórmula KPI expone
         # esa dimensión en su resultado canónico.
         filtros_kpi.update(plan.get("filtros_actuales") or {})
+        # Los defaults pertenecen a la metadata del KPI (por ejemplo, moneda
+        # presupuestaria CRC), no al código de un cliente. Solo se aplican si
+        # el usuario no dio un filtro explícito ni lo heredó del contexto.
+        if elegido:
+            for clave, valor in kpis.defaults_de(elegido).items():
+                filtros_kpi.setdefault(clave, valor)
         periodo_actual = seguimiento.periodo_explicito(pregunta_efectiva)
         periodo_kpi = periodo_actual or estado_previo.get("periodo") or {}
         if not periodo_kpi and kpis.admite_periodo_parametrizado(sql):
