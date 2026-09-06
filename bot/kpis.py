@@ -359,7 +359,10 @@ _SISTEMA = (
     "usuario, un catalogo de KPIS predefinidos y el ESQUEMA real de tablas, "
     "decidis UNA accion y devolves SOLO un JSON (sin markdown, sin ```), con la "
     "forma:\n"
-    '{"relacion":"nueva|seguimiento|modificacion|ambigua",'
+    '{"operacion":"total|conteo|ranking|detalle|desglose|comparacion|",'
+    '"metrica":"gastado|presupuesto|disponible|exceso|conteo|",'
+    '"entidad":"categoria|concepto|descripcion|moneda|transaccion|",'
+    '"relacion":"nueva|seguimiento|modificacion|ambigua",'
     '"heredar_filtros":[],"filtros_actuales":{},'
     '"heredar_periodo":false,"heredar_kpi":false,'
     '"accion":"usar_kpi|sql_libre|pedir_contexto|retar",'
@@ -476,6 +479,18 @@ _SISTEMA = (
 _PLAN_SCHEMA = {
     "type": "object",
     "properties": {
+        "operacion": {
+            "type": "string",
+            "enum": ["", "total", "conteo", "ranking", "detalle", "desglose", "comparacion"],
+        },
+        "metrica": {
+            "type": "string",
+            "enum": ["", "gastado", "presupuesto", "disponible", "exceso", "conteo"],
+        },
+        "entidad": {
+            "type": "string",
+            "enum": ["", "categoria", "concepto", "descripcion", "moneda", "transaccion"],
+        },
         "relacion": {
             "type": "string",
             "enum": ["nueva", "seguimiento", "modificacion", "ambigua"],
@@ -519,6 +534,9 @@ _PLAN_SCHEMA = {
 
 def _plan_sql_libre() -> dict:
     return {
+        "operacion": "",
+        "metrica": "",
+        "entidad": "",
         "relacion": "nueva",
         "heredar_filtros": [],
         "filtros_actuales": {},
@@ -562,6 +580,9 @@ def _historial_compacto(historial) -> str:
                 "\nEstado verificado: "
                 + json.dumps({
                     "kpi": estado.get("kpi", ""),
+                    "operacion": estado.get("operacion", ""),
+                    "metrica": estado.get("metrica", ""),
+                    "agrupacion": estado.get("agrupacion", ""),
                     "filtros": estado.get("filtros", {}),
                     "periodo": estado.get("periodo", {}),
                     "modo": estado.get("modo", ""),
@@ -687,7 +708,22 @@ def _parsear(texto: str) -> dict:
         valor = str(valor).strip()
         if clave in permitidos and valor:
             filtros_actuales[clave] = valor
+    operaciones = {"", "total", "conteo", "ranking", "detalle", "desglose", "comparacion"}
+    metricas = {"", "gastado", "presupuesto", "disponible", "exceso", "conteo"}
+    entidades = {"", "categoria", "concepto", "descripcion", "moneda", "transaccion"}
+    operacion = str(d.get("operacion", "")).strip().lower()
+    metrica = str(d.get("metrica", "")).strip().lower()
+    entidad = str(d.get("entidad", "")).strip().lower()
+    if operacion not in operaciones:
+        operacion = ""
+    if metrica not in metricas:
+        metrica = ""
+    if entidad not in entidades:
+        entidad = ""
     return {
+        "operacion": operacion,
+        "metrica": metrica,
+        "entidad": entidad,
         "relacion": relacion,
         "heredar_filtros": heredados,
         "filtros_actuales": filtros_actuales,

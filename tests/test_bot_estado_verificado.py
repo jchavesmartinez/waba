@@ -900,6 +900,25 @@ def test_composicion_desde_exceso_pide_detalle_y_monto():
     assert contrato["metrica"] == "gastado"
 
 
+def test_contrato_usa_operacion_metrica_y_entidad_semanticas_del_plan():
+    previo = seguimiento.crear_estado(
+        "alimentacion", "SELECT categoria, gastado FROM movimientos", "", "CRC",
+        ["categoria", "gastado"], [("Alimentacion", 1000)],
+    )
+    contrato = seguimiento.contrato_seguimiento(
+        "y por concepto",
+        [{"rol": "assistant", "contenido": "resultado", "estado": previo}],
+        {
+            "relacion": "seguimiento", "operacion": "desglose",
+            "metrica": "gastado", "entidad": "concepto",
+            "filtros_actuales": {},
+        },
+    )
+    assert contrato["operacion"] == "desglose"
+    assert contrato["metrica"] == "gastado"
+    assert contrato["agrupacion"] == "concepto"
+
+
 def test_mencionar_un_concepto_de_la_lista_lo_convierte_en_filtro():
     previo = seguimiento.crear_estado(
         "excesos", "SELECT concepto", "", "CRC",

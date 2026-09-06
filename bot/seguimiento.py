@@ -414,8 +414,11 @@ def contrato_seguimiento(pregunta: str, historial: list,
         previo.get("columnas") or [],
     ))
     agrupacion_previa = str(previo.get("agrupacion") or "")
-    operacion = str(pendiente.get("operacion") or operacion_previa)
-    agrupacion = agrupacion_previa
+    operacion = str(
+        (plan or {}).get("operacion") or pendiente.get("operacion")
+        or operacion_previa
+    )
+    agrupacion = str((plan or {}).get("entidad") or agrupacion_previa)
 
     if re.search(r"\b(?:cuant[oa]s|cantidad|numero de)\b", t):
         operacion = "conteo"
@@ -444,7 +447,7 @@ def contrato_seguimiento(pregunta: str, historial: list,
     elif re.search(r"\bmonedas?\b", t):
         agrupacion = "moneda"
 
-    metrica = ""
+    metrica = str((plan or {}).get("metrica") or "")
     if re.search(r"\b(?:exceso|exced|sobregir)\b", t):
         metrica = "exceso"
     elif re.search(r"\bpresupuesto\b", t):
