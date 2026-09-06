@@ -54,8 +54,9 @@ _ORDINALES = {
 
 def _normalizar(valor) -> str:
     texto = unicodedata.normalize("NFKD", str(valor or ""))
-    return " ".join("".join(c for c in texto if not unicodedata.combining(c))
-                    .strip().lower().split())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = "".join(c if c.isalnum() or c.isspace() else " " for c in texto)
+    return " ".join(texto.strip().lower().split())
 
 
 def _nombre(valor) -> str:
@@ -147,6 +148,9 @@ def _etiqueta_periodo(estado: dict) -> str:
 def _etiqueta_comparacion(estado: dict) -> str:
     """Etiqueta la entidad/filtro que distingue un resultado verificado."""
     filtros = dict((estado or {}).get("filtros") or {})
+    if not filtros:
+        contrato = (estado or {}).get("contrato") or {}
+        filtros = dict(contrato.get("filtros") or {})
     for clave in ("descripcion", "concepto", "categoria", "linea_id", "moneda"):
         if filtros.get(clave):
             return str(filtros[clave])
@@ -168,6 +172,12 @@ def _metrica_comparacion_pedida(texto: str, predeterminada: str) -> str:
     return predeterminada
 
 
+def _pide_variacion_porcentual(texto: str) -> bool:
+    return bool(re.search(
+        r"\b(?:variacion|variación|porcentual|porcentaje|pct)\b", texto,
+    ))
+
+
 def resolver_comparacion_historial(pregunta: str, historial: list):
     """Compara dos resultados consecutivos ya verificados.
 
@@ -178,6 +188,46 @@ def resolver_comparacion_historial(pregunta: str, historial: list):
     condiciones, se deja continuar por el contrato normal.
     """
     t = _normalizar(pregunta)
+    pide_variacion = _pide_variacion_porcentual(t)
+    estados_todos = [turno.get("estado") for turno in historial or []
+                     if turno.get("rol") == "assistant" and isinstance(turno.get("estado"), dict)]
+    # Un seguimiento como «¿y en porcentaje?» parte de una comparación que ya
+    # fue calculada localmente. No hay que volver a invocar al planificador ni
+    # pedirle que invente una métrica: se usa el par de importes persistido.
+    if pide_variacion and estados_todos:
+        comparacion = estados_todos[-1]
+        contrato_comparacion = dict(comparacion.get("contrato") or {})
+        columnas_comparacion = list(comparacion.get("columnas") or [])
+        filas_comparacion = list(comparacion.get("filas") or [])
+        if (contrato_comparacion.get("operacion") == "comparacion"
+                and filas_comparacion and len(filas_comparacion[0]) >= 5):
+            valor_a = _decimal(filas_comparacion[0][1])
+            valor_b = _decimal(filas_comparacion[0][3])
+            if valor_a is not None and valor_b is not None:
+                if valor_a == 0:
+                    return {"texto": "No puedo calcular una variación porcentual porque el valor inicial es cero.",
+                            "estado": comparacion}
+                variacion = (valor_b - valor_a) / valor_a * Decimal("100")
+                direccion = "aumentó" if variacion > 0 else "disminuyó" if variacion < 0 else "no cambió"
+                texto = (
+                    f"La variación porcentual fue de {_formato_numero(abs(variacion))}%; "
+                    f"de {filas_comparacion[0][0]} a {filas_comparacion[0][2]} {direccion}."
+                )
+                columnas = columnas_comparacion + ["variacion_porcentual"]
+                filas = [tuple(filas_comparacion[0]) + (variacion,)]
+                estado = crear_estado(
+                    pregunta, "", "", comparacion.get("unidad", ""),
+                    columnas, filas, previo=comparacion,
+                    operacion="comparacion", agrupacion="",
+                )
+                estado["contrato"] = contrato_consulta.crear({
+                    "operacion": "comparacion", "metrica": "variacion_porcentual",
+                    "entidad": "", "filtros": contrato_comparacion.get("filtros", {}),
+                    "periodo": contrato_comparacion.get("periodo", {}),
+                    "relacion": "seguimiento",
+                }, previo=contrato_comparacion)
+                return {"texto": texto, "columnas": columnas, "filas": filas,
+                        "estado": estado}
     if not re.search(
         r"\b(?:cual\s+(?:de\s+)?(?:los\s+)?(?:dos|ambos).*(?:mayor|menor)|"
         r"cual\s+fue\s+(?:el|la)?\s*(?:mayor|menor)|"
@@ -247,6 +297,12 @@ def resolver_comparacion_historial(pregunta: str, historial: list):
         if mismos_filtros else (_etiqueta_comparacion(anterior), _etiqueta_comparacion(actual))
     )
     diferencia = valor_b - valor_a
+    variacion = None
+    if pide_variacion:
+        if valor_a == 0:
+            return {"texto": "No puedo calcular una variación porcentual porque el valor inicial es cero.",
+                    "estado": actual}
+        variacion = diferencia / valor_a * Decimal("100")
     if re.search(r"\b(?:mayor|aument|subio|subieron|mas\s+(?:presupuesto|gastado|gasto|disponible|exceso))\b", t):
         ganador = etiqueta_b if valor_b > valor_a else etiqueta_a
         texto = f"{ganador.capitalize()} fue mayor por {_formato_numero(abs(diferencia))}."
@@ -256,8 +312,18 @@ def resolver_comparacion_historial(pregunta: str, historial: list):
     else:
         direccion = "aumentó" if diferencia > 0 else "disminuyó" if diferencia < 0 else "no cambió"
         texto = f"De {etiqueta_a} a {etiqueta_b} {direccion} {_formato_numero(abs(diferencia))}."
+    if variacion is not None:
+        direccion_pct = "aumentó" if variacion > 0 else "disminuyó" if variacion < 0 else "no cambió"
+        texto += (
+            f" La variación porcentual fue de {_formato_numero(abs(variacion))}%; "
+            f"el gasto {direccion_pct}."
+        )
     columnas = ["periodo_anterior", metrica, "periodo_actual", metrica, "diferencia"]
-    filas = [(etiqueta_a, valor_a, etiqueta_b, valor_b, diferencia)]
+    fila = [etiqueta_a, valor_a, etiqueta_b, valor_b, diferencia]
+    if variacion is not None:
+        columnas.append("variacion_porcentual")
+        fila.append(variacion)
+    filas = [tuple(fila)]
     estado = crear_estado(
         pregunta, "", "", actual.get("unidad", ""), columnas, filas,
         previo=actual, operacion="comparacion", agrupacion="",

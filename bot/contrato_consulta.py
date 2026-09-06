@@ -12,7 +12,8 @@ from copy import deepcopy
 
 
 OPERACIONES = {"", "total", "conteo", "ranking", "detalle", "desglose", "comparacion"}
-METRICAS = {"", "gastado", "presupuesto", "disponible", "exceso", "conteo"}
+METRICAS = {"", "gastado", "presupuesto", "disponible", "exceso", "conteo",
+            "variacion_porcentual"}
 ENTIDADES = {"", "categoria", "concepto", "descripcion", "moneda", "transaccion"}
 FILTROS = {"linea_id", "concepto", "categoria", "moneda", "descripcion"}
 RELACIONES = {"nueva", "seguimiento", "modificacion", "ambigua"}
@@ -50,9 +51,13 @@ def _normalizar_texto(valor) -> str:
     # conservadora sin esos signos.
     import unicodedata
     texto = unicodedata.normalize("NFKD", texto)
-    return " ".join(
-        "".join(c for c in texto if not unicodedata.combining(c)).split()
-    )
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    # La puntuación de la interfaz no debe impedir reconocer conectores de
+    # seguimiento: ``¿Y en deudas?`` debe analizarse igual que ``Y en
+    # deudas``. Se conservan letras, números y espacios para no alterar los
+    # valores semánticos que se comparan contra metadata.
+    texto = "".join(c if c.isalnum() or c.isspace() else " " for c in texto)
+    return " ".join(texto.split())
 
 
 def es_seguimiento(pregunta: str, previo: dict | None,

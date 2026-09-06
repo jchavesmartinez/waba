@@ -825,6 +825,14 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     if motivo_reparacion:
         logger.info("[%s] %s", cid, motivo_reparacion)
 
+    # Una pregunta de clasificación necesita atributos de la fila, no un KPI
+    # agregado que casualmente coincida en dimensión/métrica. La reparación
+    # metadata-driven puede promocionar SQL libre a un KPI compatible; en este
+    # caso se conserva deliberadamente SQL libre para que la barrera de
+    # columnas solicitadas y su fallback determinístico puedan ejecutarse.
+    if nl2sql.pide_atributos_registro(pregunta_efectiva):
+        plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
+
     # Validación metadata-driven: un KPI solo se ejecuta si su dimensión y
     # métrica declaradas son compatibles con el plan. Esto evita que una
     # selección semántica equivocada produzca un número aparentemente válido.
@@ -1251,6 +1259,29 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                     "[%s] SQL sin campos solicitados y reintento invalido (%s)",
                     cid, motivo_campos,
                 )
+                # Última barrera determinística: si el modelo omitió atributos
+                # de clasificación, conservar exactamente el WHERE validado y
+                # leer el detalle de la relación física. No se reconstruyen
+                # joins ni valores; las validaciones normales siguen aplicando.
+                sql_detalle = nl2sql.sql_detalle_con_filtros(sql)
+                ok_detalle, motivo_detalle = nl2sql.validar_sql(
+                    sql_detalle, ctx.tablas_reales,
+                ) if sql_detalle else (False, "SQL de detalle vacío")
+                if ok_detalle:
+                    ok_detalle, motivo_detalle = nl2sql.validar_granularidad(
+                        pregunta_efectiva, sql_detalle,
+                    )
+                if ok_detalle:
+                    ok_detalle, motivo_detalle = seguimiento.validar_contrato_sql(
+                        sql_detalle, contrato_sql,
+                    )
+                if ok_detalle:
+                    sql = sql_detalle
+                else:
+                    logger.warning(
+                        "[%s] no se pudo construir detalle determinístico (%s)",
+                        cid, motivo_detalle,
+                    )
 
     # 2) Ejecutar en solo-lectura.
     #

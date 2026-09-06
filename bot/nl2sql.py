@@ -174,6 +174,32 @@ def faltan_campos_solicitados(pregunta: str, sql: str, schema_text: str = "") ->
     return [campo for campo in requeridos if campo not in proyectadas]
 
 
+def sql_detalle_con_filtros(sql: str) -> str:
+    """Construye un SELECT de detalle conservando el WHERE verificado.
+
+    Se usa como última barrera cuando una consulta de clasificación del modelo
+    proyecta un agregado sin los atributos pedidos. Solo aplica a consultas
+    sobre una relación física; no intenta reconstruir joins ni inventar
+    columnas. El ejecutor y el validador vuelven a revisar el resultado.
+    """
+    try:
+        arbol = sqlglot.parse_one(sql or "", read="postgres")
+        tablas = [tabla for tabla in arbol.find_all(exp.Table)
+                  if not tabla.db]
+        ctes = {c.alias_or_name.lower() for c in arbol.find_all(exp.CTE)}
+        tablas = [tabla for tabla in tablas if tabla.name.lower() not in ctes]
+        if len({tabla.name.lower() for tabla in tablas}) != 1:
+            return ""
+        tabla = tablas[0].copy()
+        consulta = exp.select(exp.Star()).from_(tabla)
+        where = arbol.find(exp.Where)
+        if where is not None and where.this is not None:
+            consulta = consulta.where(where.this.copy())
+        return consulta.sql(dialect="postgres")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def puede_reintentar_nombre_aproximado(pregunta: str) -> bool:
     """Limita el reintento tolerante a busquedas identificables de registros."""
     texto = _normalizar_para_columnas(pregunta)

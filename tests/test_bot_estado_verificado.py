@@ -396,6 +396,33 @@ def test_delta_de_seguimiento_ignora_operacion_alucinada_y_conserva_total():
     assert contrato["periodo"]["inicio"] == "2026-09-01"
 
 
+def test_seguimiento_con_interrogacion_invertida_conserva_y_cambia_categoria():
+    estado = seguimiento.crear_estado(
+        "gasto en vivienda agosto 2026",
+        "SELECT categoria, moneda, gastado FROM movimientos",
+        "", "", ["moneda", "categoria", "gastado"],
+        [("CRC", "Vivienda", 1783262)],
+    )
+    estado["contrato"] = {
+        "operacion": "total", "metrica": "gastado", "entidad": "categoria",
+        "filtros": {"categoria": "Vivienda", "moneda": "CRC"},
+        "periodo": estado["periodo"], "relacion": "nueva",
+    }
+    plan = {
+        "relacion": "nueva", "operacion": "total", "metrica": "gastado",
+        "entidad": "categoria", "filtros_actuales": {"categoria": "Deudas"},
+    }
+    assert contrato_consulta.es_seguimiento("¿Y en deudas?", estado, plan)
+    contrato = seguimiento.contrato_seguimiento(
+        "¿Y en deudas?",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+        plan,
+    )
+    assert contrato["operacion"] == "total"
+    assert contrato["filtros"]["categoria"] == "Deudas"
+    assert contrato["filtros"]["moneda"] == "CRC"
+
+
 def test_pregunta_sola_de_metrica_hereda_entidad_ya_fijada():
     previo = {
         "operacion": "total", "metrica": "presupuesto", "entidad": "categoria",
@@ -1230,6 +1257,45 @@ def test_comparacion_de_dos_resultados_verificados_conserva_filtros_y_periodos()
     assert "682.054,09" in resultado["texto"]
 
 
+def test_comparacion_incluye_variacion_porcentual_si_se_pide():
+    agosto = seguimiento.crear_estado(
+        "gasto agosto", "", "", "CRC", ["moneda", "categoria", "gasto_neto"],
+        [("CRC", "Alimentacion", 763007.09)],
+    )
+    agosto["periodo"] = {"inicio": "2026-08-01"}
+    agosto["filtros"] = {"categoria": "Alimentacion", "moneda": "CRC"}
+    agosto["contrato"] = {"metrica": "gastado", "filtros": agosto["filtros"]}
+    septiembre = seguimiento.crear_estado(
+        "gasto septiembre", "", "", "CRC", ["moneda", "categoria", "gasto_neto"],
+        [("CRC", "Alimentacion", 80953)], previo=agosto,
+    )
+    septiembre["periodo"] = {"inicio": "2026-09-01"}
+    septiembre["filtros"] = agosto["filtros"]
+    septiembre["contrato"] = {"metrica": "gastado", "filtros": septiembre["filtros"]}
+    resultado = seguimiento.resolver_comparacion_historial(
+        "Cuál mes fue mayor y cuál es la variación porcentual entre ambos meses?",
+        [{"rol": "assistant", "estado": agosto}, {"rol": "assistant", "estado": septiembre}],
+    )
+    assert resultado is not None
+    assert "682.054,09" in resultado["texto"]
+    assert "89,39" in resultado["texto"]
+    assert "variacion_porcentual" in resultado["columnas"]
+
+
+def test_seguimiento_porcentaje_reutiliza_comparacion_verificada():
+    comparacion = seguimiento.crear_estado(
+        "comparación", "", "", "CRC",
+        ["periodo_anterior", "gastado", "periodo_actual", "gastado", "diferencia"],
+        [("agosto de 2026", 763007.09, "septiembre de 2026", 80953, -682054.09)],
+    )
+    comparacion["contrato"] = {"operacion": "comparacion", "metrica": "gastado", "filtros": {}}
+    resultado = seguimiento.resolver_comparacion_historial(
+        "Y en porcentaje?", [{"rol": "assistant", "estado": comparacion}],
+    )
+    assert resultado is not None
+    assert "89,39" in resultado["texto"]
+
+
 def test_comparacion_de_dos_filtros_en_el_mismo_periodo_usa_entidades_mostradas():
     vivienda = seguimiento.crear_estado(
         "vivienda agosto", "", "", "CRC",
@@ -1456,3 +1522,13 @@ def test_comparacion_puede_pedir_otra_metrica_expuesta_en_las_filas():
     assert resultado is not None
     assert resultado["estado"]["contrato"]["metrica"] == "presupuesto"
     assert "Comedera" in resultado["texto"]
+
+
+def test_sql_detalle_conserva_filtros_cuando_agregado_omite_atributos():
+    sql = (
+        "SELECT SUM(monto_neto) AS gasto, moneda FROM movimientos "
+        "WHERE categoria = 'Otros' GROUP BY moneda"
+    )
+    detalle = R.nl2sql.sql_detalle_con_filtros(sql)
+    assert detalle.startswith("SELECT * FROM movimientos")
+    assert "categoria = 'Otros'" in detalle
