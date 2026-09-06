@@ -912,6 +912,19 @@ def resolver_sobre_resultado(pregunta: str, historial: list):
                 )
                 return {"columnas": columnas, "filas": filas, "estado": nuevo,
                         "sql": estado.get("sql", ""), "texto": texto}
+    # Una proyección de una sola fila no debe olvidar los atributos que no se
+    # mostraron en el turno anterior. La referencia se originó en una consulta
+    # ya verificada, por lo que es más segura que volver a interpretar prosa.
+    columnas_fuente = columnas
+    filas_fuente = filas
+    referencia_fila = estado.get("fila_referencia")
+    if (isinstance(referencia_fila, dict)
+            and isinstance(referencia_fila.get("columnas"), list)
+            and isinstance(referencia_fila.get("fila"), (list, tuple))
+            and len(referencia_fila["columnas"]) == len(referencia_fila["fila"])):
+        columnas_fuente = list(referencia_fila["columnas"])
+        filas_fuente = [tuple(referencia_fila["fila"])]
+    nombres_fuente = [_nombre(c) for c in columnas_fuente]
     pedidos = []
     campos = (
         ("descripcion", ("descripcion", "comercio"), r"\b(?:descripcion|comercio|nombre)\b"),
@@ -925,13 +938,13 @@ def resolver_sobre_resultado(pregunta: str, historial: list):
     for _, aliases, patron in campos:
         if not re.search(patron, t):
             continue
-        indice = next((nombres.index(a) for a in aliases if a in nombres), None)
+        indice = next((nombres_fuente.index(a) for a in aliases if a in nombres_fuente), None)
         if indice is not None and indice not in pedidos:
             pedidos.append(indice)
     if not pedidos:
         return None
-    columnas_nuevas = [columnas[i] for i in pedidos]
-    filas_nuevas = [tuple(filas[0][i] for i in pedidos)]
+    columnas_nuevas = [columnas_fuente[i] for i in pedidos]
+    filas_nuevas = [tuple(filas_fuente[0][i] for i in pedidos)]
     nuevo = crear_estado(
         pregunta, estado.get("sql", ""), estado.get("kpi", ""),
         estado.get("unidad", ""), columnas_nuevas, filas_nuevas,
@@ -1052,8 +1065,16 @@ def validar_contrato_sql(sql: str, contrato: dict) -> tuple[bool, str]:
     # y materializan sus valores como literales, por lo que esta comprobación
     # es independiente de la tabla o del cliente.
     sql_normalizado = _normalizar(sql)
-    for clave, valor in (contrato.get("filtros") or {}).items():
+    filtros_contrato = contrato.get("filtros") or {}
+    linea_id = filtros_contrato.get("linea_id")
+    linea_presente = bool(linea_id and _normalizar(linea_id) in sql_normalizado)
+    for clave, valor in filtros_contrato.items():
         if valor in (None, ""):
+            continue
+        # Una llave de línea presupuestaria identifica de forma estable su
+        # concepto y categoría. Exigir además las etiquetas humanas haría
+        # rechazar una consulta más precisa que la requerida.
+        if linea_presente and clave in {"concepto", "categoria"}:
             continue
         if _normalizar(valor) not in sql_normalizado:
             return False, f"el SQL perdió el filtro heredado {clave}={valor}"
@@ -1167,6 +1188,22 @@ def crear_estado(pregunta: str, sql: str, kpi: str, unidad: str,
     if sql_detalle and campos_detalle.get("fecha") and campos_detalle.get("monto"):
         base["sql_detalle"] = sql_detalle
         base["campos_detalle"] = campos_detalle
+    referencia_fila = (previo or {}).get("fila_referencia")
+    if not referencia_fila and (previo or {}).get("filas_totales") == 1:
+        columnas_previas = list((previo or {}).get("columnas") or [])
+        filas_previas = list((previo or {}).get("filas") or [])
+        if columnas_previas and len(filas_previas) == 1:
+            referencia_fila = {
+                "columnas": columnas_previas,
+                "fila": filas_previas[0],
+            }
+    if (isinstance(referencia_fila, dict)
+            and isinstance(referencia_fila.get("columnas"), list)
+            and isinstance(referencia_fila.get("fila"), (list, tuple))):
+        base["fila_referencia"] = {
+            "columnas": [str(c) for c in referencia_fila["columnas"]],
+            "fila": [_json_valor(v) for v in referencia_fila["fila"]],
+        }
     if referencia_temporal:
         base["referencia_temporal"] = dict(referencia_temporal)
     elif (previo or {}).get("referencia_temporal"):

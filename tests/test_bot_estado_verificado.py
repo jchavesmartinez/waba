@@ -451,6 +451,24 @@ def test_descripcion_de_fila_identificada_se_proyecta_sin_nueva_consulta():
     assert resultado["filas"] == [("Escritorio",)]
 
 
+def test_proyecciones_encadenadas_conservan_la_fila_original_verificada():
+    detalle = seguimiento.crear_estado(
+        "movimiento", "SELECT fecha, descripcion, categoria, concepto, monto, moneda FROM movimientos",
+        "", "", ["fecha", "descripcion", "categoria", "concepto", "monto", "moneda"],
+        [("2026-09-04", "ROGA", "Otros", "Salud", 68000, "CRC")],
+    )
+    primero = seguimiento.resolver_sobre_resultado(
+        "¿Cuál es su categoría y concepto?",
+        [{"rol": "assistant", "contenido": "detalle", "estado": detalle}],
+    )
+    segundo = seguimiento.resolver_sobre_resultado(
+        "¿Cuál fue el monto?",
+        [{"rol": "assistant", "contenido": "proyección", "estado": primero["estado"]}],
+    )
+    assert segundo["columnas"] == ["monto"]
+    assert segundo["filas"] == [(68000,)]
+
+
 def test_cambio_de_periodo_reutiliza_sql_y_conserva_conteo():
     sql = (
         "SELECT COUNT(*) AS cantidad FROM movimientos "
@@ -1177,3 +1195,12 @@ def test_contrato_nuevo_prioriza_metrica_presupuesto_explicita():
          "relacion": "nueva", "filtros_actuales": {}},
     )["contrato"]
     assert contrato["metrica"] == "presupuesto"
+
+
+def test_validador_acepta_linea_id_como_filtro_mas_fuerte_que_concepto():
+    sql = "SELECT SUM(monto_neto) AS gastado FROM movimientos WHERE linea_id = 'gas_salud'"
+    ok, _ = seguimiento.validar_contrato_sql(sql, {
+        "operacion": "total", "metrica": "gastado", "agrupacion": "",
+        "filtros": {"linea_id": "gas_salud", "concepto": "Salud imprevistos"},
+    })
+    assert ok
