@@ -1127,6 +1127,21 @@ def test_capacidad_no_deja_que_un_kpi_heredado_eluda_el_contrato_cliente():
     assert "anual" in motivo
 
 
+def test_capacidad_usa_vocabulario_global_si_el_plan_eligio_kpi_vecino():
+    vecino = {"kpi": "gasto_categoria", "metricas": "gastado",
+              "operaciones": "total", "periodicidades": "mensual",
+              "dimensiones": "categoria"}
+    presupuesto = {"kpi": "presupuesto", "metricas": "presupuesto; gastado",
+                   "operaciones": "total", "periodicidades": "mensual"}
+    ok, motivo = capacidades.validar(
+        "¿Cuánto fue mi presupuesto mensual?",
+        {"accion": "usar_kpi", "kpi": "gasto_categoria"},
+        [vecino, presupuesto], object(),
+    )
+    assert ok
+    assert motivo == ""
+
+
 def test_validacion_semantica_no_restringe_metadata_legacy():
     plan = {"accion": "usar_kpi", "kpi": "gasto", "entidad": "concepto",
             "metrica": "gastado"}

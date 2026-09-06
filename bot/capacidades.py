@@ -121,7 +121,11 @@ def operacion_especial(pregunta: str) -> str:
         ("conversion", r"\b(?:convierte|convertir|conversion|tipo de cambio)"),
         ("anomalia", r"\b(?:anomal|inusual|atipic|fuera de lo normal)"),
         ("programacion", r"\b(?:proxim[oa]|vencimiento|agenda[rd]?)"),
-        ("clasificacion", r"\b(?:clasific(?:ar|acion)|categorizar)"),
+        # "clasificación" también aparece como valor legítimo de la
+        # dimensión estado (por ejemplo, "sin clasificar"). La validación de
+        # dimensiones/KPI decide si una consulta de clasificación es posible;
+        # tratar la palabra como operación transversal bloquearía consultas
+        # válidas sobre ese valor.
         # No se puede inferir un flujo de caja a partir de movimientos de
         # gasto: requiere ingresos, saldos iniciales y reglas explícitas. Sólo
         # se habilita cuando la metadata declara esta operación.
@@ -197,11 +201,18 @@ def validar(pregunta: str, plan: dict | None, kpis: list, ctx,
     }
     if not anclas:
         return True, ""
+    permitidas_globales = set().union(*(vocabulario(kpi) for kpi in estructurados))
+    permitidas_globales |= tokens(str(getattr(ctx, "schema_text", "") or ""))
     if elegido:
         permitidas = vocabulario(elegido)
+        # Gemini puede escoger un KPI vecino (por ejemplo, gasto por categoría
+        # para una pregunta de presupuesto). La metadata del cliente sigue
+        # siendo la autoridad: si otro KPI estructurado declara los términos,
+        # no convertimos esa elección imperfecta en un falso "no soportado".
+        if not (anclas & permitidas):
+            permitidas = permitidas_globales
     else:
-        permitidas = set().union(*(vocabulario(kpi) for kpi in estructurados))
-        permitidas |= tokens(str(getattr(ctx, "schema_text", "") or ""))
+        permitidas = permitidas_globales
     if anclas & permitidas:
         return True, ""
     return False, (
