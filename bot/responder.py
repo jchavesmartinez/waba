@@ -854,6 +854,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
 
     # 1) Conseguir el SQL: del KPI (definicion canonica) o del text-to-SQL libre.
     sql = sql_reutilizado
+    instruccion_periodo_implicito = ""
     sql_temporal = seguimiento.sql_temporal_desde_estado(contrato)
     if sql_temporal:
         # La agregación se deriva de un detalle que ya pasó validaciones. No
@@ -862,6 +863,28 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         sql = sql_temporal
         plan.update(accion="reutilizar_sql", kpi="", sql=sql, mensaje="")
     periodo_actual = seguimiento.periodo_explicito(pregunta_efectiva)
+    # El periodo implícito se fija en la fecha civil de la aplicación (Costa
+    # Rica), nunca en CURRENT_DATE del warehouse. Así "este mes" y preguntas
+    # relativas como "diariamente" son reproducibles aunque Neon esté en UTC
+    # o tenga una fecha de sesión distinta.
+    if (not sql and not any(h.get("sql") for h in historial)
+            and not periodo_actual and not seguimiento.es_consulta_composicion(pregunta_efectiva)
+            and not estado_previo.get("periodo")):
+        hoy = fecha_local()
+        if hoy.month == 12:
+            fin = f"{hoy.year + 1:04d}-01-01"
+        else:
+            fin = f"{hoy.year:04d}-{hoy.month + 1:02d}-01"
+        periodo_actual = {
+            "inicio": f"{hoy.year:04d}-{hoy.month:02d}-01",
+            "fin_exclusivo": fin,
+            "granularidad": "mes",
+        }
+        instruccion_periodo_implicito = (
+            "\n\nPERIODO IMPLÍCITO DETERMINÍSTICO: la pregunta no indicó periodo. "
+            f"Usa exactamente {periodo_actual['inicio']} inclusive hasta "
+            f"{periodo_actual['fin_exclusivo']} exclusivo; no uses CURRENT_DATE."
+        )
     if plan["accion"] == "usar_kpi" and plan.get("sql"):
         sql = plan["sql"]
         filtros_kpi = dict(estado_previo.get("filtros") or {})
@@ -931,6 +954,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
 
     if not sql:
         pregunta_sql = pregunta_efectiva
+        pregunta_sql += instruccion_periodo_implicito
         if plan.get("filtros_actuales"):
             pregunta_sql += (
                 "\nFILTROS EXPLICITOS OBLIGATORIOS: "
