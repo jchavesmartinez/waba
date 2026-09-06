@@ -525,7 +525,8 @@ _PLAN_SCHEMA = {
         "mensaje": {"type": "string"},
     },
     "required": [
-        "relacion", "heredar_filtros", "filtros_actuales", "heredar_periodo", "heredar_kpi",
+        "operacion", "metrica", "entidad", "relacion", "heredar_filtros",
+        "filtros_actuales", "heredar_periodo", "heredar_kpi",
         "accion", "kpi", "sql", "mensaje",
     ],
     "additionalProperties": False,

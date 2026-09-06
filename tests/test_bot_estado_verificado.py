@@ -919,6 +919,18 @@ def test_contrato_usa_operacion_metrica_y_entidad_semanticas_del_plan():
     assert contrato["agrupacion"] == "concepto"
 
 
+def test_planificador_exige_y_normaliza_el_contrato_semantico():
+    plan = kpis._parsear(
+        '{"operacion":"total","metrica":"gastado","entidad":"categoria",'
+        '"relacion":"nueva","heredar_filtros":[],"filtros_actuales":{},'
+        '"heredar_periodo":false,"heredar_kpi":false,"accion":"sql_libre",'
+        '"kpi":"","sql":"","mensaje":""}'
+    )
+    assert plan["operacion"] == "total"
+    assert plan["metrica"] == "gastado"
+    assert plan["entidad"] == "categoria"
+
+
 def test_mencionar_un_concepto_de_la_lista_lo_convierte_en_filtro():
     previo = seguimiento.crear_estado(
         "excesos", "SELECT concepto", "", "CRC",
