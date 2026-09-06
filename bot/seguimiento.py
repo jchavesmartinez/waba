@@ -20,6 +20,7 @@ from bot.tiempo import fecha_local
 
 _MAX_FILAS_ESTADO = 200
 _GRUPOS_FILTRO = {
+    "descripcion": ("descripcion", "comercio"),
     "linea_id": ("linea_id", "linea_presupuesto_id", "linea_presupuestaria_id"),
     "concepto": ("concepto",),
     "categoria": ("categoria",),
@@ -463,7 +464,9 @@ def validar_resultado(columnas, filas, contexto: dict | None = None) -> tuple[bo
                     return False, "el porcentaje no coincide con gastado dividido entre presupuesto"
 
     i_moneda = _indice(columnas, ("moneda", "currency", "codigo_moneda"))
-    if i_moneda is not None and (i_pre is not None or i_gas is not None):
+    # Filas separadas por moneda NO son una suma entre monedas. La comparación
+    # presupuestaria sí requiere una única moneda explícita.
+    if i_moneda is not None and i_pre is not None and i_gas is not None:
         monedas = {_normalizar(f[i_moneda]) for f in filas if f[i_moneda] not in (None, "")}
         if len(monedas) > 1:
             return False, "el agregado mezcla monedas sin una conversion explicita"
@@ -491,7 +494,9 @@ def validar_resultado(columnas, filas, contexto: dict | None = None) -> tuple[bo
         aliases = _GRUPOS_FILTRO.get(clave, ())
         indice = next((nombres.index(a) for a in aliases if a in nombres), None)
         if indice is not None and any(
-                _normalizar(f[indice]) != _normalizar(esperado) for f in filas):
+                (_normalizar(esperado) not in _normalizar(f[indice])
+                 if clave == "descripcion" else
+                 _normalizar(f[indice]) != _normalizar(esperado)) for f in filas):
             return False, f"el resultado mezclo valores fuera del filtro {clave}"
     return True, ""
 

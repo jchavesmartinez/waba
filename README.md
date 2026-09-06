@@ -204,6 +204,15 @@ controla con `BOT_PERMITIR_SIN_INSTRUCCION` (por defecto `no` = fail-closed).
 > agregar la columna `instruccion` al Sheet, para que aparezca en Neon. El
 > catálogo viejo se migra solo (la escritura hace `ADD COLUMN IF NOT EXISTS`).
 
+### Vocabularios consultables
+
+Una columna de baja cardinalidad puede declarar `valores_consulta = si` en su
+fila de `_catalogo`. El bot leerá hasta 100 valores distintos de esa columna y
+los incluirá como vocabulario de negocio al planificar la consulta. Esto sirve,
+por ejemplo, para distinguir una categoría de un concepto presupuestario sin
+codificar los valores de cada cliente en Python. No debe habilitarse en textos
+libres, identificadores ni columnas sensibles.
+
 ## El bot de WhatsApp (capa de lectura)
 
 Paquete `bot/`. **Solo lee del warehouse**, nunca de los sistemas fuente.

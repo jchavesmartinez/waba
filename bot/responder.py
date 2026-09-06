@@ -213,6 +213,11 @@ def _limitar_top_solicitado(kpi: str, pregunta: str, columnas, filas):
     esta defensa evita mostrar todas las filas si no la representa en el plan.
     """
     texto = str(pregunta or "").lower()
+    for palabra, numero in {"uno": 1, "una": 1, "dos": 2, "tres": 3,
+                            "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7,
+                            "ocho": 8, "nueve": 9, "diez": 10,
+                            "veinte": 20, "treinta": 30}.items():
+        texto = re.sub(rf"\b{palabra}\b", str(numero), texto)
     # Limites explicitos: top 5, los 5, 5 comercios/conceptos.
     match = re.search(
         r"\b(?:top|los|las)\s+(\d{1,3})\b|\b(\d{1,3})\s+(?:comercios|conceptos|categorias|categorías)\b",
@@ -705,6 +710,10 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         # el usuario no dio un filtro explícito ni lo heredó del contexto.
         if elegido:
             for clave, valor in kpis.defaults_de(elegido).items():
+                if clave == "moneda" and re.search(
+                        r"\b(?:por moneda|por cada moneda|todas las monedas)\b",
+                        nl2sql._normalizar_para_columnas(pregunta_efectiva)):
+                    continue
                 filtros_kpi.setdefault(clave, valor)
         periodo_kpi = periodo_actual or estado_previo.get("periodo") or {}
         if not periodo_kpi and kpis.admite_periodo_parametrizado(sql):
@@ -758,14 +767,21 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
 
     if not sql:
         pregunta_sql = pregunta_efectiva
+        if plan.get("filtros_actuales"):
+            pregunta_sql += (
+                "\nFILTROS EXPLICITOS OBLIGATORIOS: "
+                f"{plan['filtros_actuales']}. Aplicalos antes de agregar o contar. "
+                "descripcion corresponde al comercio o nombre del registro y admite "
+                "coincidencia parcial. concepto corresponde a la linea presupuestaria."
+            )
         if estado_previo:
             contexto = {
                 "kpi": estado_previo.get("kpi", ""),
                 "filtros": estado_previo.get("filtros", {}),
                 "periodo": estado_previo.get("periodo", {}),
             }
-            pregunta_sql = (
-                f"{pregunta_efectiva}\n\n"
+            pregunta_sql += (
+                "\n\n"
                 "CONTEXTO ESTRUCTURADO OBLIGATORIO DEL RESULTADO ANTERIOR: "
                 f"{contexto}. Conserva esos filtros salvo que el usuario los "
                 "cambie explicitamente."

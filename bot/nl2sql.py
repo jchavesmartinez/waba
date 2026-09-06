@@ -123,9 +123,9 @@ def campos_solicitados(pregunta: str, schema_text: str = "") -> list[str]:
     esquema = _normalizar_para_columnas(schema_text).replace("_", " ")
     campos = []
     pide_categoria = bool(re.search(r"\b(?:cuenta\s+contable|categoria|clasificacion)\b", texto))
-    pide_concepto = bool(re.search(r"\bconcepto(?:\s+presupuestario)?\b", texto))
+    pide_concepto = bool(re.search(r"\b(?:concepto|clasificacion)\b", texto))
     if pide_categoria:
-        if "cuenta contable" in esquema:
+        if re.search(r"\bcuenta_contable\b\s*(?:\(|,|\))", schema_text):
             campos.append("cuenta_contable")
         elif "categoria" in esquema:
             campos.append("categoria")
@@ -384,6 +384,10 @@ def validar_granularidad(pregunta: str, sql: str) -> tuple[bool, str]:
     """Impide ejecutar una agrupación temporal distinta de la solicitada."""
     texto = _normalizar_para_columnas(pregunta)
     consulta = str(sql or "").lower()
+    if re.search(r"\bcuant[oa]s\s+(?:\w+\s+)?(?:movimientos|transacciones|registros|compras|gastos|reservas|clientes|productos)\b", texto):
+        arbol = sqlglot.parse_one(sql, read="postgres")
+        if not any(arbol.find_all(exp.Count)):
+            return False, "Se pidió contar registros: usa COUNT, no una suma de montos ni una lista."
     pide_mes = bool(re.search(
         r"\b(?:mes\s+a\s+mes|por\s+mes|mensual(?:mente)?)\b", texto,
     ))
@@ -792,6 +796,8 @@ def _resultado_movimientos(columnas, filas, unidad: str, tope: int | None = None
 
     i_categoria = _buscar_columna(idx, "categoria", "categoría")
     i_titular = _buscar_columna(idx, "titular")
+    i_concepto = _buscar_columna(idx, "concepto")
+    i_moneda = _buscar_columna(idx, "moneda", "monto_moneda")
     i_total = _buscar_columna(idx, "total_general", "monto_total", "total_monto")
 
     def valor_comun(posicion):
@@ -812,8 +818,12 @@ def _resultado_movimientos(columnas, filas, unidad: str, tope: int | None = None
     for fila in filas[:tope] if tope else filas:
         descripcion = str(fila[i_desc]).strip()
         monto = _formatear_valor(fila[i_monto], columnas[i_monto], unidad)
+        if i_moneda is not None and fila[i_moneda]:
+            monto = f"{fila[i_moneda]} {monto}"
         fecha = _fecha_corta(fila[i_fecha])
         lineas.append(f"• *{descripcion}* — {monto} · {fecha}")
+        if i_concepto is not None:
+            lineas.append(f"  Concepto: {fila[i_concepto] or 'Sin asignar'}")
         lineas.append("")
     if tope and len(filas) > tope:
         restantes = len(filas) - tope
@@ -1057,9 +1067,11 @@ def _contexto_respuesta(pregunta: str) -> str:
     periodo = next((f"{m} {y}" for m in meses for y in re.findall(rf"\b{m}\s+(\d{{4}})\b", texto)), None)
     metrica = "gastos" if re.search(r"\bgast", texto) else "resultados"
     agrupacion = " por comercio" if re.search(r"\bpor\s+comercio", texto) else ""
-    if re.search(r"presupuesto|sobregir|exced", texto):
+    if re.search(r"sobregir|exced", texto):
         sujeto = "las categorías que excedieron el presupuesto"
         return f"Estas son {sujeto} de {periodo}:" if periodo else f"Estas son {sujeto}:"
+    if "presupuesto" in texto:
+        return f"Presupuesto de {periodo}:" if periodo else "Presupuesto:"
     if periodo:
         return f"Tus {metrica} de {periodo}{agrupacion} son:"
     if agrupacion or metrica == "gastos":

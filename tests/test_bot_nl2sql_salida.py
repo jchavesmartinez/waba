@@ -3,6 +3,21 @@ from types import SimpleNamespace
 from bot import nl2sql
 
 
+def test_conteo_de_movimientos_exige_count():
+    ok, motivo = nl2sql.validar_granularidad(
+        "¿Cuántos movimientos hubo?",
+        "SELECT SUM(monto_neto) AS total FROM movimientos",
+    )
+    assert ok is False
+    assert "COUNT" in motivo
+
+    ok, motivo = nl2sql.validar_granularidad(
+        "¿Cuántos movimientos hubo?",
+        "SELECT COUNT(*) AS total FROM movimientos",
+    )
+    assert ok is True
+
+
 def test_generar_sql_exige_json_y_razonamiento_minimo(monkeypatch):
     llamadas = []
 

@@ -241,6 +241,37 @@ def test_kpi_se_parametriza_con_linea_verificada():
     assert "'gas_imprevistos_jose'" in sql
 
 
+def test_kpi_con_linea_conserva_filtro_independiente_de_moneda():
+    sql, aplicados = kpis.parametrizar_sql(
+        "SELECT linea_id, concepto, moneda, SUM(gastado) AS gastado "
+        "FROM movimientos GROUP BY 1, 2, 3",
+        {"linea_id": "gas_comedera", "concepto": "Comedera", "moneda": "CRC"},
+    )
+    assert aplicados == {"linea_id": "gas_comedera", "moneda": "CRC"}
+    assert "_kpi.linea_id" in sql
+    assert "_kpi.moneda" in sql
+
+
+def test_kpi_filtra_descripcion_parcial_y_no_pierde_comercio():
+    sql, aplicados = kpis.parametrizar_sql(
+        "SELECT descripcion, moneda, SUM(monto_neto) AS gasto_neto "
+        "FROM movimientos GROUP BY 1, 2",
+        {"descripcion": "Walmart", "moneda": "CRC"},
+    )
+    assert aplicados == {"moneda": "CRC", "descripcion": "Walmart"}
+    assert "ILIKE '%walmart%'" in sql
+
+
+def test_kpi_no_ignora_un_filtro_que_su_salida_no_admite():
+    import pytest
+    with pytest.raises(ValueError, match="descripcion"):
+        kpis.parametrizar_sql(
+            "SELECT moneda, SUM(monto_neto) AS gasto_neto "
+            "FROM movimientos GROUP BY 1",
+            {"descripcion": "Walmart"},
+        )
+
+
 def test_kpi_de_seguimiento_conserva_el_mes_aunque_cambie_current_date():
     sql, aplicados = kpis.parametrizar_sql(
         "SELECT linea_id, SUM(gastado) AS gastado FROM finanzas__presupuesto "
@@ -314,6 +345,14 @@ def test_total_simple_consolida_movimientos_por_moneda():
     assert columnas == ["moneda", "gastado"]
     assert ("CRC", 350) in filas
     assert ("USD", 4) in filas
+
+
+def test_agregados_separados_por_moneda_no_se_rechazan_como_mezcla():
+    ok, motivo = seguimiento.validar_resultado(
+        ["moneda", "gasto_neto"], [("CRC", 1000), ("USD", 5)],
+    )
+    assert ok is True
+    assert motivo == ""
 
 
 def test_reconciliador_rechaza_porcentaje_con_denominador_anual():

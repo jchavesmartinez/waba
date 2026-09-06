@@ -223,6 +223,7 @@ def sql_canonico(kpi: dict, ctx) -> str:
 
 
 _FILTROS_SALIDA = {
+    "descripcion": ("descripcion", "comercio"),
     "linea_id": ("linea_id", "linea_presupuesto_id", "linea_presupuestaria_id"),
     "concepto": ("concepto",),
     "categoria": ("categoria",),
@@ -321,26 +322,29 @@ def parametrizar_sql(sql: str, filtros: dict | None,
     salidas = {str(n).lower(): str(n) for n in arbol.named_selects}
     condiciones = []
     # La llave estable basta por si sola y evita filtros redundantes por nombre.
-    claves = ["linea_id", "concepto", "categoria", "moneda"]
+    claves = ["linea_id", "concepto", "categoria", "moneda", "descripcion"]
     for clave in claves:
+        if clave in ("concepto", "categoria") and "linea_id" in aplicados:
+            continue
         valor = filtros.get(clave)
         if valor in (None, ""):
             continue
         columna = next((salidas[a] for a in _FILTROS_SALIDA[clave] if a in salidas), None)
         if not columna:
-            continue
+            raise ValueError(f"El KPI no permite aplicar el filtro {clave}; requiere otra consulta")
         referencia = exp.column(columna, table="_kpi")
         normalizada = exp.Lower(this=exp.Trim(this=exp.Cast(
             this=referencia, to=exp.DataType.build("TEXT"))))
-        condiciones.append(exp.EQ(
+        condiciones.append((exp.ILike if clave == "descripcion" else exp.EQ)(
             this=normalizada,
-            expression=exp.Literal.string(str(valor).strip().lower()),
+            expression=exp.Literal.string(
+                "%" + str(valor).strip().lower().replace("%", "").replace("_", "") + "%"
+                if clave == "descripcion" else str(valor).strip().lower()),
         ))
         aplicados[clave] = valor
         # Una linea_id identifica el concepto de forma estable; no hace falta
         # combinarla con etiquetas que pueden haber cambiado de capitalizacion.
-        if clave == "linea_id":
-            break
+        # Una llave de concepto no elimina restricciones independientes como moneda.
     if not condiciones:
         return arbol.sql(dialect="postgres"), aplicados
     condicion = condiciones[0]
@@ -372,9 +376,16 @@ _SISTEMA = (
     "- La informacion explicita del mensaje actual manda. En heredar_filtros "
     "inclui SOLO nombres de filtros del ultimo Estado verificado que realmente "
     "deban conservarse y que el usuario no haya sustituido. Valores permitidos: "
-    "linea_id, concepto, categoria y moneda. Nunca inventes valores.\n"
+    "linea_id, concepto, categoria, moneda y descripcion. Nunca inventes valores.\n"
     "- filtros_actuales contiene SOLO filtros escritos explicitamente en la "
-    "pregunta actual, con claves linea_id, concepto, categoria o moneda. "
+    "pregunta actual, con claves linea_id, concepto, categoria, moneda o descripcion. "
+    "Un comercio o nombre de registro SIEMPRE requiere descripcion: 'gasto en Walmart' "
+    "requiere {\"descripcion\":\"Walmart\"}. No elijas un total general que pierde ese filtro. "
+    "Distingue concepto de categoria según el catálogo; no filtres una categoria con "
+    "el nombre de un concepto. Para contar movimientos elige sql_libre con COUNT(*); "
+    "un KPI de suma no responde un conteo. Para presupuesto de un concepto elige "
+    "el plan presupuestario, nunca sobregiros. Si se piden todas las monedas o por "
+    "moneda, no impongas una moneda predeterminada. "
     "Ejemplo: 'gastos por comercio de alimentacion' usa "
     "{\"categoria\":\"Alimentacion\"}. No pongas filtros que no aparecen "
     "en la pregunta, ni copies valores del historial: esos van exclusivamente "
@@ -473,7 +484,7 @@ _PLAN_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "string",
-                "enum": ["linea_id", "concepto", "categoria", "moneda"],
+                "enum": ["linea_id", "concepto", "categoria", "moneda", "descripcion"],
             },
             "uniqueItems": True,
         },
@@ -484,6 +495,7 @@ _PLAN_SCHEMA = {
                 "concepto": {"type": "string"},
                 "categoria": {"type": "string"},
                 "moneda": {"type": "string"},
+                "descripcion": {"type": "string"},
             },
             "additionalProperties": False,
         },
@@ -661,7 +673,7 @@ def _parsear(texto: str) -> dict:
     relacion = str(d.get("relacion", "nueva")).strip().lower()
     if relacion not in ("nueva", "seguimiento", "modificacion", "ambigua"):
         relacion = "nueva"
-    permitidos = {"linea_id", "concepto", "categoria", "moneda"}
+    permitidos = {"linea_id", "concepto", "categoria", "moneda", "descripcion"}
     heredados = []
     for clave in d.get("heredar_filtros", []) or []:
         clave = str(clave).strip().lower()
