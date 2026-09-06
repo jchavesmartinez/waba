@@ -591,6 +591,26 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # resuelven sobre las filas persistidas y así conservan exactamente el
     # orden, filtros y cifras que el usuario acaba de ver.
     if fmt == formato.TEXTO and not sql_reutilizado:
+        calculo_previo = seguimiento.resolver_sobre_resultado(
+            pregunta, historial,
+        )
+        if calculo_previo is not None:
+            columnas_previas, filas_previas = nl2sql.ocultar_columnas_tecnicas(
+                calculo_previo["columnas"], calculo_previo["filas"], pregunta,
+            )
+            try:
+                texto_previo = nl2sql.redactar_respuesta(
+                    pregunta, columnas_previas, filas_previas,
+                    historial=historial, sql=calculo_previo.get("sql", ""),
+                )
+            except Exception:  # noqa: BLE001
+                texto_previo = nl2sql.tabla_texto(
+                    columnas_previas, filas_previas, tope=10,
+                )
+            return Respuesta(
+                texto_previo, sql=calculo_previo.get("sql", ""),
+                estado=calculo_previo.get("estado", {}),
+            )
         referencia = seguimiento.resolver_referencia(pregunta, historial)
         if referencia is not None:
             columnas_ref, filas_ref = nl2sql.ocultar_columnas_tecnicas(
@@ -645,6 +665,35 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             # campos (cuenta contable/concepto), no un KPI agregado que pueda
             # devolver solo totales o repetir el ultimo resumen.
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
+
+    contrato = seguimiento.contrato_seguimiento(
+        pregunta_efectiva, historial, plan,
+    )
+    if contrato:
+        plan["relacion"] = "seguimiento"
+        plan["heredar_filtros"] = list(contrato.get("filtros") or {})
+        plan["heredar_periodo"] = not contrato.get("periodo_cambiado", False)
+        cambio_forma = (
+            contrato.get("operacion") != contrato.get("operacion_previa")
+            or contrato.get("agrupacion") != contrato.get("agrupacion_previa")
+            or contrato.get("metrica") == "exceso"
+            or bool(contrato.get("entidades_previas"))
+        )
+        if cambio_forma:
+            plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
+
+        # Cuando el único cambio real es el período, se conserva literalmente
+        # el SELECT verificado y se reemplazan sus límites. Así un COUNT no se
+        # convierte en detalle ni un total cambia de dimensión por una nueva
+        # interpretación del modelo.
+        sql_periodo = seguimiento.sql_con_periodo_nuevo(
+            pregunta_efectiva, historial, contrato,
+        )
+        if sql_periodo and not (plan.get("filtros_actuales") or {}):
+            sql_reutilizado = sql_periodo
+            plan.update(
+                accion="reutilizar_sql", kpi="", sql=sql_periodo, mensaje="",
+            )
 
     estado_previo = seguimiento.contexto_segun_plan(historial, plan)
     relacion_plan = plan.get("relacion", "nueva")
@@ -779,6 +828,8 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 "kpi": estado_previo.get("kpi", ""),
                 "filtros": estado_previo.get("filtros", {}),
                 "periodo": estado_previo.get("periodo", {}),
+                "operacion": estado_previo.get("operacion", ""),
+                "agrupacion": estado_previo.get("agrupacion", ""),
             }
             pregunta_sql += (
                 "\n\n"
@@ -786,6 +837,8 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 f"{contexto}. Conserva esos filtros salvo que el usuario los "
                 "cambie explicitamente."
             )
+        if contrato:
+            pregunta_sql += "\n\n" + seguimiento.instruccion_contrato(contrato)
         if periodo_actual:
             pregunta_sql += (
                 "\n\nPERIODO DETERMINISTICO (no lo cambies): usa exactamente el rango "
@@ -817,6 +870,38 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             if not ok:
                 logger.warning("[%s] SQL invalido tras reintento (%s): %s", cid, motivo, sql)
                 return Respuesta(_no_seguro(catalogo.resumir_habilitados(ctx)))
+
+        ok_contrato, motivo_contrato = seguimiento.validar_contrato_sql(
+            sql, contrato,
+        )
+        if not ok_contrato:
+            logger.info(
+                "[%s] SQL no cumple contrato de seguimiento (%s); reintento",
+                cid, motivo_contrato,
+            )
+            sql_contrato = nl2sql.generar_sql(
+                pregunta_sql, ctx.schema_text,
+                correccion=motivo_contrato, sql_previo=sql,
+                historial=historial_sql,
+            )
+            ok_sql, motivo_sql = nl2sql.validar_sql(
+                sql_contrato, ctx.tablas_reales,
+            )
+            if ok_sql:
+                ok_sql, motivo_sql = nl2sql.validar_granularidad(
+                    pregunta_efectiva, sql_contrato,
+                )
+            if ok_sql:
+                ok_sql, motivo_sql = seguimiento.validar_contrato_sql(
+                    sql_contrato, contrato,
+                )
+            if not ok_sql:
+                logger.warning(
+                    "[%s] seguimiento invalido tras reintento (%s)",
+                    cid, motivo_sql,
+                )
+                return Respuesta(_no_seguro(catalogo.resumir_habilitados(ctx)))
+            sql = sql_contrato
 
         # El modelo puede producir una consulta valida pero insuficiente: por
         # ejemplo, seleccionar comercio/fecha/monto cuando el usuario pidio la

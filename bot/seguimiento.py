@@ -145,8 +145,9 @@ def periodo_explicito(pregunta: str) -> dict:
     """Extrae un mes/año escrito por el usuario, sin inferirlo del historial.
 
     El resultado se puede aplicar de forma deterministica a una fórmula KPI.
-    Por ahora solo devuelve rangos cuando el usuario indicó mes y año completos;
-    los demás formatos continúan por el camino que ya interpreta text-to-SQL.
+    Si el usuario indica solo el mes, usa el año actual del negocio. Esto sigue
+    la regla general de período actual y permite seguimientos naturales como
+    "¿y en septiembre?" sin perder el comercio o concepto anterior.
     """
     t = _normalizar(pregunta)
     hoy = fecha_local()
@@ -186,9 +187,9 @@ def periodo_explicito(pregunta: str) -> dict:
     mes = next((numero for nombre, numero in _MESES.items()
                 if re.search(rf"\b{nombre}\b", t)), None)
     anio_m = re.search(r"\b(20\d{2})\b", t)
-    if not mes or not anio_m:
+    if not mes:
         return {}
-    anio = int(anio_m.group(1))
+    anio = int(anio_m.group(1)) if anio_m else hoy.year
     ultimo = monthrange(anio, mes)[1]
     if mes == 12:
         fin_exclusivo = f"{anio + 1:04d}-01-01"
@@ -212,6 +213,161 @@ def modo_resultado(pregunta: str, columnas=None, filas=None) -> str:
     if re.search(r"\b(?:presupuesto|disponible|porcentaje|exced|sobregir)\b", texto):
         return "desglose" if len(filas or []) > 1 else "resumen"
     return "resumen"
+
+
+def operacion_resultado(pregunta: str, sql: str = "", columnas=None,
+                        filas=None) -> str:
+    """Describe la operacion ya ejecutada para poder continuarla.
+
+    No intenta reconocer el KPI de negocio. Conserva una propiedad mucho mas
+    pequeña y estable: si el usuario obtuvo un conteo, total, ranking, desglose
+    o detalle. Esa forma es parte del contrato conversacional y no debe quedar
+    a criterio del modelo en cada turno.
+    """
+    t = _normalizar(pregunta)
+    sql_n = _normalizar(sql)
+    if re.search(r"\b(?:cuantos|cantidad|numero de)\b", t) or re.search(
+            r"\bcount\s*\(", sql_n):
+        return "conteo"
+    if re.search(r"\b(?:mayor|menor|top|mas alto|mas alta|menos)\b", t):
+        return "ranking"
+    if es_consulta_composicion(pregunta) or re.search(
+            r"\b(?:detalle|lista|movimientos|transacciones)\b", t):
+        return "detalle"
+    if re.search(r"\b(?:exceso|exced|sobregir|presupuesto|disponible|porcentaje)\b", t):
+        return "comparacion"
+    if re.search(r"\b(?:cuanto|total|suman|suma)\b", t):
+        return "total"
+    if modo_resultado(pregunta, columnas, filas) == "desglose":
+        return "desglose"
+    return "resumen"
+
+
+def agrupacion_resultado(pregunta: str, columnas=None) -> str:
+    """Obtiene la dimension humana principal del resultado."""
+    t = _normalizar(pregunta)
+    patrones = (
+        ("concepto", r"\bconceptos?\b"),
+        ("categoria", r"\bcategorias?\b"),
+        ("descripcion", r"\b(?:comercios?|descripciones?)\b"),
+        ("moneda", r"\bmonedas?\b"),
+    )
+    for dimension, patron in patrones:
+        if re.search(patron, t):
+            return dimension
+    nombres = {_nombre(c) for c in (columnas or [])}
+    for dimension in ("concepto", "categoria", "descripcion", "moneda"):
+        if any(alias in nombres for alias in _GRUPOS_FILTRO[dimension]):
+            return dimension
+    return ""
+
+
+def _es_frase_seguimiento(pregunta: str) -> bool:
+    t = _normalizar(pregunta)
+    return bool(re.search(
+        r"^(?:y\b|tambien\b)|"
+        r"\b(?:ahi|ese|esa|esos|esas|lo|los|la|las|de esas|de esos|"
+        r"dentro de esa|suman|las componen|los conforman)\b",
+        t,
+    ))
+
+
+def contrato_seguimiento(pregunta: str, historial: list,
+                         plan: dict | None = None) -> dict:
+    """Construye reglas verificables para un seguimiento real.
+
+    El modelo puede reconocer una pregunta nueva, pero una frase referencial
+    no puede borrar silenciosamente filtros, periodo u operacion. El contrato
+    solo usa estado proveniente de una consulta ejecutada.
+    """
+    previo = ultimo_estado(historial)
+    relacion = str((plan or {}).get("relacion", "nueva"))
+    if not previo or not (_es_frase_seguimiento(pregunta) or relacion in (
+            "seguimiento", "modificacion")):
+        return {}
+
+    t = _normalizar(pregunta)
+    periodo_nuevo = periodo_explicito(pregunta)
+    operacion_previa = str(previo.get("operacion") or "resumen")
+    agrupacion_previa = str(previo.get("agrupacion") or "")
+    operacion = operacion_previa
+    agrupacion = agrupacion_previa
+
+    if re.search(r"\b(?:cuantos|cantidad|numero de)\b", t):
+        operacion = "conteo"
+    elif re.search(r"\b(?:cuanto suman|cuanto suma|totalizan|suman)\b", t):
+        operacion = "total"
+    elif re.search(r"\b(?:mayor|menor|top|mas alto|mas alta|menos)\b", t):
+        operacion = "ranking"
+    elif es_consulta_composicion(pregunta) or re.search(
+            r"\b(?:muestrame|lista|detalle)\b", t):
+        operacion = "desglose"
+
+    if re.search(r"\bconceptos?\b", t):
+        agrupacion = "concepto"
+    elif re.search(r"\bcategorias?\b", t):
+        agrupacion = "categoria"
+    elif re.search(r"\b(?:comercios?|descripciones?)\b", t):
+        agrupacion = "descripcion"
+    elif re.search(r"\bmonedas?\b", t):
+        agrupacion = "moneda"
+
+    metrica = ""
+    if re.search(r"\b(?:exceso|exced|sobregir)\b", t):
+        metrica = "exceso"
+    elif re.search(r"\bpresupuesto\b", t):
+        metrica = "presupuesto"
+    elif re.search(r"\b(?:monto|cuanto|gastado|gaste|suman|total)\b", t):
+        metrica = "gastado"
+
+    entidades = []
+    if re.search(r"\b(?:esas|esos|las componen|los conforman|de esas|de esos)\b", t):
+        columnas = list(previo.get("columnas") or [])
+        nombres = [_nombre(c) for c in columnas]
+        dimension = agrupacion_previa
+        aliases = _GRUPOS_FILTRO.get(dimension, ())
+        indice = next((nombres.index(a) for a in aliases if a in nombres), None)
+        if indice is not None:
+            for fila in previo.get("filas") or []:
+                valor = fila[indice]
+                if valor not in (None, "") and str(valor) not in entidades:
+                    entidades.append(str(valor))
+
+    return {
+        "operacion_previa": operacion_previa,
+        "operacion": operacion,
+        "agrupacion_previa": agrupacion_previa,
+        "agrupacion": agrupacion,
+        "metrica": metrica,
+        "filtros": dict(previo.get("filtros") or {}),
+        "periodo": periodo_nuevo or dict(previo.get("periodo") or {}),
+        "periodo_cambiado": bool(periodo_nuevo),
+        "entidades_previas": entidades,
+        "estado_previo": previo,
+    }
+
+
+def instruccion_contrato(contrato: dict) -> str:
+    """Convierte el contrato en una orden compacta para text-to-SQL."""
+    if not contrato:
+        return ""
+    datos = {
+        "operacion_requerida": contrato.get("operacion", ""),
+        "dimension_requerida": contrato.get("agrupacion", ""),
+        "metrica_requerida": contrato.get("metrica", ""),
+        "filtros_heredados": contrato.get("filtros", {}),
+        "periodo": contrato.get("periodo", {}),
+        "entidades_del_resultado_anterior": contrato.get("entidades_previas", []),
+    }
+    return (
+        "CONTRATO DETERMINISTICO DE SEGUIMIENTO: "
+        + json.dumps(datos, ensure_ascii=False, separators=(",", ":"))
+        + ". La pregunta actual modifica solo lo que declara este contrato. "
+        "Conserva el resto. Si hay entidades anteriores, limita el universo "
+        "exactamente a ellas. Proyecta la dimension pedida y respeta la "
+        "operacion: conteo=COUNT, total=SUM, ranking=agrega/ordena/limita, "
+        "desglose=una fila por valor de la dimension."
+    )
 
 
 def _indice_numerico(columnas, preferidos):
@@ -253,6 +409,21 @@ def resolver_referencia(pregunta: str, historial: list):
     filas = [tuple(f) for f in estado.get("filas") or []]
     if not filas:
         return None
+    nombres = [_nombre(c) for c in columnas]
+    # "el concepto con mayor gasto dentro de esa categoría" no selecciona
+    # una categoría de la tabla anterior: solicita una dimensión nueva. Igual
+    # ocurre con "mayor exceso" cuando el resultado previo no calculó exceso.
+    for dimension, patron in (
+        ("concepto", r"\bconceptos?\b"),
+        ("categoria", r"\bcategorias?\b"),
+        ("descripcion", r"\b(?:comercios?|descripciones?)\b"),
+    ):
+        if re.search(patron, t) and not any(
+                alias in nombres for alias in _GRUPOS_FILTRO[dimension]):
+            return None
+    if re.search(r"\b(?:exceso|exced|sobregir)\b", t) and _indice(
+            columnas, ("exceso", "sobregiro")) is None:
+        return None
     i_gastado = _indice_numerico(
         columnas, ("gastado", "gasto_neto", "gasto", "total", "monto"),
     )
@@ -286,6 +457,140 @@ def resolver_referencia(pregunta: str, historial: list):
         "estado": estado_nuevo,
         "sql": estado.get("sql", ""),
     }
+
+
+def resolver_sobre_resultado(pregunta: str, historial: list):
+    """Resuelve proyecciones y sumas que no necesitan consultar otra vez.
+
+    Solo opera sobre el ultimo resultado verificado. Esto cubre preguntas como
+    "¿cuál fue el monto?" después de identificar una única transacción y
+    "¿cuánto suman?" después de ver su detalle. Nunca mezcla monedas.
+    """
+    estado = ultimo_estado(historial)
+    columnas = list(estado.get("columnas") or [])
+    filas = [tuple(f) for f in estado.get("filas") or []]
+    if not estado or not estado.get("verificado") or not columnas or not filas:
+        return None
+    if tiene_periodo_explicito(pregunta):
+        return None
+    t = _normalizar(pregunta)
+    nombres = [_nombre(c) for c in columnas]
+
+    if re.search(r"\b(?:cuanto suman|cuanto suma|totalizan|suman)\b", t):
+        if int(estado.get("filas_totales", len(filas))) != len(filas):
+            return None
+        i_monto = _indice_numerico(
+            columnas, ("gasto_neto", "gastado", "monto_crc", "monto", "importe", "total"),
+        )
+        if i_monto is None:
+            return None
+        i_moneda = _indice(columnas, ("moneda", "monto_moneda", "currency", "codigo_moneda"))
+        totales = {}
+        for fila in filas:
+            monto = _decimal(fila[i_monto])
+            if monto is None:
+                return None
+            moneda = str(fila[i_moneda]).strip() if i_moneda is not None else ""
+            totales[moneda] = totales.get(moneda, Decimal("0")) + monto
+        columnas_nuevas = ["moneda", "gastado"] if i_moneda is not None else ["gastado"]
+        filas_nuevas = (
+            [(moneda, total) for moneda, total in totales.items()]
+            if i_moneda is not None else [(next(iter(totales.values())),)]
+        )
+        nuevo = crear_estado(
+            pregunta, estado.get("sql", ""), estado.get("kpi", ""),
+            estado.get("unidad", ""), columnas_nuevas, filas_nuevas,
+            previo=estado,
+        )
+        return {"columnas": columnas_nuevas, "filas": filas_nuevas,
+                "estado": nuevo, "sql": estado.get("sql", "")}
+
+    # Una proyeccion es segura únicamente cuando el resultado anterior ya
+    # identificó exactamente una fila.
+    if len(filas) != 1 or int(estado.get("filas_totales", len(filas))) != 1:
+        return None
+    if re.search(
+            r"\b(?:mayor|menor|top|dentro|conforman|componen|exceso|exced)\b",
+            t):
+        return None
+    pedidos = []
+    campos = (
+        ("categoria", ("categoria", "cuenta_contable"), r"\b(?:categoria|cuenta contable)\b"),
+        ("concepto", ("concepto",), r"\bconcepto\b"),
+        ("monto", ("gasto_neto", "gastado", "monto_neto", "monto_crc", "monto", "importe", "total"), r"\b(?:monto|gastado|gaste)\b"),
+        ("moneda", ("moneda", "monto_moneda", "currency"), r"\bmoneda\b"),
+        ("fecha", ("fecha", "fecha_transaccion"), r"\bfecha\b"),
+    )
+    for _, aliases, patron in campos:
+        if not re.search(patron, t):
+            continue
+        indice = next((nombres.index(a) for a in aliases if a in nombres), None)
+        if indice is not None and indice not in pedidos:
+            pedidos.append(indice)
+    if not pedidos:
+        return None
+    columnas_nuevas = [columnas[i] for i in pedidos]
+    filas_nuevas = [tuple(filas[0][i] for i in pedidos)]
+    nuevo = crear_estado(
+        pregunta, estado.get("sql", ""), estado.get("kpi", ""),
+        estado.get("unidad", ""), columnas_nuevas, filas_nuevas,
+        previo=estado,
+    )
+    return {"columnas": columnas_nuevas, "filas": filas_nuevas,
+            "estado": nuevo, "sql": estado.get("sql", "")}
+
+
+def sql_con_periodo_nuevo(pregunta: str, historial: list,
+                          contrato: dict) -> str:
+    """Reutiliza el SELECT anterior cambiando únicamente su rango temporal."""
+    actual = periodo_explicito(pregunta)
+    previo = (contrato or {}).get("estado_previo") or ultimo_estado(historial)
+    anterior = dict(previo.get("periodo") or {})
+    sql = str(previo.get("sql", "") or "")
+    if not actual or not anterior or not sql:
+        return ""
+    if (contrato.get("operacion") != contrato.get("operacion_previa")
+            or contrato.get("agrupacion") != contrato.get("agrupacion_previa")):
+        return ""
+    reemplazos = {
+        anterior.get("inicio"): actual.get("inicio"),
+        anterior.get("fin_exclusivo"): actual.get("fin_exclusivo"),
+        anterior.get("fin_inclusivo"): actual.get("fin_inclusivo"),
+    }
+    validos = {str(viejo): str(nuevo) for viejo, nuevo in reemplazos.items()
+               if viejo and nuevo and str(viejo) in sql}
+    if not validos:
+        return ""
+    patron = "|".join(re.escape(v) for v in sorted(validos, key=len, reverse=True))
+    salida = re.sub(patron, lambda m: validos[m.group(0)], sql)
+    return salida
+
+
+def validar_contrato_sql(sql: str, contrato: dict) -> tuple[bool, str]:
+    """Valida la forma mínima prometida por el seguimiento."""
+    if not contrato:
+        return True, ""
+    try:
+        import sqlglot
+        from sqlglot import exp
+        arbol = sqlglot.parse_one(sql, read="postgres")
+    except Exception:
+        return False, "no se pudo analizar el SQL del seguimiento"
+    operacion = contrato.get("operacion")
+    if operacion == "conteo" and not any(arbol.find_all(exp.Count)):
+        return False, "el seguimiento debía conservar un conteo con COUNT"
+    if operacion == "total" and not any(arbol.find_all(exp.Sum)):
+        return False, "el seguimiento debía devolver un total con SUM"
+    dimension = contrato.get("agrupacion")
+    if dimension and operacion in ("ranking", "desglose"):
+        aliases = set(_GRUPOS_FILTRO.get(dimension, (dimension,)))
+        proyectadas = {
+            _nombre(sel.alias_or_name or sel.sql())
+            for sel in arbol.expressions
+        }
+        if not (aliases & proyectadas):
+            return False, f"el seguimiento debía proyectar {dimension}"
+    return True, ""
 
 
 def filtros_unicos(columnas, filas) -> dict:
@@ -356,6 +661,8 @@ def crear_estado(pregunta: str, sql: str, kpi: str, unidad: str,
         "periodo": _periodo_resultado(pregunta, columnas, filas, previo),
         "filas_totales": len(filas),
         "modo": modo_resultado(pregunta, columnas, filas),
+        "operacion": operacion_resultado(pregunta, sql, columnas, filas),
+        "agrupacion": agrupacion_resultado(pregunta, columnas),
         "dimensiones": [str(c) for c in columnas],
         "orden": "consulta",
     }

@@ -320,6 +320,109 @@ def test_periodos_relativos_se_resuelven_con_fecha_del_negocio(monkeypatch):
         "fin_exclusivo": "2026-09-05", "granularidad": "dia",
     }
     assert seguimiento.periodo_explicito("gastos esta semana")["fin_exclusivo"] == "2026-09-06"
+    assert seguimiento.periodo_explicito("y en octubre?") == {
+        "inicio": "2026-10-01", "fin_inclusivo": "2026-10-31",
+        "fin_exclusivo": "2026-11-01", "granularidad": "mes",
+    }
+
+
+def test_estado_conserva_operacion_y_agrupacion_del_resultado():
+    estado = seguimiento.crear_estado(
+        "¿Cuántos movimientos hubo por concepto en agosto 2026?",
+        "SELECT concepto, COUNT(*) AS cantidad FROM movimientos GROUP BY concepto",
+        "", "", ["concepto", "cantidad"], [("Comedera", 17)],
+    )
+    assert estado["operacion"] == "conteo"
+    assert estado["agrupacion"] == "concepto"
+
+
+def test_contrato_cambia_de_categoria_a_ranking_por_concepto():
+    estado = seguimiento.crear_estado(
+        "¿Cuánto gasté en alimentación en agosto 2026?",
+        "SELECT categoria, moneda, SUM(monto) AS gastado FROM movimientos "
+        "WHERE fecha >= DATE '2026-08-01' AND fecha < DATE '2026-09-01' "
+        "GROUP BY categoria, moneda",
+        "", "CRC", ["categoria", "moneda", "gastado"],
+        [("Alimentacion", "CRC", 793457.09)],
+    )
+    contrato = seguimiento.contrato_seguimiento(
+        "¿Y cuál fue el concepto con mayor gasto dentro de esa categoría?",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+        {"relacion": "nueva"},
+    )
+    assert contrato["operacion"] == "ranking"
+    assert contrato["agrupacion"] == "concepto"
+    assert contrato["filtros"]["categoria"] == "Alimentacion"
+    assert contrato["periodo"]["inicio"] == "2026-08-01"
+
+
+def test_contrato_limita_pronombre_a_entidades_del_resultado_anterior():
+    estado = seguimiento.crear_estado(
+        "Tres categorías con mayor gasto en agosto 2026",
+        "SELECT categoria, SUM(monto) AS gastado FROM movimientos GROUP BY categoria",
+        "", "CRC", ["categoria", "gastado"],
+        [("Vivienda", 1700), ("Alimentacion", 790), ("Otros", 500)],
+    )
+    contrato = seguimiento.contrato_seguimiento(
+        "¿Cuál de esas tuvo mayor exceso?",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+    )
+    assert contrato["metrica"] == "exceso"
+    assert contrato["entidades_previas"] == ["Vivienda", "Alimentacion", "Otros"]
+
+
+def test_suma_de_detalle_anterior_se_resuelve_localmente_por_moneda():
+    estado = seguimiento.crear_estado(
+        "Qué movimientos conforman comidas afuera en agosto 2026",
+        "SELECT moneda, monto FROM movimientos",
+        "", "", ["descripcion", "moneda", "monto"],
+        [("A", "CRC", 100), ("B", "CRC", 250), ("C", "USD", 4)],
+    )
+    resultado = seguimiento.resolver_sobre_resultado(
+        "¿Y cuánto suman?",
+        [{"rol": "assistant", "contenido": "detalle", "estado": estado}],
+    )
+    assert resultado["columnas"] == ["moneda", "gastado"]
+    assert ("CRC", Decimal("350")) in resultado["filas"]
+    assert ("USD", Decimal("4")) in resultado["filas"]
+
+
+def test_monto_de_fila_identificada_se_proyecta_sin_nueva_consulta():
+    estado = seguimiento.crear_estado(
+        "Clasificación de Roga del 4 de septiembre de 2026",
+        "SELECT fecha, descripcion, categoria, concepto, moneda, monto FROM movimientos",
+        "", "", ["fecha", "descripcion", "categoria", "concepto", "moneda", "monto"],
+        [("2026-09-04", "ROGA", "Otros", "Salud imprevistos", "CRC", 68000)],
+    )
+    resultado = seguimiento.resolver_sobre_resultado(
+        "¿Cuál fue el monto?",
+        [{"rol": "assistant", "contenido": "detalle", "estado": estado}],
+    )
+    assert resultado["columnas"] == ["monto"]
+    assert resultado["filas"] == [(68000,)]
+
+
+def test_cambio_de_periodo_reutiliza_sql_y_conserva_conteo():
+    sql = (
+        "SELECT COUNT(*) AS cantidad FROM movimientos "
+        "WHERE concepto = 'Comedera' AND fecha >= DATE '2026-08-01' "
+        "AND fecha < DATE '2026-09-01'"
+    )
+    estado = seguimiento.crear_estado(
+        "¿Cuántos gastos de Comedera hubo en agosto 2026?", sql, "", "",
+        ["cantidad"], [(17,)],
+    )
+    historial = [{"rol": "assistant", "contenido": "17", "estado": estado}]
+    contrato = seguimiento.contrato_seguimiento(
+        "¿Y en septiembre de 2026?", historial,
+    )
+    nuevo = seguimiento.sql_con_periodo_nuevo(
+        "¿Y en septiembre de 2026?", historial, contrato,
+    )
+    assert "COUNT(*)" in nuevo
+    assert "2026-09-01" in nuevo
+    assert "2026-10-01" in nuevo
+    assert "2026-08-01" not in nuevo
 
 
 def test_referencia_selecciona_mayor_y_conserva_fila_para_seguimiento():
