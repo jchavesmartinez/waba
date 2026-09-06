@@ -254,6 +254,53 @@ def defaults_de(kpi: dict | None) -> dict:
     return {"moneda": match.group(1).upper()} if match else {}
 
 
+def validar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[bool, str]:
+    """Verifica el contrato del plan contra la metadata, antes de ejecutar SQL.
+
+    La metadata puede declarar ``dimensiones`` y, opcionalmente, ``metricas``
+    (o ``metrica``). Si no los declara, no se inventan restricciones: así una
+    tabla nueva sigue funcionando sin cambios de código. Cuando sí los declara,
+    un KPI incompatible se detiene para pedir aclaración en lugar de devolver un
+    número de otra dimensión.
+    """
+    plan = plan or {}
+    if plan.get("accion") != "usar_kpi":
+        return True, ""
+    nombre = str(plan.get("kpi", "")).strip().lower()
+    elegido = next((k for k in (kpis or [])
+                    if str(k.get("kpi", "")).strip().lower() == nombre), None)
+    if not elegido:
+        return False, "El KPI elegido no está disponible en la metadata."
+
+    def valores(campo: str) -> set[str]:
+        texto = str(elegido.get(campo, "") or "").lower()
+        texto = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
+        return {v for v in re.findall(r"[a-z0-9_]+", texto) if v}
+
+    aliases = {"comercio": "descripcion", "comercios": "descripcion",
+               "registro": "transaccion", "registros": "transaccion"}
+    entidad = aliases.get(str(plan.get("entidad", "")).strip().lower(),
+                          str(plan.get("entidad", "")).strip().lower())
+    dimensiones = valores("dimensiones")
+    if entidad and dimensiones:
+        permitidas = {aliases.get(v, v) for v in dimensiones}
+        if entidad not in permitidas:
+            return False, (
+                f"El KPI '{elegido.get('kpi', nombre)}' no declara la dimensión "
+                f"'{entidad}'. Dimensiones disponibles: {', '.join(sorted(permitidas))}."
+            )
+
+    declaradas_metricas = valores("metricas") | valores("metricas_disponibles")
+    declaradas_metricas |= valores("metrica")
+    metrica = str(plan.get("metrica", "")).strip().lower()
+    if metrica and declaradas_metricas and metrica not in declaradas_metricas:
+        return False, (
+            f"El KPI '{elegido.get('kpi', nombre)}' no declara la métrica '{metrica}'. "
+            f"Métricas disponibles: {', '.join(sorted(declaradas_metricas))}."
+        )
+    return True, ""
+
+
 def admite_periodo_parametrizado(sql: str) -> bool:
     """Indica si una fórmula KPI declara el contrato de período seguro."""
     texto = str(sql or "")

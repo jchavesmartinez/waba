@@ -931,6 +931,25 @@ def test_planificador_exige_y_normaliza_el_contrato_semantico():
     assert plan["entidad"] == "categoria"
 
 
+def test_validacion_semantica_rechaza_dimension_no_declarada():
+    plan = {"accion": "usar_kpi", "kpi": "gasto_categoria",
+            "entidad": "concepto", "metrica": "gastado"}
+    kpis_def = [{"kpi": "gasto_categoria", "dimensiones": "categoria, moneda"}]
+    ok, motivo = kpis.validar_plan_semantico(plan, kpis_def, object())
+    assert not ok
+    assert "concepto" in motivo
+
+
+def test_validacion_semantica_no_restringe_metadata_legacy():
+    plan = {"accion": "usar_kpi", "kpi": "gasto", "entidad": "concepto",
+            "metrica": "gastado"}
+    ok, motivo = kpis.validar_plan_semantico(
+        plan, [{"kpi": "gasto", "dimensiones": ""}], object(),
+    )
+    assert ok
+    assert motivo == ""
+
+
 def test_mencionar_un_concepto_de_la_lista_lo_convierte_en_filtro():
     previo = seguimiento.crear_estado(
         "excesos", "SELECT concepto", "", "CRC",

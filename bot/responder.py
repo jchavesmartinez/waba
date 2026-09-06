@@ -703,6 +703,19 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             # devolver solo totales o repetir el ultimo resumen.
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
 
+    # Validación metadata-driven: un KPI solo se ejecuta si su dimensión y
+    # métrica declaradas son compatibles con el plan. Esto evita que una
+    # selección semántica equivocada produzca un número aparentemente válido.
+    ok_semantica, motivo_semantica = kpis.validar_plan_semantico(
+        plan, kpis_def, ctx,
+    )
+    if not ok_semantica:
+        logger.info("[%s] plan semánticamente incompatible: %s", cid, motivo_semantica)
+        return Respuesta(
+            "No quiero darte un resultado equivocado. "
+            f"{motivo_semantica} ¿Quieres que lo consulte con otra dimensión o métrica?"
+        )
+
     contrato = seguimiento.contrato_seguimiento(
         pregunta_efectiva, historial, plan,
     )
