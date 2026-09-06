@@ -724,6 +724,13 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             # devolver solo totales o repetir el ultimo resumen.
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
 
+    # Reparación metadata-driven: el modelo propone un KPI, pero no puede
+    # combinar una dimensión de uno con la fórmula de otro. Si existe otro KPI
+    # compatible se usa; si no, se genera SQL libre y se valida igual.
+    plan, motivo_reparacion = kpis.reparar_plan_semantico(plan, kpis_def, ctx)
+    if motivo_reparacion:
+        logger.info("[%s] %s", cid, motivo_reparacion)
+
     # Validación metadata-driven: un KPI solo se ejecuta si su dimensión y
     # métrica declaradas son compatibles con el plan. Esto evita que una
     # selección semántica equivocada produzca un número aparentemente válido.

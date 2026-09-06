@@ -301,6 +301,89 @@ def validar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[bool, st
     return True, ""
 
 
+def reparar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[dict, str]:
+    """Alinea el KPI elegido con el contrato que el propio plan declara.
+
+    Gemini decide la intención, pero ocasionalmente combina una dimensión de
+    un KPI con la fórmula de otro (por ejemplo, ``entidad=categoria`` junto a
+    un total general). Ejecutar ese plan produciría una respuesta válida en
+    SQL pero incorrecta para la pregunta. La reparación inspecciona la
+    metadata y las columnas proyectadas por cada fórmula; no contiene nombres
+    de clientes ni frases de preguntas.
+
+    Si no hay una fórmula compatible, se fuerza ``sql_libre`` para que el
+    generador vuelva a construir una consulta sobre el esquema real.
+    """
+    plan = dict(plan or {})
+    if plan.get("accion") != "usar_kpi":
+        return plan, ""
+
+    def tokens(valor) -> set[str]:
+        texto = unicodedata.normalize("NFKD", str(valor or "")).encode(
+            "ascii", "ignore").decode().lower()
+        return set(re.findall(r"[a-z0-9_]+", texto))
+
+    aliases = {"comercio": "descripcion", "comercios": "descripcion",
+               "registro": "transaccion", "registros": "transaccion"}
+    entidad = aliases.get(str(plan.get("entidad", "")).strip().lower(),
+                         str(plan.get("entidad", "")).strip().lower())
+    metrica = str(plan.get("metrica", "")).strip().lower()
+    operacion = str(plan.get("operacion", "")).strip().lower()
+    metric_aliases = {
+        "gastado": {"gastado", "gasto_neto", "monto_neto", "importe", "total_gasto"},
+        "presupuesto": {"presupuesto", "monto_mensual", "mensual", "presupuestado"},
+        "disponible": {"disponible", "saldo", "remanente"},
+        "exceso": {"exceso", "sobregiro"},
+        "conteo": {"conteo", "cantidad", "count", "total_movimientos"},
+    }
+
+    def compatible(kpi: dict) -> tuple[int, str]:
+        dimensiones = tokens(kpi.get("dimensiones"))
+        dimensiones = {aliases.get(x, x) for x in dimensiones}
+        try:
+            formula = sql_canonico(kpi, ctx)
+        except Exception:
+            return -1, ""
+        salida = tokens(formula)
+        # Alias/columnas de la fórmula. La búsqueda sobre el SQL canonizado
+        # también cubre CTEs y expresiones agregadas declaradas en metadata.
+        puntaje = 0
+        if entidad:
+            # KPIs legacy no traen dimensiones en metadata. No los bloqueamos:
+            # el validador de SQL/resultados conserva la barrera posterior.
+            if dimensiones and entidad not in dimensiones:
+                return -1, ""
+            puntaje += 2
+            if entidad in salida:
+                puntaje += 1
+        if metrica:
+            esperadas = metric_aliases.get(metrica, set())
+            if esperadas and not (esperadas & salida):
+                return -1, ""
+            if esperadas:
+                puntaje += 2
+        if operacion in {"ranking", "desglose", "comparacion"} and entidad:
+            puntaje += 1
+        return puntaje, formula
+
+    candidatos = []
+    for kpi in kpis or []:
+        puntaje, formula = compatible(kpi)
+        if puntaje >= 0:
+            candidatos.append((puntaje, kpi, formula))
+    if not candidatos:
+        plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
+        return plan, "ningún KPI de metadata proyecta la dimensión y métrica solicitadas"
+
+    candidatos.sort(key=lambda x: (x[0], str(x[1].get("kpi", ""))), reverse=True)
+    mejor_puntaje, mejor, formula = candidatos[0]
+    elegido = str(plan.get("kpi", "")).strip().lower()
+    if elegido == str(mejor.get("kpi", "")).strip().lower():
+        return plan, ""
+    plan.update(kpi=str(mejor.get("kpi", "")), sql=formula)
+    return plan, f"KPI reparado a '{mejor.get('kpi')}' (compatibilidad {mejor_puntaje})"
+
+
 def admite_periodo_parametrizado(sql: str) -> bool:
     """Indica si una fórmula KPI declara el contrato de período seguro."""
     texto = str(sql or "")
