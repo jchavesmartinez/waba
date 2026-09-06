@@ -463,15 +463,18 @@ def contrato_seguimiento(pregunta: str, historial: list,
     elif re.search(r"\bmonedas?\b", t):
         agrupacion = "moneda"
 
+    # El plan semántico tiene prioridad: ya interpretó la frase completa. Una
+    # referencia a la tabla de presupuesto no debe reemplazar ``gastado`` en
+    # "cuánto gasté por categoría del presupuesto". Las heurísticas de abajo
+    # existen únicamente como fallback cuando el plan no pudo declarar métrica.
     metrica = str((plan or {}).get("metrica") or "")
     if re.search(r"\b(?:exceso|exced|sobregir)\b", t):
         metrica = "exceso"
-    elif re.search(r"\bpresupuesto\b", t):
-        metrica = "presupuesto"
-    elif re.search(r"\b(?:monto|cuanto|gastado|gaste|suman|sumo|total)\b", t):
-        metrica = "gastado"
-    elif re.search(r"\b(?:me pase|se paso|pasar del presupuesto)\b", t):
-        metrica = "exceso"
+    elif not metrica:
+        if re.search(r"\b(?:monto|cuanto|gastado|gaste|suman|sumo|total)\b", t):
+            metrica = "gastado"
+        elif re.search(r"\bpresupuesto\b", t):
+            metrica = "presupuesto"
     if not metrica and pendiente.get("metrica"):
         metrica = str(pendiente["metrica"])
     if es_consulta_composicion(pregunta):

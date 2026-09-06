@@ -287,13 +287,22 @@ def _pide_total_sin_desglose(pregunta: str) -> bool:
     return True
 
 
-def _consolidar_total_si_corresponde(pregunta: str, columnas, filas):
+def _consolidar_total_si_corresponde(pregunta: str, columnas, filas,
+                                     contrato: dict | None = None):
     """Suma filas de detalle cuando la pregunta pide solo el total.
 
     Es una defensa genérica contra un KPI de detalle escogido por el modelo:
     no inventa datos ni altera filtros, únicamente agrega el monto ya devuelto
     por PostgreSQL por moneda.
     """
+    # La operación del contrato ya fue interpretada antes de ejecutar SQL. Es
+    # la fuente de verdad para distinguir un total de un desglose: frases como
+    # "cuánto gasté de cada categoría" no contienen necesariamente "por",
+    # pero claramente piden varias filas. No volver a inferirlo por palabras
+    # evita que una respuesta correcta se colapse y luego sea rechazada.
+    operacion = str((contrato or {}).get("operacion") or "").lower()
+    if operacion in {"desglose", "ranking", "detalle", "comparacion"}:
+        return columnas, filas
     if not _pide_total_sin_desglose(pregunta) or len(filas) <= 1:
         return columnas, filas
     nombres = [str(c).strip().lower().replace(" ", "_") for c in columnas]
@@ -1145,7 +1154,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # localmente los montos exactos por moneda antes de redactar. Esto evita
     # mostrar una lista cuando la intención era un único total.
     columnas, filas = _consolidar_total_si_corresponde(
-        pregunta_efectiva, columnas, filas,
+        pregunta_efectiva, columnas, filas, contrato_universal,
     )
 
     filas = _limitar_top_solicitado(plan.get("kpi", ""), pregunta_efectiva,
@@ -1231,6 +1240,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 pregunta, columnas_texto, muestra_texto, historial=historial, sql=sql,
                 unidad=unidad_kpi,
                 temas_habilitados=catalogo.resumir_habilitados(ctx),
+                contrato=contrato_universal,
             )
     except Exception as e:  # noqa: BLE001
         logger.exception("[%s] error redactando respuesta: %s", cid, e)

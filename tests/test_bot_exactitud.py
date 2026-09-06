@@ -64,6 +64,19 @@ def test_resultado_generico_no_inventa_un_total_que_sql_no_trajo():
     assert "₡300" not in texto
 
 
+def test_mencionar_presupuesto_no_cambia_la_metrica_gastado():
+    """La tabla presupuestaria puede ser el origen, no la métrica pedida."""
+    texto = nl2sql.redactar_respuesta(
+        "cuanto he gastado por categoria del presupuesto para setiembre 2026",
+        ["moneda", "categoria", "gasto_neto"],
+        [("CRC", "Vivienda", 1_648_992), ("CRC", "Alimentacion", 80_953)],
+        unidad="CRC",
+        contrato={"operacion": "desglose", "metrica": "gastado", "entidad": "categoria"},
+    )
+    assert texto.startswith("Tus gastos de septiembre 2026 son:")
+    assert not texto.startswith("Presupuesto")
+
+
 def test_movimientos_se_agrupan_para_leerse_bien_en_whatsapp():
     columnas = ["fecha", "descripcion", "monto_usd", "titular", "categoria"]
     filas = [

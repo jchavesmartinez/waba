@@ -455,6 +455,20 @@ def test_aclaracion_posterior_recupera_ranking_y_dimension_concepto():
     assert contrato["periodo"]["inicio"] == "2026-08-01"
 
 
+def test_seguimiento_no_confunde_tabla_presupuesto_con_metrica_gastado():
+    estado = seguimiento.crear_estado(
+        "gastos por categoría", "SELECT categoria, gastado", "", "CRC",
+        ["categoria", "gastado"], [("Alimentacion", 100)],
+    )
+    contrato = seguimiento.contrato_seguimiento(
+        "¿Y cuánto he gastado por categoría del presupuesto?",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+        {"relacion": "seguimiento", "operacion": "desglose",
+         "metrica": "gastado", "entidad": "categoria"},
+    )
+    assert contrato["metrica"] == "gastado"
+
+
 def test_todo_eso_cuanto_da_suma_el_detalle_anterior():
     estado = seguimiento.crear_estado(
         "Que compras forman eso", "SELECT detalle", "", "CRC",
@@ -966,6 +980,18 @@ def test_validar_resultado_acepta_contrato_compatible():
     )
     assert ok
     assert motivo == ""
+
+
+def test_desglose_por_cada_categoria_no_se_colapsa_a_un_total():
+    """Regresión: "cuánto gasté de cada categoría" debe conservar categorías."""
+    columnas, filas = R._consolidar_total_si_corresponde(
+        "cuanto he gastado de cada categoria este mes?",
+        ["moneda", "categoria", "gasto_neto"],
+        [("CRC", "Vivienda", 100), ("CRC", "Alimentacion", 50)],
+        {"operacion": "desglose", "metrica": "gastado", "entidad": "categoria"},
+    )
+    assert columnas == ["moneda", "categoria", "gasto_neto"]
+    assert len(filas) == 2
 
 
 def test_validar_resultado_acepta_detalle_de_transacciones_sin_id_tecnico():

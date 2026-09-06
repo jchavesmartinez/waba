@@ -1059,18 +1059,44 @@ def _analisis_tendencia_local(columnas, filas, unidad: str = "") -> str | None:
     return "\n".join(x for x in lineas if x)
 
 
-def _contexto_respuesta(pregunta: str) -> str:
-    """Confirma el alcance interpretado sin repetir literalmente la pregunta."""
+def _contexto_respuesta(pregunta: str, contrato: dict | None = None,
+                        columnas=None) -> str:
+    """Confirma el alcance ejecutado, no palabras sueltas de la pregunta.
+
+    ``presupuesto`` puede nombrar la estructura de categorías o la métrica que
+    desea ver. Cuando existe un contrato semántico, este resuelve esa
+    ambigüedad: ``gastado`` siempre se presenta como gasto aunque la pregunta
+    mencione la tabla de presupuesto. Para llamadas antiguas se infiere solo
+    desde las columnas devueltas por SQL.
+    """
     texto = str(pregunta or "").lower()
     meses = ("enero", "febrero", "marzo", "abril", "mayo", "junio",
-             "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre")
-    periodo = next((f"{m} {y}" for m in meses for y in re.findall(rf"\b{m}\s+(\d{{4}})\b", texto)), None)
-    metrica = "gastos" if re.search(r"\bgast", texto) else "resultados"
+             "julio", "agosto", "septiembre", "setiembre", "octubre",
+             "noviembre", "diciembre")
+    periodo = next((
+        f"septiembre {y}" if m == "setiembre" else f"{m} {y}"
+        for m in meses for y in re.findall(rf"\b{m}\s+(\d{{4}})\b", texto)
+    ), None)
+    nombres = {str(c).strip().lower().replace(" ", "_") for c in (columnas or [])}
+    metrica_contrato = str((contrato or {}).get("metrica") or "").strip().lower()
+    if metrica_contrato == "gastado":
+        metrica = "gastos"
+    elif metrica_contrato == "presupuesto":
+        metrica = "presupuesto"
+    elif metrica_contrato == "disponible":
+        metrica = "disponible"
+    elif re.search(r"\bgast", texto) or any(
+            n in nombres for n in ("gasto_neto", "gastado", "monto_neto")):
+        metrica = "gastos"
+    elif any("presupuesto" in n or n in {"monto_mensual", "mensual"} for n in nombres):
+        metrica = "presupuesto"
+    else:
+        metrica = "resultados"
     agrupacion = " por comercio" if re.search(r"\bpor\s+comercio", texto) else ""
     if re.search(r"sobregir|exced", texto):
         sujeto = "las categorías que excedieron el presupuesto"
         return f"Estas son {sujeto} de {periodo}:" if periodo else f"Estas son {sujeto}:"
-    if "presupuesto" in texto:
+    if metrica == "presupuesto":
         return f"Presupuesto de {periodo}:" if periodo else "Presupuesto:"
     if periodo:
         return f"Tus {metrica} de {periodo}{agrupacion} son:"
@@ -1080,24 +1106,25 @@ def _contexto_respuesta(pregunta: str) -> str:
 
 
 def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | None = None,
-                              compacto: bool = False, pregunta: str = "") -> str:
+                              compacto: bool = False, pregunta: str = "",
+                              contrato: dict | None = None) -> str:
     """Presenta las celdas ejecutadas sin pedirle aritmetica ni datos al LLM."""
     if not filas:
         return "No encontré registros para ese filtro."
 
     if compacto:
         resultado = _resultado_compacto(columnas, filas, unidad)
-        contexto = _contexto_respuesta(pregunta) if pregunta else ""
+        contexto = _contexto_respuesta(pregunta, contrato, columnas) if pregunta else ""
         return f"{contexto}\n\n{resultado}" if contexto else resultado
 
     presupuesto = _presupuesto_formateado(columnas, filas, unidad)
     if presupuesto:
-        contexto = _contexto_respuesta(pregunta) if pregunta else ""
+        contexto = _contexto_respuesta(pregunta, contrato, columnas) if pregunta else ""
         return f"{contexto}\n\n{presupuesto}" if contexto else presupuesto
 
     movimientos = _resultado_movimientos(columnas, filas, unidad, tope)
     if movimientos:
-        contexto = _contexto_respuesta(pregunta) if pregunta else ""
+        contexto = _contexto_respuesta(pregunta, contrato, columnas) if pregunta else ""
         return f"{contexto}\n\n{movimientos}" if contexto else movimientos
 
     serie = _resultado_serie_temporal(columnas, filas, unidad)
@@ -1114,7 +1141,7 @@ def redactar_resultado_exacto(columnas, filas, unidad: str = "", tope: int | Non
     # Todas las tablas comparten la misma presentación móvil; no se limita la
     # cantidad aquí porque WhatsApp divide el texto largo en varios mensajes.
     resultado = _resultado_lista(columnas, filas, unidad, tope)
-    contexto = _contexto_respuesta(pregunta) if pregunta else ""
+    contexto = _contexto_respuesta(pregunta, contrato, columnas) if pregunta else ""
     return f"{contexto}\n\n{resultado}" if contexto else resultado
 
 
@@ -1129,7 +1156,8 @@ def es_resultado_no_respondible(columnas, filas) -> bool:
 
 
 def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
-                       unidad: str = "", temas_habilitados: str = "") -> str:
+                       unidad: str = "", temas_habilitados: str = "",
+                       contrato: dict | None = None) -> str:
     """
     Convierte el SELECT en texto sin permitir una segunda interpretacion numerica.
 
@@ -1158,6 +1186,7 @@ def redactar_respuesta(pregunta: str, columnas, filas, historial=None, sql="",
     )
     return redactar_resultado_exacto(
         columnas, filas, unidad=unidad, compacto=compacto, pregunta=pregunta,
+        contrato=contrato,
     )
 
 
