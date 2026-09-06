@@ -45,7 +45,8 @@ _KPIS_COLS = ("kpi", "nombre", "descripcion", "preguntas_ejemplo",
               "supuestos", "minimo_datos", "instruccion",
               "tipo_resultado", "detalle_kpi", "clave_entidad",
               "orden_default", "periodo_default", "moneda_default",
-              "aliases")
+              "aliases", "metricas", "operaciones_permitidas",
+              "relaciones", "sinonimos")
 
 # La metadata de edicion es opcional y vive junto a la documentacion del
 # catalogo. Conservarla como datos (en vez de codificarla para una tabla en
@@ -59,6 +60,12 @@ _CATALOGO_COLS = (
     "requerido", "editable_campo", "tipo_validacion",
     "valores_permitidos", "valor_por_defecto", "calculado_por_sistema",
     "generador", "etiqueta_usuario", "ejemplo", "valores_consulta",
+    # Contrato semántico de lectura. Son opcionales: un catálogo ya existente
+    # conserva compatibilidad, y uno nuevo puede declarar cómo consultar cada
+    # tabla sin crear código por cliente.
+    "sinonimos", "dimension", "metrica", "relacion_tablas",
+    "periodo_predeterminado", "agrupacion_predeterminada",
+    "operaciones_permitidas", "campos_calculados",
 )
 
 

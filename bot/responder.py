@@ -38,7 +38,7 @@ from collections import defaultdict
 
 import config
 import registry
-from bot import (artefactos, catalogo, correo, dashboard, edicion, formato, intencion, kpis,
+from bot import (artefactos, catalogo, contrato_consulta, correo, dashboard, edicion, ejecutor_consultas, formato, intencion, kpis,
                  memoria, nl2sql, seguimiento, warehouse_ro)
 from bot.salida import Respuesta
 from bot.tiempo import fecha_local
@@ -759,6 +759,27 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 accion="reutilizar_sql", kpi="", sql=sql_periodo, mensaje="",
             )
 
+    # Esta es la única representación que viaja hacia la ejecución y queda
+    # guardada para el siguiente turno. Prosa, SQL y filas no pueden modificar
+    # sus filtros ni su período.
+    contrato_universal = contrato_consulta.crear({
+        "operacion": (contrato or {}).get("operacion") or plan.get("operacion"),
+        "metrica": (contrato or {}).get("metrica") or plan.get("metrica"),
+        "entidad": (contrato or {}).get("agrupacion") or plan.get("entidad"),
+        "filtros": (contrato or {}).get("filtros") or plan.get("filtros_actuales"),
+        "periodo": (contrato or {}).get("periodo") or seguimiento.periodo_explicito(pregunta_efectiva),
+        "relacion": plan.get("relacion", "nueva"),
+    }, previo=seguimiento.ultimo_estado(historial))
+    ok_contrato_universal, motivo_contrato_universal = contrato_consulta.es_valido(
+        contrato_universal,
+    )
+    if not ok_contrato_universal:
+        logger.info("[%s] contrato de consulta incompleto: %s", cid, motivo_contrato_universal)
+        return Respuesta(
+            "Para responderte con precisión necesito una aclaración: "
+            f"{motivo_contrato_universal}."
+        )
+
     estado_previo = seguimiento.contexto_segun_plan(historial, plan)
     relacion_plan = plan.get("relacion", "nueva")
     tope_historial_sql = max(
@@ -927,17 +948,17 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         sql = nl2sql.generar_sql(
             pregunta_sql, ctx.schema_text, historial=historial_sql,
         )
-        ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
-        if ok:
-            ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
+        ok, motivo = ejecutor_consultas.validar(
+            sql, pregunta_efectiva, ctx, contrato_universal,
+        )
         if not ok:
             logger.info("[%s] SQL rechazado (%s); reintento. sql=%s", cid, motivo, sql)
             sql = nl2sql.generar_sql(pregunta_sql, ctx.schema_text,
                                      correccion=motivo, sql_previo=sql,
                                      historial=historial_sql)
-            ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
-            if ok:
-                ok, motivo = nl2sql.validar_granularidad(pregunta_efectiva, sql)
+            ok, motivo = ejecutor_consultas.validar(
+                sql, pregunta_efectiva, ctx, contrato_universal,
+            )
             if not ok:
                 logger.warning("[%s] SQL invalido tras reintento (%s): %s", cid, motivo, sql)
                 return Respuesta(_no_seguro(catalogo.resumir_habilitados(ctx)))
@@ -1134,7 +1155,9 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             and len(filas) > 1):
         filas = filas[:1]
 
-    contexto_resultado = dict(estado_previo or {})
+    contexto_resultado = dict(contrato_universal)
+    contexto_resultado["filtros"] = dict(contrato_universal.get("filtros") or {})
+    contexto_resultado["filtros"].update((estado_previo or {}).get("filtros") or {})
     # El contrato del plan acompaña al resultado hasta la última barrera:
     # validar antes de redactar evita presentar una respuesta válida en SQL
     # pero equivocada en dimensión o métrica.
@@ -1190,6 +1213,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         referencia_temporal=(contrato or {}).get("referencia_temporal") or None,
         relacion_temporal=(contrato or {}).get("relacion_temporal") or None,
     )
+    estado_resultado["contrato"] = contrato_consulta.copiar(contrato_universal)
     estado_resultado["query_id"] = query_id
     try:
         if sql_reutilizado and fmt != formato.TEXTO:

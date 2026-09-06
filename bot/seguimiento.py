@@ -15,6 +15,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
+from bot import contrato_consulta
 from bot.tiempo import fecha_local
 
 
@@ -409,11 +410,12 @@ def contrato_seguimiento(pregunta: str, historial: list,
     t = _normalizar(pregunta)
     periodo_nuevo = periodo_explicito(pregunta)
     pendiente = previo.get("pendiente") if isinstance(previo.get("pendiente"), dict) else {}
-    operacion_previa = str(previo.get("operacion") or "resumen")
-    metrica_previa = str(previo.get("metrica") or metrica_resultado(
+    contrato_previo = dict(previo.get("contrato") or {})
+    operacion_previa = str(contrato_previo.get("operacion") or previo.get("operacion") or "resumen")
+    metrica_previa = str(contrato_previo.get("metrica") or previo.get("metrica") or metrica_resultado(
         previo.get("columnas") or [],
     ))
-    agrupacion_previa = str(previo.get("agrupacion") or "")
+    agrupacion_previa = str(contrato_previo.get("entidad") or previo.get("agrupacion") or "")
     operacion = str(
         (plan or {}).get("operacion") or pendiente.get("operacion")
         or operacion_previa
@@ -481,7 +483,7 @@ def contrato_seguimiento(pregunta: str, historial: list,
         referencia_temporal = dict(previo.get("referencia_temporal") or referencia_temporal)
     if relacion_temporal and re.search(r"\bcuanto\b", t):
         operacion = "total"
-    filtros = dict(previo.get("filtros") or {})
+    filtros = dict(contrato_previo.get("filtros") or previo.get("filtros") or {})
     filtros_actuales = dict((plan or {}).get("filtros_actuales") or {})
     categoria_actual = filtros_actuales.get("categoria")
     concepto_actual = filtros_actuales.get("concepto")
@@ -524,7 +526,7 @@ def contrato_seguimiento(pregunta: str, historial: list,
                 if valor not in (None, "") and str(valor) not in entidades:
                     entidades.append(str(valor))
 
-    return {
+    resultado = {
         "operacion_previa": operacion_previa,
         "operacion": operacion,
         "agrupacion_previa": agrupacion_previa,
@@ -544,6 +546,15 @@ def contrato_seguimiento(pregunta: str, historial: list,
         ),
         "estado_previo": previo,
     }
+    resultado["contrato"] = contrato_consulta.crear({
+        "operacion": operacion,
+        "metrica": metrica,
+        "entidad": agrupacion,
+        "filtros": filtros,
+        "periodo": resultado["periodo"],
+        "relacion": "seguimiento",
+    }, previo=contrato_previo)
+    return resultado
 
 
 def instruccion_contrato(contrato: dict) -> str:
