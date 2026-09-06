@@ -3,7 +3,7 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from bot import formato, kpis, seguimiento
+from bot import contrato_consulta, formato, kpis, seguimiento
 from bot import responder as R
 
 
@@ -356,6 +356,42 @@ def test_contrato_cambia_de_categoria_a_ranking_por_concepto():
     assert contrato["periodo"]["inicio"] == "2026-08-01"
 
 
+def test_seguimiento_promueve_filtros_confirmados_por_el_resultado():
+    estado = seguimiento.crear_estado(
+        "gasto", "SELECT categoria, moneda, gastado", "", "",
+        ["categoria", "moneda", "gastado"], [("Alimentacion", "CRC", 100)],
+    )
+    estado["contrato"] = {
+        "operacion": "total", "metrica": "gastado", "entidad": "categoria",
+        "filtros": {"categoria": "Alimentacion"}, "periodo": {}, "relacion": "nueva",
+    }
+    contrato = seguimiento.contrato_seguimiento(
+        "¿Y en septiembre de 2026?",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+        {"relacion": "seguimiento", "operacion": "total", "metrica": "gastado"},
+    )
+    assert contrato["filtros"]["moneda"] == "CRC"
+
+
+def test_pregunta_relativa_sin_pronombre_conserva_el_contrato_activo():
+    estado = seguimiento.crear_estado(
+        "transporte", "SELECT categoria, moneda, gastado", "", "",
+        ["categoria", "moneda", "gastado"], [("Transporte", "CRC", 100)],
+    )
+    estado["contrato"] = {
+        "operacion": "total", "metrica": "gastado", "entidad": "categoria",
+        "filtros": {"categoria": "Transporte"}, "periodo": {}, "relacion": "nueva",
+    }
+    contrato = seguimiento.contrato_seguimiento(
+        "¿Cuál fue el comercio con mayor gasto?",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+        {"relacion": "nueva", "operacion": "ranking", "metrica": "gastado",
+         "entidad": "descripcion", "filtros_actuales": {}},
+    )
+    assert contrato["agrupacion"] == "descripcion"
+    assert contrato["filtros"]["categoria"] == "Transporte"
+
+
 def test_contrato_limita_pronombre_a_entidades_del_resultado_anterior():
     estado = seguimiento.crear_estado(
         "Tres categorías con mayor gasto en agosto 2026",
@@ -400,6 +436,19 @@ def test_monto_de_fila_identificada_se_proyecta_sin_nueva_consulta():
     )
     assert resultado["columnas"] == ["monto"]
     assert resultado["filas"] == [(68000,)]
+
+
+def test_descripcion_de_fila_identificada_se_proyecta_sin_nueva_consulta():
+    estado = seguimiento.crear_estado(
+        "movimiento", "SELECT fecha, descripcion, monto FROM movimientos", "", "",
+        ["fecha", "descripcion", "monto"], [("2026-09-05", "Escritorio", 109500)],
+    )
+    resultado = seguimiento.resolver_sobre_resultado(
+        "¿Cuál fue su descripción?",
+        [{"rol": "assistant", "contenido": "detalle", "estado": estado}],
+    )
+    assert resultado["columnas"] == ["descripcion"]
+    assert resultado["filas"] == [("Escritorio",)]
 
 
 def test_cambio_de_periodo_reutiliza_sql_y_conserva_conteo():
@@ -607,6 +656,18 @@ def test_referencia_selecciona_mayor_y_conserva_fila_para_seguimiento():
     )
     assert resultado["filas"] == [("B", 900, 1000)]
     assert resultado["estado"]["seleccion"]["criterio"] == "mayor"
+
+
+def test_referencia_cual_tuvo_mayor_se_resuelve_sobre_desglose_verificado():
+    estado = seguimiento.crear_estado(
+        "gastos por categoría", "SELECT categoria, gastado", "", "CRC",
+        ["categoria", "gastado"], [("Alimentacion", 100), ("Vivienda", 900)],
+    )
+    resultado = seguimiento.resolver_referencia(
+        "¿Cuál tuvo mayor gasto?",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+    )
+    assert resultado["filas"] == [("Vivienda", 900)]
 
 
 def test_total_simple_consolida_movimientos_por_moneda():
@@ -1034,3 +1095,85 @@ def test_reconciliacion_actualiza_exceso_con_monto_ejecutado():
         {"concepto:comidas afuera": 220000},
     )
     assert filas == [("Comidas afuera", 220000, 305270, 85270)]
+
+
+def test_delta_conserva_todos_los_filtros_y_periodo_verificados():
+    previo = {
+        "operacion": "total", "metrica": "gastado", "entidad": "concepto",
+        "filtros": {"categoria": "Alimentacion", "concepto": "Comedera",
+                     "moneda": "CRC"},
+        "periodo": {"inicio": "2026-08-01", "fin_exclusivo": "2026-09-01"},
+    }
+    delta = contrato_consulta.aplicar_delta(
+        "¿Y cuánto queda?", previo,
+        {"relacion": "seguimiento", "metrica": "gastado",
+         "filtros_actuales": {}},
+    )
+    contrato = delta["contrato"]
+    assert contrato["metrica"] == "disponible"
+    assert contrato["filtros"] == previo["filtros"]
+    assert contrato["periodo"] == previo["periodo"]
+
+
+def test_delta_ignora_un_filtro_propuesto_que_no_escribio_el_usuario():
+    previo = {
+        "operacion": "total", "metrica": "gastado", "entidad": "categoria",
+        "filtros": {"categoria": "Alimentacion"}, "periodo": {},
+    }
+    delta = contrato_consulta.aplicar_delta(
+        "¿Y cuánto gasté?", previo,
+        {"relacion": "seguimiento", "filtros_actuales": {"categoria": "Otros"}},
+    )
+    assert delta["contrato"]["filtros"] == {"categoria": "Alimentacion"}
+
+
+def test_delta_pide_aclaracion_antes_de_reemplazar_un_filtro_con_suma():
+    previo = {
+        "operacion": "total", "metrica": "gastado", "entidad": "categoria",
+        "filtros": {"categoria": "Vivienda"}, "periodo": {},
+    }
+    delta = contrato_consulta.aplicar_delta(
+        "¿Y si sumo Deudas?", previo,
+        {"relacion": "seguimiento", "filtros_actuales": {"categoria": "Deudas"}},
+    )
+    assert "combinar" in delta["ambiguedad"].lower()
+    assert delta["contrato"]["filtros"] == {"categoria": "Vivienda"}
+
+
+def test_pregunta_nueva_no_hereda_el_contrato_anterior():
+    previo = {
+        "operacion": "total", "metrica": "gastado", "entidad": "categoria",
+        "filtros": {"categoria": "Alimentacion"},
+        "periodo": {"inicio": "2026-08-01", "fin_exclusivo": "2026-09-01"},
+    }
+    delta = contrato_consulta.aplicar_delta(
+        "¿Cuántos movimientos hubo en septiembre de 2026?", previo,
+        {"relacion": "nueva", "operacion": "conteo", "metrica": "conteo",
+         "entidad": "transaccion", "filtros_actuales": {}},
+        periodo={"inicio": "2026-09-01", "fin_exclusivo": "2026-10-01"},
+    )
+    assert not delta["es_seguimiento"]
+    assert delta["contrato"]["filtros"] == {}
+    assert delta["contrato"]["periodo"]["inicio"] == "2026-09-01"
+
+
+def test_delta_prioriza_detalle_sobre_la_referencia_al_total_anterior():
+    previo = {
+        "operacion": "total", "metrica": "gastado", "entidad": "concepto",
+        "filtros": {"concepto": "Comedera"}, "periodo": {},
+    }
+    delta = contrato_consulta.aplicar_delta(
+        "¿Qué transacciones forman ese total?", previo,
+        {"relacion": "seguimiento", "operacion": "total", "metrica": "gastado"},
+    )
+    assert delta["contrato"]["operacion"] == "detalle"
+    assert delta["contrato"]["metrica"] == "gastado"
+
+
+def test_contrato_nuevo_prioriza_metrica_presupuesto_explicita():
+    contrato = contrato_consulta.aplicar_delta(
+        "¿Cuánto presupuesto tiene un concepto este mes?", None,
+        {"operacion": "total", "metrica": "gastado", "entidad": "concepto",
+         "relacion": "nueva", "filtros_actuales": {}},
+    )["contrato"]
+    assert contrato["metrica"] == "presupuesto"

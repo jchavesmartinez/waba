@@ -43,6 +43,13 @@ _MESES = {
     "junio": 6, "julio": 7, "agosto": 8, "septiembre": 9,
     "setiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
 }
+_ORDINALES = {
+    "primero": 1, "primera": 1, "segundo": 2, "segunda": 2,
+    "tercero": 3, "tercera": 3, "cuarto": 4, "cuarta": 4,
+    "quinto": 5, "quinta": 5, "sexto": 6, "sexta": 6,
+    "septimo": 7, "septima": 7, "octavo": 8, "octava": 8,
+    "noveno": 9, "novena": 9, "decimo": 10, "decima": 10,
+}
 
 
 def _normalizar(valor) -> str:
@@ -79,6 +86,15 @@ def _decimal(valor) -> Decimal | None:
         return None
 
 
+def _ordinal_mencionado(texto: str) -> int | None:
+    """Obtiene una posición humana sin depender del dominio de datos."""
+    for palabra, numero in _ORDINALES.items():
+        if re.search(rf"\b{palabra}\b", texto):
+            return numero
+    match = re.search(r"\b(\d{1,3})(?:ro|do|to|er|a|o)?\b", texto)
+    return int(match.group(1)) if match else None
+
+
 def _indice(columnas, candidatos) -> int | None:
     nombres = [_nombre(c) for c in columnas]
     return next((nombres.index(c) for c in candidatos if c in nombres), None)
@@ -107,6 +123,16 @@ def contexto_segun_plan(historial: list, plan: dict) -> dict:
     previo = ultimo_estado(historial)
     if not previo:
         return {}
+    # Si el orquestador ya construyó un contrato universal, éste es la única
+    # autoridad para memoria. ``heredar_filtros`` es sólo una propuesta del
+    # planificador; no puede recortar un filtro verificado del turno previo.
+    contrato = (plan or {}).get("contrato_universal") or {}
+    if contrato and str(contrato.get("relacion")) in ("seguimiento", "modificacion"):
+        return {
+            "kpi": previo.get("kpi", "") if plan.get("heredar_kpi") else "",
+            "filtros": dict(contrato.get("filtros") or {}),
+            "periodo": dict(contrato.get("periodo") or {}),
+        }
     disponibles = previo.get("filtros") or {}
     solicitados = (plan or {}).get("heredar_filtros") or []
     filtros = {
@@ -419,14 +445,14 @@ def contrato_seguimiento(pregunta: str, historial: list,
     """
     previo = ultimo_estado(historial)
     relacion = str((plan or {}).get("relacion", "nueva"))
-    if not previo or not (_es_frase_seguimiento(pregunta) or relacion in (
-            "seguimiento", "modificacion")):
+    contrato_previo = dict(previo.get("contrato") or {}) if previo else {}
+    if not previo or not contrato_consulta.es_seguimiento(
+            pregunta, contrato_previo or previo, plan):
         return {}
 
     t = _normalizar(pregunta)
     periodo_nuevo = periodo_explicito(pregunta)
     pendiente = previo.get("pendiente") if isinstance(previo.get("pendiente"), dict) else {}
-    contrato_previo = dict(previo.get("contrato") or {})
     operacion_previa = str(contrato_previo.get("operacion") or previo.get("operacion") or "resumen")
     metrica_previa = str(contrato_previo.get("metrica") or previo.get("metrica") or metrica_resultado(
         previo.get("columnas") or [],
@@ -545,6 +571,69 @@ def contrato_seguimiento(pregunta: str, historial: list,
                 if valor not in (None, "") and str(valor) not in entidades:
                     entidades.append(str(valor))
 
+    # La etapa anterior usó el plan para sugerir una interpretación. Ahora se
+    # aplica un delta sobre el contrato ya verificado: todo campo no declarado
+    # explícitamente queda intacto. Esto evita que un `heredar_filtros`
+    # incompleto o una métrica mal propuesta por Gemini borren contexto.
+    recuperados = {}
+    if (not (plan or {}).get("filtros_actuales", {}).get("concepto")
+            and concepto_actual):
+        recuperados["concepto"] = concepto_actual
+    filtros_verificados = dict(previo.get("filtros") or {})
+    # El contrato declara los filtros que ya habían sido interpretados; el
+    # estado añade dimensiones que la ejecución confirmó (por ejemplo, la
+    # moneda única de un KPI). Ambos son datos verificados y no pueden
+    # perderse al pasar al siguiente turno.
+    filtros_verificados.update(contrato_previo.get("filtros") or {})
+    previo_delta = {
+        "operacion": operacion_previa,
+        "metrica": metrica_previa,
+        "entidad": agrupacion_previa,
+        "filtros": filtros_verificados,
+        "periodo": dict(contrato_previo.get("periodo") or previo.get("periodo") or {}),
+        "relacion": "seguimiento",
+    }
+    propuesta_delta = dict(plan or {})
+    # Una aclaración responde a una intención pendiente que ya fue mostrada;
+    # no permitimos que un plan nuevo la degrade a un total genérico.
+    if pendiente.get("operacion") and str((plan or {}).get("relacion", "nueva")) == "nueva":
+        propuesta_delta["operacion"] = pendiente["operacion"]
+    if pendiente.get("metrica"):
+        propuesta_delta.setdefault("metrica", pendiente["metrica"])
+    delta = contrato_consulta.aplicar_delta(
+        pregunta, previo_delta, propuesta_delta,
+        periodo=periodo_nuevo,
+        filtros_adicionales=recuperados,
+    )
+    contrato_delta = delta.get("contrato") or {}
+    if delta.get("ambiguedad"):
+        return {
+            "aclaracion": str(delta["ambiguedad"]),
+            "estado_previo": previo,
+            "contrato": contrato_delta,
+        }
+    operacion = str(contrato_delta.get("operacion") or operacion)
+    metrica = str(contrato_delta.get("metrica") or metrica)
+    agrupacion = str(contrato_delta.get("entidad") or agrupacion)
+    filtros = dict(contrato_delta.get("filtros") or filtros)
+    periodo_final = dict(contrato_delta.get("periodo") or periodo_nuevo
+                         or previo.get("periodo") or {})
+    # Cambiar a una categoría amplia reemplaza el concepto/llave específica
+    # anterior. Es una regla de jerarquía declarada por las dimensiones, no un
+    # nombre de negocio; impide conservar dos niveles contradictorios.
+    if "categoria" in (delta.get("cambios", {}).get("filtros") or {}):
+        for clave in ("linea_id", "concepto", "descripcion"):
+            filtros.pop(clave, None)
+    elif (re.search(r"\b(?:toda|todo|completa|completo|entera|entero)\b", t)
+          and filtros.get("categoria")):
+        for clave in ("linea_id", "concepto", "descripcion"):
+            filtros.pop(clave, None)
+    if "concepto" in (delta.get("cambios", {}).get("filtros") or {}):
+        for clave in ("linea_id", "descripcion"):
+            filtros.pop(clave, None)
+    if relacion_temporal and operacion in ("total", "conteo"):
+        filtros.pop("descripcion", None)
+
     resultado = {
         "operacion_previa": operacion_previa,
         "operacion": operacion,
@@ -553,7 +642,7 @@ def contrato_seguimiento(pregunta: str, historial: list,
         "metrica": metrica,
         "metrica_previa": metrica_previa,
         "filtros": filtros,
-        "periodo": periodo_nuevo or dict(previo.get("periodo") or {}),
+        "periodo": periodo_final,
         "periodo_cambiado": bool(periodo_nuevo),
         "entidades_previas": entidades,
         "referencia_temporal": referencia_temporal,
@@ -630,16 +719,24 @@ def resolver_referencia(pregunta: str, historial: list):
     # que este resolver haya seleccionado una fila explícita.
     if tiene_periodo_explicito(pregunta):
         return None
+    ordinal_solicitado = _ordinal_mencionado(t)
     seleccion_explicita = bool(re.search(
         r"\b(?:primero|primera|ultimo|ultima|mayor|menor|mas\s+car[oa]|"
-        r"que\s+mas|que\s+menos)\b",
+        r"que\s+mas|que\s+menos|segundo|segunda|tercero|tercera|cuarto|cuarta|"
+        r"quinto|quinta|sexto|sexta|septimo|septima|octavo|octava|noveno|novena|"
+        r"decimo|decima)\b",
         t,
-    ))
+    )) or ordinal_solicitado is not None
     if not seleccion_explicita and not estado.get("seleccion"):
         return None
     if not re.search(
         r"\b(?:el|la|los|las)\s+(?:primero|primera|ultimo|ultima|mayor|menor|"
-        r"mas\s+car[oa]|que\s+mas|que\s+menos)\b|"
+        r"mas\s+car[oa]|que\s+mas|que\s+menos|segundo|segunda|tercero|tercera|"
+        r"cuarto|cuarta|quinto|quinta|sexto|sexta|septimo|septima|octavo|octava|"
+        r"noveno|novena|decimo|decima)\b|"
+        r"\b(?:cual|cu[aá]l)\b.*\b(?:mayor|menor|mas|menos|primero|primera|"
+        r"segundo|segunda|tercero|tercera|cuarto|cuarta|quinto|quinta|sexto|sexta|"
+        r"septimo|septima|octavo|octava|noveno|novena|decimo|decima)\b|"
         r"\b(?:su|ese|esa|esos|esas|de\s+esos|de\s+esas)\b",
         t,
     ) and not re.search(
@@ -673,7 +770,22 @@ def resolver_referencia(pregunta: str, historial: list):
     i_disponible = _indice_numerico(columnas, ("disponible", "saldo"))
     indice = 0
     criterio = "primero"
-    if re.search(r"\b(?:ultimo|ultima)\b", t):
+    ordinal = ordinal_solicitado
+    if ordinal:
+        # La posición sólo es segura cuando todas las filas que la consulta
+        # produjo están presentes en el estado. No se inventa un sexto valor
+        # a partir de un top-5 truncado.
+        if int(estado.get("filas_totales", len(filas))) != len(filas) or ordinal > len(filas):
+            mostradas = len(filas)
+            return {
+                "aclaracion": (
+                    f"Te mostré {mostradas} resultados. ¿Quieres que amplíe "
+                    f"la lista hasta el número {ordinal}?"
+                ),
+                "estado": estado,
+            }
+        indice, criterio = ordinal - 1, f"posicion_{ordinal}"
+    elif re.search(r"\b(?:ultimo|ultima)\b", t):
         indice, criterio = len(filas) - 1, "ultimo"
     elif re.search(r"\b(?:menor|menos)\b", t):
         i = i_disponible if "disponible" in t and i_disponible is not None else i_gastado
@@ -722,6 +834,12 @@ def resolver_sobre_resultado(pregunta: str, historial: list):
         r"\b(?:cuanto suman|cuanto suma|totalizan|suman|sumo|"
         r"todo eso cuanto da|cuanto da|cuanto es)\b", t,
     ))
+    # «sumo esas» reutiliza el conjunto visible; «sumo Deudas» introduce un
+    # valor nuevo y debe llegar al intérprete de deltas para decidir si se
+    # combina o se sustituye el filtro previo. No lo colapses al total actual.
+    if (pide_suma and re.search(r"\bsumo\b", t)
+            and not re.search(r"\b(?:eso|esa|ese|esas|esos)\b", t)):
+        return None
     if pide_suma:
         if int(estado.get("filas_totales", len(filas))) != len(filas):
             return None
@@ -796,6 +914,7 @@ def resolver_sobre_resultado(pregunta: str, historial: list):
                         "sql": estado.get("sql", ""), "texto": texto}
     pedidos = []
     campos = (
+        ("descripcion", ("descripcion", "comercio"), r"\b(?:descripcion|comercio|nombre)\b"),
         ("categoria", ("categoria", "cuenta_contable"), r"\b(?:categoria|cuenta contable)\b"),
         ("concepto", ("concepto",), r"\bconcepto\b"),
         ("monto", ("gasto_neto", "gastado", "monto_neto", "monto_crc", "monto", "importe", "total"), r"\b(?:monto|gastado|gaste)\b"),
@@ -913,6 +1032,31 @@ def validar_contrato_sql(sql: str, contrato: dict) -> tuple[bool, str]:
     if contrato.get("metrica") == "exceso" and not (
             set(_EXCESO) & proyectadas):
         return False, "el seguimiento debía calcular y nombrar el exceso"
+    # Aplica también a una primera pregunta: si el contrato pidió presupuesto
+    # o disponible, una consulta con sólo ``gastado`` es semánticamente falsa
+    # aunque su SQL sea válido. Los alias son canónicos y compartidos por la
+    # metadata, no dependen de clientes o tablas concretas.
+    metrica = str(contrato.get("metrica") or "").lower()
+    aliases_metrica = {
+        "gastado": set(_GASTADO) | set(_MONTOS_DETALLE),
+        "presupuesto": set(_PRESUPUESTO),
+        "disponible": set(_DISPONIBLE),
+        "exceso": set(_EXCESO),
+        "conteo": {"conteo", "cantidad", "count", "total_movimientos"},
+    }.get(metrica, set())
+    if aliases_metrica and not (aliases_metrica & proyectadas):
+        return False, f"el SQL debía proyectar la métrica {metrica}"
+    # La ejecución no acepta un SQL que haya olvidado un valor heredado. No
+    # basta con revisar que exista una columna: el valor concreto debe estar
+    # en la consulta parametrizada. Las consultas del bot son de sólo lectura
+    # y materializan sus valores como literales, por lo que esta comprobación
+    # es independiente de la tabla o del cliente.
+    sql_normalizado = _normalizar(sql)
+    for clave, valor in (contrato.get("filtros") or {}).items():
+        if valor in (None, ""):
+            continue
+        if _normalizar(valor) not in sql_normalizado:
+            return False, f"el SQL perdió el filtro heredado {clave}={valor}"
     if dimension and operacion in ("ranking", "desglose"):
         aliases = set(_GRUPOS_FILTRO.get(dimension, (dimension,)))
         if not (aliases & proyectadas):

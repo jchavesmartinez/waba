@@ -658,6 +658,10 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             )
         referencia = seguimiento.resolver_referencia(pregunta, historial)
         if referencia is not None:
+            if referencia.get("aclaracion"):
+                return Respuesta(
+                    str(referencia["aclaracion"]), estado=referencia.get("estado") or {},
+                )
             columnas_ref, filas_ref = nl2sql.ocultar_columnas_tecnicas(
                 referencia["columnas"], referencia["filas"], pregunta,
             )
@@ -731,6 +735,20 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             # devolver solo totales o repetir el ultimo resumen.
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
 
+    # Normaliza el contrato de toda pregunta (también las nuevas) antes de
+    # elegir o reparar un KPI. Gemini propone el plan, pero no puede etiquetar
+    # «presupuesto» como gasto ni cambiar una dimensión que el usuario nombró.
+    contrato_propuesto = contrato_consulta.aplicar_delta(
+        pregunta_efectiva, None, plan,
+        periodo=seguimiento.periodo_explicito(pregunta_efectiva),
+    ).get("contrato") or {}
+    for clave, destino in (
+        ("operacion", "operacion"), ("metrica", "metrica"),
+        ("entidad", "entidad"),
+    ):
+        if contrato_propuesto.get(clave):
+            plan[destino] = contrato_propuesto[clave]
+
     # Reparación metadata-driven: el modelo propone un KPI, pero no puede
     # combinar una dimensión de uno con la fórmula de otro. Si existe otro KPI
     # compatible se usa; si no, se genera SQL libre y se valida igual.
@@ -755,19 +773,42 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         pregunta_efectiva, historial, plan,
     )
     if contrato:
+        if contrato.get("aclaracion"):
+            estado_aclaracion = dict(contrato.get("estado_previo") or {})
+            estado_aclaracion["contrato"] = contrato_consulta.copiar(
+                contrato.get("contrato") or {},
+            )
+            estado_aclaracion["pendiente"] = {"tipo": "delta"}
+            return Respuesta(str(contrato["aclaracion"]), estado=estado_aclaracion)
         plan["relacion"] = "seguimiento"
         plan["heredar_filtros"] = list(contrato.get("filtros") or {})
         plan["heredar_periodo"] = not contrato.get("periodo_cambiado", False)
         cambio_forma = (
             contrato.get("operacion") != contrato.get("operacion_previa")
             or contrato.get("agrupacion") != contrato.get("agrupacion_previa")
-            or contrato.get("metrica") == "exceso"
+            or contrato.get("metrica") != contrato.get("metrica_previa")
             or bool(contrato.get("entidades_previas"))
             or bool(contrato.get("relacion_temporal"))
             or bool(contrato.get("referencia_conjunto"))
         )
         if cambio_forma:
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
+
+        # Un KPI que no expone una dimensión heredada no puede aplicar ese
+        # filtro de forma segura (por ejemplo, ``gasto_neto`` no proyecta
+        # categoría). En ese caso se fuerza SQL libre con el contrato
+        # completo, en lugar de devolver un total general aparentemente válido.
+        if plan.get("accion") == "usar_kpi" and plan.get("kpi"):
+            elegido_plan = next(
+                (k for k in kpis_def if str(k.get("kpi", "")).strip().lower()
+                 == str(plan.get("kpi", "")).strip().lower()), None,
+            )
+            dims = {str(x).strip().lower() for x in
+                    str((elegido_plan or {}).get("dimensiones", "")).split(";")
+                    if str(x).strip()}
+            filtros_contrato = set((contrato.get("filtros") or {}).keys())
+            if elegido_plan and dims and filtros_contrato and not filtros_contrato.issubset(dims):
+                plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
 
         # Cuando el único cambio real es el período, se conserva literalmente
         # el SELECT verificado y se reemplazan sus límites. Así un COUNT no se
@@ -803,7 +844,28 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             f"{motivo_contrato_universal}."
         )
 
+    plan["contrato_universal"] = contrato_universal
     estado_previo = seguimiento.contexto_segun_plan(historial, plan)
+    # Un ranking monetario singular no es comparable entre divisas. Cuando la
+    # metadata/esquema expone moneda y no hay filtro ni default de un KPI que
+    # lo fije, se pide una aclaración antes de sumar o ordenar importes
+    # heterogéneos. Esta regla es transversal a finanzas, ventas e inventario
+    # multimoneda; evita presentar el mínimo de una moneda como si fuera el
+    # mínimo global.
+    if (
+        contrato_universal.get("operacion") == "ranking"
+        and contrato_universal.get("metrica") == "gastado"
+        and not (contrato_universal.get("filtros") or {}).get("moneda")
+        and re.search(r"\bmoneda\b", str(getattr(ctx, "schema_text", "")).lower())
+        and not kpis.defaults_de(next(
+            (k for k in kpis_def if str(k.get("kpi", "")).strip().lower()
+             == str(plan.get("kpi", "")).strip().lower()), None,
+        )).get("moneda")
+    ):
+        return Respuesta(
+            "Para comparar importes sin mezclar monedas, ¿en cuál moneda "
+            "quieres verlo?"
+        )
     relacion_plan = plan.get("relacion", "nueva")
     tope_historial_sql = max(
         int(getattr(config, "BOT_PLAN_HISTORIAL_TURNOS", 6)), 0,
@@ -976,8 +1038,20 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 f"{contexto}. Conserva esos filtros salvo que el usuario los "
                 "cambie explicitamente."
             )
-        if contrato:
-            pregunta_sql += "\n\n" + seguimiento.instruccion_contrato(contrato)
+        # El mismo contrato semántico guía también preguntas nuevas. Antes se
+        # entregaba al generador SQL sólo en seguimientos, de modo que una
+        # intención ya validada como ``presupuesto`` podía degradarse a gasto
+        # al generar SQL libre. La representación adaptada no contiene cifras
+        # ni SQL: sólo operación, métrica, dimensión, filtros y período.
+        contrato_sql = contrato or {
+            "operacion": contrato_universal.get("operacion", ""),
+            "agrupacion": contrato_universal.get("entidad", ""),
+            "metrica": contrato_universal.get("metrica", ""),
+            "filtros": contrato_universal.get("filtros", {}),
+            "periodo": contrato_universal.get("periodo", {}),
+        }
+        if contrato_sql:
+            pregunta_sql += "\n\n" + seguimiento.instruccion_contrato(contrato_sql)
         if periodo_actual:
             pregunta_sql += (
                 "\n\nPERIODO DETERMINISTICO (no lo cambies): usa exactamente el rango "
@@ -1011,7 +1085,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 return Respuesta(_no_seguro(catalogo.resumir_habilitados(ctx)))
 
         ok_contrato, motivo_contrato = seguimiento.validar_contrato_sql(
-            sql, contrato,
+            sql, contrato_sql,
         )
         if not ok_contrato:
             logger.info(
@@ -1032,7 +1106,7 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
                 )
             if ok_sql:
                 ok_sql, motivo_sql = seguimiento.validar_contrato_sql(
-                    sql_contrato, contrato,
+                    sql_contrato, contrato_sql,
                 )
             if not ok_sql:
                 logger.warning(
@@ -1208,9 +1282,12 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # El contrato del plan acompaña al resultado hasta la última barrera:
     # validar antes de redactar evita presentar una respuesta válida en SQL
     # pero equivocada en dimensión o métrica.
-    for clave in ("operacion", "metrica", "entidad"):
-        if plan.get(clave):
-            contexto_resultado[clave] = plan[clave]
+    # Un contrato de seguimiento ya resolvió y validó esos campos. El plan del
+    # LLM no puede sobrescribirlos en la última barrera de resultados.
+    if not contrato:
+        for clave in ("operacion", "metrica", "entidad"):
+            if plan.get(clave):
+                contexto_resultado[clave] = plan[clave]
     ok_resultado, motivo_resultado = seguimiento.validar_resultado(
         columnas, filas, contexto=contexto_resultado,
     )
