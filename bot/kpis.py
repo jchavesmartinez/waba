@@ -330,7 +330,7 @@ def reparar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[dict, st
     metrica = str(plan.get("metrica", "")).strip().lower()
     operacion = str(plan.get("operacion", "")).strip().lower()
     metric_aliases = {
-        "gastado": {"gastado", "gasto_neto", "monto_neto", "importe", "total_gasto"},
+        "gastado": {"gastado", "gasto_neto", "monto_neto", "importe", "total_gasto", "total_gastado"},
         "presupuesto": {"presupuesto", "monto_mensual", "mensual", "presupuestado"},
         "disponible": {"disponible", "saldo", "remanente"},
         "exceso": {"exceso", "sobregiro"},
@@ -371,6 +371,16 @@ def reparar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[dict, st
         puntaje, formula = compatible(kpi)
         if puntaje >= 0:
             candidatos.append((puntaje, kpi, formula))
+    # Si la fórmula elegida ya satisface el contrato, conservarla. La
+    # reparación solo corrige una incompatibilidad; no reordena KPIs válidos
+    # por similitud incidental de palabras como ``gastado`` o ``presupuesto``.
+    original = next((k for k in (kpis or [])
+                     if str(k.get("kpi", "")).strip().lower()
+                     == str(plan.get("kpi", "")).strip().lower()), None)
+    if original is not None:
+        puntaje_original, _ = compatible(original)
+        if puntaje_original >= 0:
+            return plan, ""
     if not candidatos:
         plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
         return plan, "ningún KPI de metadata proyecta la dimensión y métrica solicitadas"

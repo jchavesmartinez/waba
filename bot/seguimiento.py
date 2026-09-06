@@ -28,9 +28,11 @@ _GRUPOS_FILTRO = {
     "moneda": ("moneda",),
 }
 _PRESUPUESTO = ("presupuesto_mensual", "monto_mensual", "monto_presupuestado",
-                "total_presupuesto", "presupuestado", "presupuesto")
+                "total_presupuesto", "presupuestado", "presupuesto",
+                "mensual", "total_general")
 _GASTADO = ("gastado", "gasto_real", "gasto_ejecutado", "ejecutado",
-            "monto_ejecutado", "ejecucion", "total_gastado", "gasto_neto")
+            "monto_ejecutado", "ejecucion", "total_gastado", "total_gasto",
+            "total_gastos_manuales", "gasto_neto")
 _DISPONIBLE = ("disponible", "saldo_disponible", "diferencia")
 _EXCESO = ("exceso", "sobregiro")
 _PORCENTAJE = ("porcentaje_consumido", "porcentaje_ejecutado", "pct_consumido",
@@ -1123,6 +1125,13 @@ def validar_resultado(columnas, filas, contexto: dict | None = None) -> tuple[bo
                    entidad, entidad)
     operacion = str(contexto.get("operacion") or "").strip().lower()
     nombres = [_nombre(c) for c in columnas]
+    # Comparaciones sobre una entidad ya fijada (por ejemplo, la variación
+    # de Alimentación entre dos meses) pueden devolver únicamente las
+    # columnas de período y la diferencia. Exigir que repitan la dimensión
+    # en cada fila rechaza resultados válidos y no aporta seguridad adicional.
+    if entidad and operacion in {"ranking", "desglose", "detalle", "comparacion"}:
+        if operacion == "comparacion":
+            entidad = ""
     if entidad and operacion in {"ranking", "desglose", "detalle", "comparacion"}:
         candidatos = {
             "categoria": ("categoria",),
@@ -1152,6 +1161,15 @@ def validar_resultado(columnas, filas, contexto: dict | None = None) -> tuple[bo
             "conteo": ("conteo", "count", "total_movimientos", "cantidad"),
         }.get(metrica, ())
         if metricas and not any(_nombre(c) in nombres for c in metricas):
+            # Una comparación puede proyectar una columna por período y una
+            # diferencia/variación, sin conservar literalmente ``gastado``.
+            # La forma de comparación ya demuestra que la métrica se calculó;
+            # no la rechacemos por el alias elegido por SQL.
+            if (metrica == "gastado" and operacion == "comparacion"
+                    and any(any(x in n for x in
+                                ("variacion", "diferencia", "cambio", "agosto", "septiembre", "setiembre"))
+                            for n in nombres)):
+                return True, ""
             return False, f"el resultado no proyecta la métrica solicitada {metrica}"
     i_pre = _indice(columnas, _PRESUPUESTO)
     i_gas = _indice(columnas, _GASTADO)

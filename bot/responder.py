@@ -701,6 +701,13 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         plan = kpis.planificar(
             pregunta_efectiva, kpis_def, ctx, historial=historial,
         )
+        # El conteo es una propiedad verificable del lenguaje: ``cuántos``
+        # nunca debe ejecutar una suma aunque Gemini haya elegido un KPI de
+        # gasto. El generador SQL recibirá el contrato corregido y deberá usar
+        # COUNT(*).
+        if seguimiento.operacion_resultado(pregunta_efectiva) == "conteo":
+            plan["operacion"] = "conteo"
+            plan["metrica"] = "conteo"
         # Una pregunta autónoma no debe convertirse en seguimiento solo por
         # existir historial. Esto es especialmente importante para frases
         # como "¿qué gastos hubo ayer?", que tienen período propio pero no
