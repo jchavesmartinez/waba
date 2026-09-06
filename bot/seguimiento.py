@@ -1085,6 +1085,37 @@ def validar_resultado(columnas, filas, contexto: dict | None = None) -> tuple[bo
     """Comprueba invariantes aritmeticas y de continuidad antes de responder."""
     if not filas:
         return True, ""
+    contexto = contexto or {}
+    # Contrato semántico: cuando el plan lo declara, la respuesta debe
+    # proyectar la dimensión y métrica solicitadas. Se omite si no hay contrato
+    # (compatibilidad con KPIs/metadatos antiguos).
+    entidad = str(contexto.get("entidad") or "").strip().lower()
+    entidad = {"comercio": "descripcion", "comercios": "descripcion",
+               "registro": "transaccion", "registros": "transaccion"}.get(
+                   entidad, entidad)
+    operacion = str(contexto.get("operacion") or "").strip().lower()
+    nombres = [_nombre(c) for c in columnas]
+    if entidad and operacion in {"ranking", "desglose", "detalle", "comparacion"}:
+        candidatos = {
+            "categoria": ("categoria",),
+            "concepto": ("concepto",),
+            "descripcion": ("descripcion", "comercio"),
+            "moneda": ("moneda", "currency", "codigo_moneda"),
+            "transaccion": ("movimiento_id", "transaccion_id", "id"),
+        }.get(entidad, ())
+        if candidatos and not any(c in nombres for c in candidatos):
+            return False, f"el resultado no proyecta la entidad solicitada {entidad}"
+    metrica = str(contexto.get("metrica") or "").strip().lower()
+    if metrica and operacion in {"total", "ranking", "desglose", "comparacion"}:
+        metricas = {
+            "gastado": _GASTADO + _MONTOS_DETALLE,
+            "presupuesto": _PRESUPUESTO,
+            "disponible": _DISPONIBLE,
+            "exceso": _EXCESO,
+            "conteo": ("conteo", "count", "total_movimientos", "cantidad"),
+        }.get(metrica, ())
+        if metricas and not any(_nombre(c) in nombres for c in metricas):
+            return False, f"el resultado no proyecta la métrica solicitada {metrica}"
     i_pre = _indice(columnas, _PRESUPUESTO)
     i_gas = _indice(columnas, _GASTADO)
     i_dis = _indice(columnas, _DISPONIBLE)

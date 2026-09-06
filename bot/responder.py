@@ -1122,8 +1122,15 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             and len(filas) > 1):
         filas = filas[:1]
 
+    contexto_resultado = dict(estado_previo or {})
+    # El contrato del plan acompaña al resultado hasta la última barrera:
+    # validar antes de redactar evita presentar una respuesta válida en SQL
+    # pero equivocada en dimensión o métrica.
+    for clave in ("operacion", "metrica", "entidad"):
+        if plan.get(clave):
+            contexto_resultado[clave] = plan[clave]
     ok_resultado, motivo_resultado = seguimiento.validar_resultado(
-        columnas, filas, contexto=estado_previo,
+        columnas, filas, contexto=contexto_resultado,
     )
     if not ok_resultado:
         logger.error("[%s] resultado no reconciliado: %s", cid, motivo_resultado)

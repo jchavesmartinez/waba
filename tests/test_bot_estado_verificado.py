@@ -950,6 +950,24 @@ def test_validacion_semantica_no_restringe_metadata_legacy():
     assert motivo == ""
 
 
+def test_validar_resultado_exige_entidad_y_metrica_del_plan():
+    ok, motivo = seguimiento.validar_resultado(
+        ["categoria", "gastado"], [("Alimentacion", 100)],
+        {"operacion": "desglose", "entidad": "concepto", "metrica": "gastado"},
+    )
+    assert not ok
+    assert "entidad" in motivo
+
+
+def test_validar_resultado_acepta_contrato_compatible():
+    ok, motivo = seguimiento.validar_resultado(
+        ["concepto", "gastado"], [("Comedera", 100)],
+        {"operacion": "desglose", "entidad": "concepto", "metrica": "gastado"},
+    )
+    assert ok
+    assert motivo == ""
+
+
 def test_mencionar_un_concepto_de_la_lista_lo_convierte_en_filtro():
     previo = seguimiento.crear_estado(
         "excesos", "SELECT concepto", "", "CRC",
