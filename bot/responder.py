@@ -692,6 +692,18 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         plan = kpis.planificar(
             pregunta_efectiva, kpis_def, ctx, historial=historial,
         )
+        # Una pregunta autónoma no debe convertirse en seguimiento solo por
+        # existir historial. Esto es especialmente importante para frases
+        # como "¿qué gastos hubo ayer?", que tienen período propio pero no
+        # contienen pronombres ni conectores referenciales.
+        if (plan.get("relacion") == "seguimiento"
+                and not seguimiento._es_frase_seguimiento(pregunta_efectiva)
+                and not plan.get("heredar_filtros")
+                and not plan.get("heredar_kpi")):
+            plan.update(
+                relacion="nueva", heredar_filtros=[], heredar_periodo=False,
+                heredar_kpi=False,
+            )
         if (seguimiento.es_consulta_composicion(pregunta_efectiva)
                 and not _kpi_entrega_detalle(plan, kpis_def)):
             # El planificador conserva la autoridad sobre la relacion y el
