@@ -26,12 +26,15 @@ _GRUPOS_FILTRO = {
     "categoria": ("categoria",),
     "moneda": ("moneda",),
 }
-_PRESUPUESTO = ("presupuesto_mensual", "monto_mensual", "presupuesto")
-_GASTADO = ("gastado", "gasto_real", "gasto_ejecutado", "ejecutado", "total_gastado")
+_PRESUPUESTO = ("presupuesto_mensual", "monto_mensual", "monto_presupuestado",
+                "total_presupuesto", "presupuestado", "presupuesto")
+_GASTADO = ("gastado", "gasto_real", "gasto_ejecutado", "ejecutado",
+            "monto_ejecutado", "ejecucion", "total_gastado", "gasto_neto")
 _DISPONIBLE = ("disponible", "saldo_disponible", "diferencia")
+_EXCESO = ("exceso", "sobregiro")
 _PORCENTAJE = ("porcentaje_consumido", "porcentaje_ejecutado", "pct_consumido",
                "pct_ejecutado")
-_MONTOS_DETALLE = ("monto_crc", "monto", "importe", "monto_total", "total")
+_MONTOS_DETALLE = ("monto_crc", "monto_neto", "monto", "importe", "monto_total", "total")
 _MESES = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5,
     "junio": 6, "julio": 7, "agosto": 8, "septiembre": 9,
@@ -123,9 +126,11 @@ def es_consulta_composicion(pregunta: str) -> bool:
     """True para preguntas de detalle que no solicitan un agregado temporal."""
     t = _normalizar(pregunta)
     return bool(re.search(
-        r"\b(?:que|cuales)\s+(?:gastos?|movimientos?|transacciones?)\b.*"
-        r"\b(?:conforman?|componen?|incluye|hubo)\b|"
-        r"\b(?:que|cuales)\b.*\b(?:conforman?|componen?)\b",
+        r"\b(?:que|cuales)\s+(?:gastos?|compras?|movimientos?|transacciones?)\b.*"
+        r"\b(?:conforman?|componen?|forman?|incluye|hubo)\b|"
+        r"\b(?:que|cuales)\b.*\b(?:conforman?|componen?|forman?)\b|"
+        r"\b(?:gastos?|compras?|movimientos?|transacciones?)\b.*"
+        r"\b(?:cuales|fueron|son)\b",
         t,
     ))
 
@@ -226,18 +231,24 @@ def operacion_resultado(pregunta: str, sql: str = "", columnas=None,
     """
     t = _normalizar(pregunta)
     sql_n = _normalizar(sql)
-    if re.search(r"\b(?:cuantos|cantidad|numero de)\b", t) or re.search(
+    if re.search(r"\b(?:cuant[oa]s|cantidad|numero de)\b", t) or re.search(
             r"\bcount\s*\(", sql_n):
         return "conteo"
-    if re.search(r"\b(?:mayor|menor|top|mas alto|mas alta|menos)\b", t):
+    if re.search(r"\b(?:mayor|menor|top|mas alto|mas alta|mas caro|mas cara|menos)\b", t):
         return "ranking"
     if es_consulta_composicion(pregunta) or re.search(
             r"\b(?:detalle|lista|movimientos|transacciones)\b", t):
         return "detalle"
     if re.search(r"\b(?:exceso|exced|sobregir|presupuesto|disponible|porcentaje)\b", t):
         return "comparacion"
-    if re.search(r"\b(?:cuanto|total|suman|suma)\b", t):
+    if re.search(r"\b(?:cuanto|total|suman|suma|sumo)\b", t):
         return "total"
+    nombres = {_nombre(c) for c in (columnas or [])}
+    tiene_fecha = any(n == "fecha" or n.startswith("fecha_") for n in nombres)
+    tiene_descripcion = bool(set(_GRUPOS_FILTRO["descripcion"]) & nombres)
+    tiene_monto = any(n in nombres for n in _MONTOS_DETALLE)
+    if tiene_fecha and tiene_descripcion and tiene_monto:
+        return "detalle"
     if modo_resultado(pregunta, columnas, filas) == "desglose":
         return "desglose"
     return "resumen"
@@ -262,14 +273,123 @@ def agrupacion_resultado(pregunta: str, columnas=None) -> str:
     return ""
 
 
+def metrica_resultado(columnas=None) -> str:
+    """Reconoce la métrica desde columnas ejecutadas, no desde redacción."""
+    nombres = [_nombre(c) for c in (columnas or [])]
+    if any("exceso" in n or "sobregiro" in n for n in nombres):
+        return "exceso"
+    tiene_presupuesto = any(any(alias in n for alias in _PRESUPUESTO)
+                            for n in nombres)
+    tiene_gastado = any(any(alias in n for alias in _GASTADO)
+                        for n in nombres)
+    if tiene_presupuesto and tiene_gastado:
+        return "comparacion"
+    if tiene_presupuesto:
+        return "presupuesto"
+    if any(any(alias in n for alias in _DISPONIBLE) for n in nombres):
+        return "disponible"
+    if tiene_gastado or any(n in _MONTOS_DETALLE for n in nombres):
+        return "gastado"
+    if any("cantidad" in n or "conteo" in n for n in nombres):
+        return "conteo"
+    return ""
+
+
 def _es_frase_seguimiento(pregunta: str) -> bool:
     t = _normalizar(pregunta)
     return bool(re.search(
         r"^(?:y\b|tambien\b)|"
         r"\b(?:ahi|ese|esa|esos|esas|lo|los|la|las|de esas|de esos|"
-        r"dentro de esa|suman|las componen|los conforman)\b",
+        r"dentro de esa|suman|sumo|las componen|los conforman|me refiero|"
+        r"quiero decir|eso quiero|que cosas|hicieron que)\b",
         t,
     ))
+
+
+def _parece_detalle(estado: dict) -> bool:
+    nombres = {_nombre(c) for c in (estado.get("columnas") or [])}
+    return (
+        any(n == "fecha" or n.startswith("fecha_") for n in nombres)
+        and bool(set(_GRUPOS_FILTRO["descripcion"]) & nombres)
+        and any(n in nombres for n in _MONTOS_DETALLE)
+    )
+
+
+def aclaracion_necesaria(pregunta: str, historial: list):
+    """Pide una dimensión cuando una referencia admite varias lecturas."""
+    previo = ultimo_estado(historial)
+    if not previo:
+        return None
+    t = _normalizar(pregunta)
+    explicita = bool(re.search(
+        r"\b(?:conceptos?|categorias?|comercios?|descripciones?|"
+        r"movimientos?|transacciones?|compras?)\b", t,
+    ))
+    ranking_ambiguo = (
+        bool(re.search(r"\b(?:que fue lo que mas|donde gaste mas|en que gaste mas)\b", t))
+        and not explicita and not _parece_detalle(previo)
+    )
+    composicion_ambigua = (
+        bool(re.search(r"\b(?:que cosas|que fue lo que).*(?:hicieron|componen|forman)\b", t))
+        and not explicita
+    )
+    if not ranking_ambiguo and not composicion_ambigua:
+        return None
+    estado = dict(previo)
+    estado["pendiente"] = {
+        "operacion": "ranking" if ranking_ambiguo else "desglose",
+        "metrica": "gastado" if ranking_ambiguo else "exceso",
+    }
+    mensaje = (
+        "¿Quiere verlo por concepto presupuestario, por comercio o por "
+        "transacción individual?"
+    )
+    return mensaje, estado
+
+
+def _referencia_temporal(historial: list) -> dict:
+    """Busca la última fila individual con fecha, sin inferir valores."""
+    for turno in reversed(historial or []):
+        estado = turno.get("estado") if turno.get("rol") == "assistant" else None
+        if not isinstance(estado, dict) or int(estado.get("filas_totales", 0)) != 1:
+            continue
+        columnas = list(estado.get("columnas") or [])
+        nombres = [_nombre(c) for c in columnas]
+        i_fecha = next((i for i, n in enumerate(nombres)
+                        if n == "fecha" or n.startswith("fecha_")), None)
+        if i_fecha is None or not estado.get("filas"):
+            continue
+        valor = estado["filas"][0][i_fecha]
+        if isinstance(valor, str) and re.match(r"20\d{2}-\d{2}-\d{2}", valor):
+            return {"fecha": valor[:10]}
+        if isinstance(valor, (date, datetime)):
+            return {"fecha": valor.date().isoformat() if isinstance(valor, datetime)
+                    else valor.isoformat()}
+    return {}
+
+
+def _valor_del_resultado_mencionado(estado: dict, dimension: str,
+                                    texto_normalizado: str) -> str:
+    """Encuentra una entidad visible que el usuario repite literalmente.
+
+    Solo reutiliza valores devueltos por una consulta verificada; no intenta
+    extraer entidades nuevas ni adivinar nombres. Sirve para frases naturales
+    como "las compras de Comidas afuera" después de una lista de conceptos.
+    """
+    columnas = list((estado or {}).get("columnas") or [])
+    aliases = _GRUPOS_FILTRO.get(dimension, ())
+    indice = _indice(columnas, aliases)
+    if indice is None:
+        return ""
+    valores = []
+    for fila in (estado or {}).get("filas") or []:
+        if indice >= len(fila) or fila[indice] in (None, ""):
+            continue
+        valor = str(fila[indice])
+        normalizado = _normalizar(valor)
+        if len(normalizado) >= 3 and normalizado in texto_normalizado:
+            valores.append(valor)
+    return valores[0] if len(set(valores)) == 1 else ""
 
 
 def contrato_seguimiento(pregunta: str, historial: list,
@@ -288,22 +408,34 @@ def contrato_seguimiento(pregunta: str, historial: list,
 
     t = _normalizar(pregunta)
     periodo_nuevo = periodo_explicito(pregunta)
+    pendiente = previo.get("pendiente") if isinstance(previo.get("pendiente"), dict) else {}
     operacion_previa = str(previo.get("operacion") or "resumen")
+    metrica_previa = str(previo.get("metrica") or metrica_resultado(
+        previo.get("columnas") or [],
+    ))
     agrupacion_previa = str(previo.get("agrupacion") or "")
-    operacion = operacion_previa
+    operacion = str(pendiente.get("operacion") or operacion_previa)
     agrupacion = agrupacion_previa
 
-    if re.search(r"\b(?:cuantos|cantidad|numero de)\b", t):
+    if re.search(r"\b(?:cuant[oa]s|cantidad|numero de)\b", t):
         operacion = "conteo"
-    elif re.search(r"\b(?:cuanto suman|cuanto suma|totalizan|suman)\b", t):
+    elif re.search(r"\b(?:cuanto suman|cuanto suma|totalizan|suman|sumo)\b", t):
         operacion = "total"
-    elif re.search(r"\b(?:mayor|menor|top|mas alto|mas alta|menos)\b", t):
+    elif re.search(r"\b(?:mayor|menor|top|mas alto|mas alta|mas caro|mas cara|menos)\b", t):
         operacion = "ranking"
-    elif es_consulta_composicion(pregunta) or re.search(
-            r"\b(?:muestrame|lista|detalle)\b", t):
+    elif es_consulta_composicion(pregunta):
+        # Una composición pide movimientos individuales, no un desglose del
+        # KPI anterior. Su métrica pasa a ser el monto de cada movimiento;
+        # exigir ``exceso`` aquí impediría listar las compras que lo causan.
+        operacion = "detalle"
+    elif re.search(r"\b(?:muestrame|lista|detalle)\b", t):
         operacion = "desglose"
+    elif re.search(r"\b(?:me pase|se paso|pasar del presupuesto)\b", t):
+        operacion = "comparacion"
 
     if re.search(r"\bconceptos?\b", t):
+        agrupacion = "concepto"
+    elif re.search(r"\b(?:cosas|lineas)\s+del\s+presupuesto\b", t):
         agrupacion = "concepto"
     elif re.search(r"\bcategorias?\b", t):
         agrupacion = "categoria"
@@ -317,8 +449,64 @@ def contrato_seguimiento(pregunta: str, historial: list,
         metrica = "exceso"
     elif re.search(r"\bpresupuesto\b", t):
         metrica = "presupuesto"
-    elif re.search(r"\b(?:monto|cuanto|gastado|gaste|suman|total)\b", t):
+    elif re.search(r"\b(?:monto|cuanto|gastado|gaste|suman|sumo|total)\b", t):
         metrica = "gastado"
+    elif re.search(r"\b(?:me pase|se paso|pasar del presupuesto)\b", t):
+        metrica = "exceso"
+    if not metrica and pendiente.get("metrica"):
+        metrica = str(pendiente["metrica"])
+    if es_consulta_composicion(pregunta):
+        metrica = "gastado"
+    if not metrica:
+        metrica = metrica_previa
+
+    referencia_temporal = _referencia_temporal(historial)
+    relacion_temporal = ""
+    if re.search(r"\bantes\b", t):
+        relacion_temporal = "antes"
+    elif re.search(r"\bdespues\b", t):
+        relacion_temporal = "despues"
+    elif re.search(r"\b(?:contando|incluyendo)\b.*\b(?:esa|ese|tambien)\b", t):
+        relacion_temporal = "hasta_inclusive"
+    # "esas" después de un conteo o total temporal significa el mismo tramo
+    # que se acaba de calcular (por ejemplo, "¿cuántas compras fueron
+    # después?" -> "¿y si sumo esas?"). El rango no se vuelve a inferir con
+    # el modelo: se conserva en el estado verificado.
+    if (not relacion_temporal and re.search(r"\b(?:esas|esos)\b", t)
+            and previo.get("relacion_temporal")):
+        relacion_temporal = str(previo["relacion_temporal"])
+        referencia_temporal = dict(previo.get("referencia_temporal") or referencia_temporal)
+    if relacion_temporal and re.search(r"\bcuanto\b", t):
+        operacion = "total"
+    filtros = dict(previo.get("filtros") or {})
+    filtros_actuales = dict((plan or {}).get("filtros_actuales") or {})
+    categoria_actual = filtros_actuales.get("categoria")
+    concepto_actual = filtros_actuales.get("concepto")
+    descripcion_actual = filtros_actuales.get("descripcion")
+    if not concepto_actual:
+        concepto_actual = _valor_del_resultado_mencionado(previo, "concepto", t)
+    if categoria_actual and (
+            _normalizar(categoria_actual) != _normalizar(filtros.get("categoria"))
+            or re.search(r"\b(?:toda|todo|completa|completo|entera|entero)\b", t)):
+        for clave in ("linea_id", "concepto", "descripcion"):
+            filtros.pop(clave, None)
+        agrupacion = "categoria"
+    if concepto_actual and _normalizar(concepto_actual) != _normalizar(
+            filtros.get("concepto")):
+        filtros.pop("linea_id", None)
+        filtros.pop("descripcion", None)
+        filtros["concepto"] = concepto_actual
+    if descripcion_actual and _normalizar(descripcion_actual) != _normalizar(
+            filtros.get("descripcion")):
+        filtros.pop("descripcion", None)
+    filtros.update({k: v for k, v in filtros_actuales.items()
+                    if v not in (None, "")})
+    if relacion_temporal or (
+            re.search(r"\b(?:esas|esos)\b", t)
+            and operacion != operacion_previa):
+        filtros.pop("descripcion", None)
+    if relacion_temporal and operacion in ("total", "conteo"):
+        agrupacion = ""
 
     entidades = []
     if re.search(r"\b(?:esas|esos|las componen|los conforman|de esas|de esos)\b", t):
@@ -339,10 +527,18 @@ def contrato_seguimiento(pregunta: str, historial: list,
         "agrupacion_previa": agrupacion_previa,
         "agrupacion": agrupacion,
         "metrica": metrica,
-        "filtros": dict(previo.get("filtros") or {}),
+        "metrica_previa": metrica_previa,
+        "filtros": filtros,
         "periodo": periodo_nuevo or dict(previo.get("periodo") or {}),
         "periodo_cambiado": bool(periodo_nuevo),
         "entidades_previas": entidades,
+        "referencia_temporal": referencia_temporal,
+        "relacion_temporal": relacion_temporal,
+        "sql_previo": str(previo.get("sql", "") or ""),
+        "referencia_conjunto": bool(
+            re.search(r"\b(?:esas|esos|esa|ese)\b", t)
+            and operacion != operacion_previa
+        ),
         "estado_previo": previo,
     }
 
@@ -358,16 +554,27 @@ def instruccion_contrato(contrato: dict) -> str:
         "filtros_heredados": contrato.get("filtros", {}),
         "periodo": contrato.get("periodo", {}),
         "entidades_del_resultado_anterior": contrato.get("entidades_previas", []),
+        "referencia_temporal": contrato.get("referencia_temporal", {}),
+        "relacion_temporal": contrato.get("relacion_temporal", ""),
     }
-    return (
+    base = (
         "CONTRATO DETERMINISTICO DE SEGUIMIENTO: "
         + json.dumps(datos, ensure_ascii=False, separators=(",", ":"))
         + ". La pregunta actual modifica solo lo que declara este contrato. "
         "Conserva el resto. Si hay entidades anteriores, limita el universo "
         "exactamente a ellas. Proyecta la dimension pedida y respeta la "
         "operacion: conteo=COUNT, total=SUM, ranking=agrega/ordena/limita, "
-        "desglose=una fila por valor de la dimension."
+        "desglose=una fila por valor de la dimension. Antes/después usa la "
+        "fecha de referencia como límite y no como filtro de descripción."
     )
+    if (contrato.get("referencia_conjunto")
+            and contrato.get("sql_previo")):
+        base += (
+            " Conserva exactamente el universo (FROM, JOIN y WHERE) de este "
+            "SQL verificado anterior y cambia solamente la agregación solicitada: "
+            + str(contrato["sql_previo"])
+        )
+    return base
 
 
 def _indice_numerico(columnas, preferidos):
@@ -391,14 +598,16 @@ def resolver_referencia(pregunta: str, historial: list):
     if tiene_periodo_explicito(pregunta):
         return None
     seleccion_explicita = bool(re.search(
-        r"\b(?:primero|primera|ultimo|ultima|mayor|menor|que\s+mas|que\s+menos)\b",
+        r"\b(?:primero|primera|ultimo|ultima|mayor|menor|mas\s+car[oa]|"
+        r"que\s+mas|que\s+menos)\b",
         t,
     ))
     if not seleccion_explicita and not estado.get("seleccion"):
         return None
     if not re.search(
         r"\b(?:el|la|los|las)\s+(?:primero|primera|ultimo|ultima|mayor|menor|"
-        r"que\s+mas|que\s+menos)\b|\b(?:su|ese|esa|esos|esas|de\s+esos|de\s+esas)\b",
+        r"mas\s+car[oa]|que\s+mas|que\s+menos)\b|"
+        r"\b(?:su|ese|esa|esos|esas|de\s+esos|de\s+esas)\b",
         t,
     ) and not re.search(
         r"^[¿?¡!\s]*y\s+.*\b(?:presupuesto|gastado|disponible|porcentaje)\b",
@@ -439,7 +648,7 @@ def resolver_referencia(pregunta: str, historial: list):
         valores = [(valor, n) for valor, n in valores if valor is not None]
         if valores:
             indice, criterio = min(valores)[1], "menor"
-    elif re.search(r"\b(?:mayor|mas|más)\b", t):
+    elif re.search(r"\b(?:mayor|mas|más|caro|cara)\b", t):
         i = i_exceso if ("exced" in t or "sobregir" in t) and i_exceso is not None else i_gastado
         valores = [(_decimal(fila[i]), n) for n, fila in enumerate(filas)] if i is not None else []
         valores = [(valor, n) for valor, n in valores if valor is not None]
@@ -476,7 +685,11 @@ def resolver_sobre_resultado(pregunta: str, historial: list):
     t = _normalizar(pregunta)
     nombres = [_nombre(c) for c in columnas]
 
-    if re.search(r"\b(?:cuanto suman|cuanto suma|totalizan|suman)\b", t):
+    pide_suma = bool(re.search(
+        r"\b(?:cuanto suman|cuanto suma|totalizan|suman|sumo|"
+        r"todo eso cuanto da|cuanto da|cuanto es)\b", t,
+    ))
+    if pide_suma:
         if int(estado.get("filas_totales", len(filas))) != len(filas):
             return None
         i_monto = _indice_numerico(
@@ -510,16 +723,52 @@ def resolver_sobre_resultado(pregunta: str, historial: list):
     if len(filas) != 1 or int(estado.get("filas_totales", len(filas))) != 1:
         return None
     if re.search(
-            r"\b(?:mayor|menor|top|dentro|conforman|componen|exceso|exced)\b",
+            r"\b(?:mayor|menor|top|dentro|conforman|componen|exceso|exced|"
+            r"antes|despues|contando|incluyendo)\b",
             t):
         return None
+
+    if re.search(r"\b(?:mucho|poco|bien|mal|pase|pasado)\b", t):
+        i_pre = _indice(columnas, _PRESUPUESTO)
+        i_gas = _indice(columnas, _GASTADO)
+        i_dis = _indice(columnas, _DISPONIBLE)
+        i_pct = _indice(columnas, _PORCENTAJE)
+        if i_pre is not None and i_gas is not None:
+            presupuesto = _decimal(filas[0][i_pre])
+            gastado = _decimal(filas[0][i_gas])
+            disponible = _decimal(filas[0][i_dis]) if i_dis is not None else None
+            porcentaje = _decimal(filas[0][i_pct]) if i_pct is not None else None
+            if presupuesto is not None and gastado is not None:
+                if disponible is None:
+                    disponible = presupuesto - gastado
+                if porcentaje is None and presupuesto:
+                    porcentaje = gastado / presupuesto * Decimal("100")
+                if gastado <= presupuesto:
+                    texto = (
+                        "Está dentro del presupuesto. Ha consumido "
+                        f"{_formato_numero(porcentaje or Decimal('0'))}% y le "
+                        f"quedan {_formato_numero(disponible)}."
+                    )
+                else:
+                    texto = (
+                        "Sí, excedió el presupuesto por "
+                        f"{_formato_numero(abs(disponible))}; ha consumido "
+                        f"{_formato_numero(porcentaje or Decimal('0'))}%."
+                    )
+                nuevo = crear_estado(
+                    pregunta, estado.get("sql", ""), estado.get("kpi", ""),
+                    estado.get("unidad", ""), columnas, filas, previo=estado,
+                )
+                return {"columnas": columnas, "filas": filas, "estado": nuevo,
+                        "sql": estado.get("sql", ""), "texto": texto}
     pedidos = []
     campos = (
         ("categoria", ("categoria", "cuenta_contable"), r"\b(?:categoria|cuenta contable)\b"),
         ("concepto", ("concepto",), r"\bconcepto\b"),
         ("monto", ("gasto_neto", "gastado", "monto_neto", "monto_crc", "monto", "importe", "total"), r"\b(?:monto|gastado|gaste)\b"),
+        ("disponible", ("disponible", "saldo_disponible", "diferencia"), r"\b(?:queda|quedan|disponible|saldo)\b"),
         ("moneda", ("moneda", "monto_moneda", "currency"), r"\bmoneda\b"),
-        ("fecha", ("fecha", "fecha_transaccion"), r"\bfecha\b"),
+        ("fecha", ("fecha", "fecha_transaccion"), r"\b(?:fecha|dia)\b"),
     )
     for _, aliases, patron in campos:
         if not re.search(patron, t):
@@ -566,6 +815,48 @@ def sql_con_periodo_nuevo(pregunta: str, historial: list,
     return salida
 
 
+def sql_temporal_desde_estado(contrato: dict) -> str:
+    """Deriva una suma o conteo temporal desde un detalle ya verificado.
+
+    Evita que el modelo reescriba el universo de una conversación cuando el
+    usuario dice "antes de esa" o "después". El SQL base ya contiene los JOIN,
+    concepto, moneda y período correctos; aquí solo se agrega una comparación
+    de fecha y una agregación sobre columnas que provinieron de ese SELECT.
+    """
+    if not contrato or contrato.get("operacion") not in {"total", "conteo"}:
+        return ""
+    relacion = str(contrato.get("relacion_temporal") or "")
+    referencia = (contrato.get("referencia_temporal") or {}).get("fecha")
+    previo = contrato.get("estado_previo") or {}
+    base = str(previo.get("sql_detalle") or "").strip().rstrip(";")
+    campos = dict(previo.get("campos_detalle") or {})
+    fecha = str(campos.get("fecha") or "")
+    monto = str(campos.get("monto") or "")
+    moneda = str(campos.get("moneda") or "")
+    if (relacion not in {"antes", "despues", "hasta_inclusive"}
+            or not referencia or not base or not fecha):
+        return ""
+    if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", valor)
+               for valor in (fecha, monto) if valor):
+        return ""
+    operador = {"antes": "<", "despues": ">", "hasta_inclusive": "<="}[relacion]
+    where = (
+        f"CAST(_seguimiento.{fecha} AS DATE) {operador} "
+        f"CAST('{referencia}' AS DATE)"
+    )
+    if contrato.get("operacion") == "conteo":
+        return f"SELECT COUNT(*) AS cantidad FROM ({base}) AS _seguimiento WHERE {where}"
+    if not monto:
+        return ""
+    if moneda and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", moneda):
+        return (
+            f"SELECT _seguimiento.{moneda} AS moneda, "
+            f"SUM(_seguimiento.{monto}) AS gastado FROM ({base}) AS _seguimiento "
+            f"WHERE {where} GROUP BY _seguimiento.{moneda} ORDER BY moneda"
+        )
+    return f"SELECT SUM(_seguimiento.{monto}) AS gastado FROM ({base}) AS _seguimiento WHERE {where}"
+
+
 def validar_contrato_sql(sql: str, contrato: dict) -> tuple[bool, str]:
     """Valida la forma mínima prometida por el seguimiento."""
     if not contrato:
@@ -582,12 +873,15 @@ def validar_contrato_sql(sql: str, contrato: dict) -> tuple[bool, str]:
     if operacion == "total" and not any(arbol.find_all(exp.Sum)):
         return False, "el seguimiento debía devolver un total con SUM"
     dimension = contrato.get("agrupacion")
+    proyectadas = {
+        _nombre(sel.alias_or_name or sel.sql())
+        for sel in arbol.expressions
+    }
+    if contrato.get("metrica") == "exceso" and not (
+            set(_EXCESO) & proyectadas):
+        return False, "el seguimiento debía calcular y nombrar el exceso"
     if dimension and operacion in ("ranking", "desglose"):
         aliases = set(_GRUPOS_FILTRO.get(dimension, (dimension,)))
-        proyectadas = {
-            _nombre(sel.alias_or_name or sel.sql())
-            for sel in arbol.expressions
-        }
         if not (aliases & proyectadas):
             return False, f"el seguimiento debía proyectar {dimension}"
     return True, ""
@@ -613,6 +907,11 @@ def _periodo_resultado(pregunta: str, columnas, filas, previo: dict | None) -> d
     explicito = periodo_explicito(pregunta)
     if explicito:
         return explicito
+    # Una fila seleccionada dentro de agosto no redefine el análisis como "un
+    # solo día". Si el turno es seguimiento, el rango heredado sigue siendo el
+    # universo de la conversación hasta que el usuario lo cambie expresamente.
+    if periodo:
+        return periodo
 
     nombres = [_nombre(c) for c in columnas]
     indices = [i for i, n in enumerate(nombres)
@@ -643,12 +942,29 @@ def _periodo_resultado(pregunta: str, columnas, filas, previo: dict | None) -> d
 
 
 def crear_estado(pregunta: str, sql: str, kpi: str, unidad: str,
-                 columnas, filas, previo: dict | None = None) -> dict:
+                 columnas, filas, previo: dict | None = None,
+                 operacion: str | None = None,
+                 agrupacion: str | None = None,
+                 referencia_temporal: dict | None = None,
+                 relacion_temporal: str | None = None) -> dict:
     """Crea el contrato persistible de una consulta ya ejecutada."""
     filas_json = [[_json_valor(v) for v in fila]
                   for fila in list(filas)[:_MAX_FILAS_ESTADO]]
     filtros = dict((previo or {}).get("filtros") or {})
     filtros.update(filtros_unicos(columnas, filas))
+    nombres = [_nombre(c) for c in columnas]
+    es_detalle = _parece_detalle({"columnas": columnas})
+    campos_detalle = dict((previo or {}).get("campos_detalle") or {})
+    sql_detalle = str((previo or {}).get("sql_detalle") or "")
+    if es_detalle:
+        fecha = next((str(columnas[i]) for i, n in enumerate(nombres)
+                      if n == "fecha" or n.startswith("fecha_")), "")
+        monto = next((str(columnas[i]) for i, n in enumerate(nombres)
+                      if n in _MONTOS_DETALLE), "")
+        moneda = next((str(columnas[i]) for i, n in enumerate(nombres)
+                       if n in ("moneda", "monto_moneda", "currency", "codigo_moneda")), "")
+        campos_detalle = {"fecha": fecha, "monto": monto, "moneda": moneda}
+        sql_detalle = sql
     base = {
         "version": 1,
         "pregunta": pregunta,
@@ -661,11 +977,27 @@ def crear_estado(pregunta: str, sql: str, kpi: str, unidad: str,
         "periodo": _periodo_resultado(pregunta, columnas, filas, previo),
         "filas_totales": len(filas),
         "modo": modo_resultado(pregunta, columnas, filas),
-        "operacion": operacion_resultado(pregunta, sql, columnas, filas),
-        "agrupacion": agrupacion_resultado(pregunta, columnas),
+        "operacion": operacion or operacion_resultado(
+            pregunta, sql, columnas, filas,
+        ),
+        "agrupacion": agrupacion if agrupacion is not None else agrupacion_resultado(
+            pregunta, columnas,
+        ),
+        "metrica": metrica_resultado(columnas),
         "dimensiones": [str(c) for c in columnas],
         "orden": "consulta",
     }
+    if sql_detalle and campos_detalle.get("fecha") and campos_detalle.get("monto"):
+        base["sql_detalle"] = sql_detalle
+        base["campos_detalle"] = campos_detalle
+    if referencia_temporal:
+        base["referencia_temporal"] = dict(referencia_temporal)
+    elif (previo or {}).get("referencia_temporal"):
+        base["referencia_temporal"] = dict(previo["referencia_temporal"])
+    if relacion_temporal:
+        base["relacion_temporal"] = relacion_temporal
+    elif (previo or {}).get("relacion_temporal"):
+        base["relacion_temporal"] = str(previo["relacion_temporal"])
     canonico = json.dumps(base, ensure_ascii=False, sort_keys=True,
                           separators=(",", ":"))
     base["resultado_hash"] = hashlib.sha256(canonico.encode("utf-8")).hexdigest()
@@ -753,6 +1085,7 @@ def validar_resultado(columnas, filas, contexto: dict | None = None) -> tuple[bo
     i_pre = _indice(columnas, _PRESUPUESTO)
     i_gas = _indice(columnas, _GASTADO)
     i_dis = _indice(columnas, _DISPONIBLE)
+    i_exceso = _indice(columnas, _EXCESO)
     i_pct = _indice(columnas, _PORCENTAJE)
     tolerancia = Decimal("0.02")
     if i_pre is not None and i_gas is not None:
@@ -764,6 +1097,10 @@ def validar_resultado(columnas, filas, contexto: dict | None = None) -> tuple[bo
                 disponible = _decimal(fila[i_dis])
                 if disponible is not None and abs(disponible - (pre - gas)) > tolerancia:
                     return False, "el disponible no coincide con presupuesto menos gastado"
+            if i_exceso is not None:
+                exceso = _decimal(fila[i_exceso])
+                if exceso is not None and abs(exceso - (gas - pre)) > tolerancia:
+                    return False, "el exceso no coincide con gastado menos presupuesto"
             if i_pct is not None and pre != 0:
                 porcentaje = _decimal(fila[i_pct])
                 calculado = gas / pre * Decimal("100")
@@ -822,6 +1159,7 @@ def reconciliar_presupuesto_fuente(columnas, filas, presupuestos: dict):
         return list(filas), []
     i_gas = _indice(columnas, _GASTADO)
     i_dis = _indice(columnas, _DISPONIBLE)
+    i_exceso = _indice(columnas, _EXCESO)
     i_pct = _indice(columnas, _PORCENTAJE)
     salida, cambios = [], []
     for original in filas:
@@ -838,6 +1176,8 @@ def reconciliar_presupuesto_fuente(columnas, filas, presupuestos: dict):
             if gastado is not None:
                 if i_dis is not None:
                     fila[i_dis] = correcto - gastado
+                if i_exceso is not None:
+                    fila[i_exceso] = gastado - correcto
                 if i_pct is not None and correcto != 0:
                     fila[i_pct] = gastado / correcto * Decimal("100")
             cambios.append({"anterior": actual, "correcto": correcto})
@@ -874,7 +1214,8 @@ def _formato_numero(valor: Decimal) -> str:
     q = valor.quantize(Decimal("0.01"))
     entero, _, dec = f"{q:.2f}".partition(".")
     entero = f"{int(entero):,}".replace(",", ".")
-    return entero if dec == "00" else f"{entero},{dec}"
+    dec = dec.rstrip("0")
+    return entero if not dec else f"{entero},{dec}"
 
 
 def resolver_ajuste(pregunta: str, historial: list):

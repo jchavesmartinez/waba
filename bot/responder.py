@@ -153,6 +153,31 @@ def _confirmacion_de_detalle(pregunta: str, historial: list) -> tuple[str, bool]
     return pregunta, False
 
 
+def _kpi_entrega_detalle(plan: dict, definiciones: list) -> bool:
+    """Indica si el KPI elegido ya es una lista de registros, por metadata.
+
+    Una pregunta de composición no debe degradar un KPI canónico de detalle a
+    SQL libre: en ese caso se perderían su JOIN y sus filtros parametrizados.
+    Clientes nuevos lo declaran con ``tipo_resultado=detalle``; mientras se
+    migra metadata antigua reconocemos la forma de salida de su fórmula.
+    """
+    if (plan or {}).get("accion") != "usar_kpi":
+        return False
+    elegido = next(
+        (k for k in definiciones
+         if str(k.get("kpi", "")).strip().lower()
+         == str((plan or {}).get("kpi", "")).strip().lower()),
+        None,
+    )
+    if not elegido:
+        return False
+    tipo = str(elegido.get("tipo_resultado", "")).strip().lower()
+    if tipo in {"detalle", "filas", "registros", "movimientos"}:
+        return True
+    formula = str(elegido.get("formula_sql", "")).lower()
+    return all(campo in formula for campo in ("fecha", "descripcion", "monto"))
+
+
 def _ultimo_sql_seguro(historial: list, tablas_reales) -> str:
     """Recupera la ultima consulta, solo si sigue pasando la lista blanca."""
     for turno in reversed(historial or []):
@@ -303,7 +328,9 @@ def _reconciliar_presupuesto_fuente(cliente, ctx, columnas, filas):
                     ("linea_id", "linea_presupuesto_id") if x in nombres), None)
     i_concepto = nombres.index("concepto") if "concepto" in nombres else None
     i_presupuesto = next((nombres.index(x) for x in
-                          ("presupuesto_mensual", "monto_mensual", "presupuesto")
+                          ("presupuesto_mensual", "monto_mensual",
+                           "monto_presupuestado", "total_presupuesto",
+                           "presupuestado", "presupuesto")
                           if x in nombres), None)
     if not filas or i_presupuesto is None or (i_linea is None and i_concepto is None):
         return list(filas), []
@@ -586,6 +613,12 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         if seguimiento_archivo or seguimiento_datos else ""
     )
 
+    if fmt == formato.TEXTO and not sql_reutilizado:
+        aclaracion = seguimiento.aclaracion_necesaria(pregunta, historial)
+        if aclaracion is not None:
+            mensaje, estado_aclaracion = aclaracion
+            return Respuesta(mensaje, estado=estado_aclaracion)
+
     # Las referencias a un resultado verificado ("el primero", "la que más",
     # "su presupuesto") no deben volver a pasar por el planificador. Se
     # resuelven sobre las filas persistidas y así conservan exactamente el
@@ -598,15 +631,18 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             columnas_previas, filas_previas = nl2sql.ocultar_columnas_tecnicas(
                 calculo_previo["columnas"], calculo_previo["filas"], pregunta,
             )
-            try:
-                texto_previo = nl2sql.redactar_respuesta(
-                    pregunta, columnas_previas, filas_previas,
-                    historial=historial, sql=calculo_previo.get("sql", ""),
-                )
-            except Exception:  # noqa: BLE001
-                texto_previo = nl2sql.tabla_texto(
-                    columnas_previas, filas_previas, tope=10,
-                )
+            texto_previo = calculo_previo.get("texto", "")
+            if not texto_previo:
+                try:
+                    texto_previo = nl2sql.redactar_respuesta(
+                        pregunta, columnas_previas, filas_previas,
+                        historial=historial, sql=calculo_previo.get("sql", ""),
+                        unidad=(calculo_previo.get("estado") or {}).get("unidad", ""),
+                    )
+                except Exception:  # noqa: BLE001
+                    texto_previo = nl2sql.tabla_texto(
+                        columnas_previas, filas_previas, tope=10,
+                    )
             return Respuesta(
                 texto_previo, sql=calculo_previo.get("sql", ""),
                 estado=calculo_previo.get("estado", {}),
@@ -656,7 +692,8 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         plan = kpis.planificar(
             pregunta_efectiva, kpis_def, ctx, historial=historial,
         )
-        if seguimiento.es_consulta_composicion(pregunta_efectiva):
+        if (seguimiento.es_consulta_composicion(pregunta_efectiva)
+                and not _kpi_entrega_detalle(plan, kpis_def)):
             # El planificador conserva la autoridad sobre la relacion y el
             # contexto; solo se impide usar un KPI de resumen para pedir filas.
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
@@ -678,6 +715,8 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             or contrato.get("agrupacion") != contrato.get("agrupacion_previa")
             or contrato.get("metrica") == "exceso"
             or bool(contrato.get("entidades_previas"))
+            or bool(contrato.get("relacion_temporal"))
+            or bool(contrato.get("referencia_conjunto"))
         )
         if cambio_forma:
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
@@ -746,6 +785,13 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
 
     # 1) Conseguir el SQL: del KPI (definicion canonica) o del text-to-SQL libre.
     sql = sql_reutilizado
+    sql_temporal = seguimiento.sql_temporal_desde_estado(contrato)
+    if sql_temporal:
+        # La agregación se deriva de un detalle que ya pasó validaciones. No
+        # dejamos que el modelo cambie el concepto, período o conjunto al
+        # interpretar "antes de esa"/"después de esa".
+        sql = sql_temporal
+        plan.update(accion="reutilizar_sql", kpi="", sql=sql, mensaje="")
     periodo_actual = seguimiento.periodo_explicito(pregunta_efectiva)
     if plan["accion"] == "usar_kpi" and plan.get("sql"):
         sql = plan["sql"]
@@ -1058,6 +1104,10 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
 
     filas = _limitar_top_solicitado(plan.get("kpi", ""), pregunta_efectiva,
                                     columnas, filas)
+    if (contrato and contrato.get("operacion") == "ranking"
+            and not re.search(r"\b\d{1,3}\b", pregunta_efectiva)
+            and len(filas) > 1):
+        filas = filas[:1]
 
     ok_resultado, motivo_resultado = seguimiento.validar_resultado(
         columnas, filas, contexto=estado_previo,
@@ -1093,9 +1143,20 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     columnas_texto, muestra_texto = nl2sql.ocultar_columnas_tecnicas(
         columnas, muestra, pregunta,
     )
+    # Para persistir continuidad usamos el estado completo, no el contexto
+    # reducido que se entrega al planificador. Este último deliberadamente
+    # solo expone filtros/periodo; el primero conserva la consulta de detalle
+    # verificada que permite resolver "antes de esa" sin reinterpretarla.
+    previo_para_estado = (
+        seguimiento.ultimo_estado(historial) if contrato else estado_previo
+    )
     estado_resultado = seguimiento.crear_estado(
         pregunta, sql, plan.get("kpi", ""), unidad_kpi,
-        columnas, filas, previo=estado_previo,
+        columnas, filas, previo=previo_para_estado,
+        operacion=(contrato or {}).get("operacion") or None,
+        agrupacion=(contrato or {}).get("agrupacion") if contrato else None,
+        referencia_temporal=(contrato or {}).get("referencia_temporal") or None,
+        relacion_temporal=(contrato or {}).get("relacion_temporal") or None,
     )
     estado_resultado["query_id"] = query_id
     try:

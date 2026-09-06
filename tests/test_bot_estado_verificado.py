@@ -425,6 +425,162 @@ def test_cambio_de_periodo_reutiliza_sql_y_conserva_conteo():
     assert "2026-08-01" not in nuevo
 
 
+def test_ranking_sin_dimension_pide_aclaracion_y_guarda_intencion():
+    estado = seguimiento.crear_estado(
+        "Cuanto gaste en alimentacion en agosto 2026", "SELECT 1", "", "CRC",
+        ["categoria", "moneda", "gastado"], [("Alimentacion", "CRC", 763007)],
+    )
+    resultado = seguimiento.aclaracion_necesaria(
+        "Y de eso, que fue lo que mas gaste?",
+        [{"rol": "assistant", "contenido": "total", "estado": estado}],
+    )
+    assert "concepto" in resultado[0].lower()
+    assert resultado[1]["pendiente"]["operacion"] == "ranking"
+    assert resultado[1]["filtros"]["categoria"] == "Alimentacion"
+
+
+def test_aclaracion_posterior_recupera_ranking_y_dimension_concepto():
+    estado = seguimiento.crear_estado(
+        "Cuanto gaste en alimentacion en agosto 2026", "SELECT 1", "", "CRC",
+        ["categoria", "moneda", "gastado"], [("Alimentacion", "CRC", 763007)],
+    )
+    estado["pendiente"] = {"operacion": "ranking", "metrica": "gastado"}
+    contrato = seguimiento.contrato_seguimiento(
+        "Me refiero a las cosas del presupuesto, como Comedera",
+        [{"rol": "assistant", "contenido": "aclare", "estado": estado}],
+        {"relacion": "nueva"},
+    )
+    assert contrato["operacion"] == "ranking"
+    assert contrato["agrupacion"] == "concepto"
+    assert contrato["periodo"]["inicio"] == "2026-08-01"
+
+
+def test_todo_eso_cuanto_da_suma_el_detalle_anterior():
+    estado = seguimiento.crear_estado(
+        "Que compras forman eso", "SELECT detalle", "", "CRC",
+        ["fecha", "descripcion", "moneda", "monto_neto"],
+        [("2026-09-01", "A", "CRC", 4050),
+         ("2026-09-02", "B", "CRC", 20000)],
+    )
+    resultado = seguimiento.resolver_sobre_resultado(
+        "Todo eso cuanto da?",
+        [{"rol": "assistant", "contenido": "detalle", "estado": estado}],
+    )
+    assert resultado["filas"] == [("CRC", Decimal("24050"))]
+
+
+def test_solo_cuanto_me_queda_proyecta_disponible():
+    estado = seguimiento.crear_estado(
+        "Cuanto llevo", "SELECT presupuesto", "ejecucion", "colones",
+        ["concepto", "presupuesto", "gastado", "disponible", "porcentaje_consumido"],
+        [("Comidas afuera", 220000, 42350, 177650, Decimal("19.3"))],
+    )
+    resultado = seguimiento.resolver_sobre_resultado(
+        "No me diga porcentajes, solo cuanto me queda",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+    )
+    assert resultado["columnas"] == ["disponible"]
+    assert resultado["filas"] == [(177650,)]
+
+
+def test_eso_es_mucho_responde_contra_presupuesto_sin_nueva_consulta():
+    estado = seguimiento.crear_estado(
+        "Cuanto llevo", "SELECT presupuesto", "ejecucion", "colones",
+        ["presupuesto", "gastado", "disponible", "porcentaje_consumido"],
+        [(220000, 42350, 177650, Decimal("19.3"))],
+    )
+    resultado = seguimiento.resolver_sobre_resultado(
+        "Eso es mucho o no?",
+        [{"rol": "assistant", "contenido": "resultado", "estado": estado}],
+    )
+    assert "dentro del presupuesto" in resultado["texto"]
+    assert "19,3%" in resultado["texto"]
+
+
+def test_antes_de_esa_usa_fecha_como_limite_y_no_como_descripcion():
+    estado = seguimiento.crear_estado(
+        "La mas cara", "SELECT detalle", "", "CRC",
+        ["fecha", "descripcion", "concepto", "moneda", "monto_neto"],
+        [("2026-09-02", "Pinchos", "Comidas afuera", "CRC", 20000)],
+    )
+    historial = [{"rol": "assistant", "contenido": "fila", "estado": estado}]
+    contrato = seguimiento.contrato_seguimiento(
+        "Y antes de esa cuanto habia gastado?", historial,
+        {"relacion": "seguimiento"},
+    )
+    assert contrato["operacion"] == "total"
+    assert contrato["relacion_temporal"] == "antes"
+    assert contrato["referencia_temporal"] == {"fecha": "2026-09-02"}
+    assert "descripcion" not in contrato["filtros"]
+
+
+def test_seleccionar_fila_no_reduce_el_periodo_heredado_a_un_dia():
+    previo = seguimiento.crear_estado(
+        "Detalle de septiembre 2026", "SELECT detalle", "", "CRC",
+        ["fecha", "descripcion", "monto_neto"],
+        [("2026-09-01", "A", 100), ("2026-09-02", "B", 200)],
+    )
+    seleccionado = seguimiento.crear_estado(
+        "La mas cara", "SELECT detalle ORDER BY monto DESC LIMIT 1", "", "CRC",
+        ["fecha", "descripcion", "monto_neto"],
+        [("2026-09-02", "B", 200)], previo=previo,
+    )
+    assert seleccionado["periodo"] == previo["periodo"]
+
+
+def test_sumar_esas_conserva_where_del_conteo_anterior_en_contrato():
+    sql = (
+        "SELECT COUNT(*) AS cantidad FROM movimientos "
+        "WHERE concepto = 'Comidas afuera' AND fecha > DATE '2026-09-02'"
+    )
+    estado = seguimiento.crear_estado(
+        "Cuantas compras fueron despues", sql, "", "CRC",
+        ["cantidad"], [(2,)],
+    )
+    contrato = seguimiento.contrato_seguimiento(
+        "Y si sumo esas, cuanto es?",
+        [{"rol": "assistant", "contenido": "2", "estado": estado}],
+        {"relacion": "seguimiento"},
+    )
+    assert contrato["operacion"] == "total"
+    assert contrato["referencia_conjunto"] is True
+    assert sql in seguimiento.instruccion_contrato(contrato)
+
+
+def test_toda_categoria_elimina_filtro_de_concepto_anterior():
+    estado = seguimiento.crear_estado(
+        "Presupuesto de Comedera", "SELECT 1", "", "CRC",
+        ["categoria", "concepto", "presupuesto"],
+        [("Alimentacion", "Comedera", 400000)],
+    )
+    contrato = seguimiento.contrato_seguimiento(
+        "No, perdon, para toda Alimentacion",
+        [{"rol": "assistant", "contenido": "400000", "estado": estado}],
+        {"relacion": "modificacion", "filtros_actuales": {
+            "categoria": "Alimentacion",
+        }},
+    )
+    assert contrato["filtros"]["categoria"] == "Alimentacion"
+    assert "concepto" not in contrato["filtros"]
+
+
+def test_concepto_nuevo_reemplaza_linea_y_concepto_anteriores():
+    estado = seguimiento.crear_estado(
+        "Conceptos excedidos", "SELECT 1", "", "CRC",
+        ["linea_id", "categoria", "concepto", "gastado"],
+        [("gas_comedera", "Alimentacion", "Comedera", 457737)],
+    )
+    contrato = seguimiento.contrato_seguimiento(
+        "Y las compras de Comidas afuera cuales fueron?",
+        [{"rol": "assistant", "contenido": "Comedera", "estado": estado}],
+        {"relacion": "seguimiento", "filtros_actuales": {
+            "concepto": "Comidas afuera",
+        }},
+    )
+    assert contrato["filtros"]["concepto"] == "Comidas afuera"
+    assert "linea_id" not in contrato["filtros"]
+
+
 def test_referencia_selecciona_mayor_y_conserva_fila_para_seguimiento():
     estado = seguimiento.crear_estado(
         "gastos por concepto", "SELECT 1", "ejecucion", "CRC",
@@ -479,6 +635,17 @@ def test_presupuesto_duplicado_se_corrige_con_la_fuente_mensual():
     assert filas[0][1] == Decimal("130000")
     assert filas[0][3] == Decimal("-192625")
     assert filas[0][4].quantize(Decimal("0.01")) == Decimal("248.17")
+
+
+def test_presupuesto_multiplicado_con_alias_se_corrige_junto_con_exceso():
+    columnas = ["concepto", "monto_presupuestado", "gasto_real", "exceso"]
+    filas, cambios = seguimiento.reconciliar_presupuesto_fuente(
+        columnas,
+        [("Comedera", 13600000, 457737, -13142263)],
+        {"concepto:comedera": Decimal("400000")},
+    )
+    assert len(cambios) == 1
+    assert filas == [("Comedera", Decimal("400000"), 457737, Decimal("57737"))]
 
 
 def test_consulta_de_composicion_no_implica_mes_actual():
@@ -654,3 +821,106 @@ def test_seguimiento_contra_presupuesto_lo_decide_el_planificador():
         )
     planificar.assert_called_once()
     assert respuesta.estado["kpi"] == "ejecucion_presupuesto_concepto"
+
+
+def test_compras_que_forman_eso_conserva_el_modo_detalle():
+    assert seguimiento.es_consulta_composicion("¿Y qué compras forman eso?")
+    assert seguimiento.operacion_resultado(
+        "¿Y qué compras forman eso?",
+        columnas=["fecha", "descripcion", "monto_neto"],
+    ) == "detalle"
+
+
+def test_la_mas_cara_selecciona_el_mayor_del_detalle_anterior():
+    estado = seguimiento.crear_estado(
+        "compras de comidas afuera", "SELECT detalle", "", "CRC",
+        ["fecha", "descripcion", "monto_neto", "moneda"],
+        [
+            ("2026-09-01", "NINA CAFE", 4050, "CRC"),
+            ("2026-09-02", "Pinchos el Pelon", 20000, "CRC"),
+        ],
+    )
+    salida = seguimiento.resolver_referencia(
+        "¿La más cara cuál fue?",
+        [{"rol": "assistant", "contenido": "detalle", "estado": estado}],
+    )
+    assert salida is not None
+    assert salida["filas"] == [("2026-09-02", "Pinchos el Pelon", 20000, "CRC")]
+
+
+def test_agregacion_temporal_reutiliza_el_detalle_verificado():
+    detalle = seguimiento.crear_estado(
+        "compras", "SELECT fecha, descripcion, monto_neto, moneda FROM movimientos",
+        "detalle", "CRC",
+        ["fecha", "descripcion", "monto_neto", "moneda"],
+        [("2026-09-02", "Pinchos", 20000, "CRC")],
+    )
+    contrato = {
+        "operacion": "total",
+        "relacion_temporal": "antes",
+        "referencia_temporal": {"fecha": "2026-09-02"},
+        "estado_previo": detalle,
+    }
+    sql = seguimiento.sql_temporal_desde_estado(contrato)
+    assert "SUM(_seguimiento.monto_neto) AS gastado" in sql
+    assert "CAST(_seguimiento.fecha AS DATE) < CAST('2026-09-02' AS DATE)" in sql
+
+
+def test_proyeccion_de_una_fila_conserva_la_base_de_detalle():
+    detalle = seguimiento.crear_estado(
+        "compras", "SELECT fecha, descripcion, monto_neto, moneda FROM movimientos",
+        "detalle", "CRC",
+        ["fecha", "descripcion", "monto_neto", "moneda"],
+        [("2026-09-02", "Pinchos", 20000, "CRC")],
+    )
+    proyectado = seguimiento.crear_estado(
+        "¿qué día fue?", detalle["sql"], "detalle", "CRC",
+        ["fecha"], [("2026-09-02",)], previo=detalle,
+    )
+    assert proyectado["sql_detalle"] == detalle["sql"]
+    assert proyectado["campos_detalle"]["monto"] == "monto_neto"
+
+
+def test_cuantas_compras_es_un_conteo_y_no_un_total():
+    assert seguimiento.operacion_resultado("¿Cuántas compras fueron después?") == "conteo"
+
+
+def test_composicion_desde_exceso_pide_detalle_y_monto():
+    previo = seguimiento.crear_estado(
+        "conceptos que excedieron", "SELECT concepto, exceso", "", "CRC",
+        ["categoria", "concepto", "presupuesto", "gastado", "exceso"],
+        [("Alimentacion", "Comidas afuera", 220000, 305270, 85270)],
+    )
+    contrato = seguimiento.contrato_seguimiento(
+        "¿Y las compras de Comidas afuera cuáles fueron?",
+        [{"rol": "assistant", "contenido": "exceso", "estado": previo}],
+        {"relacion": "seguimiento", "filtros_actuales": {"concepto": "Comidas afuera"}},
+    )
+    assert contrato["operacion"] == "detalle"
+    assert contrato["metrica"] == "gastado"
+
+
+def test_mencionar_un_concepto_de_la_lista_lo_convierte_en_filtro():
+    previo = seguimiento.crear_estado(
+        "excesos", "SELECT concepto", "", "CRC",
+        ["categoria", "concepto", "monto_presupuestado", "monto_ejecutado"],
+        [
+            ("Alimentacion", "Comedera", 400000, 457737),
+            ("Alimentacion", "Comidas afuera", 220000, 305270),
+        ],
+    )
+    contrato = seguimiento.contrato_seguimiento(
+        "las compras de comidas afuera cuales fueron",
+        [{"rol": "assistant", "contenido": "excesos", "estado": previo}],
+        {"relacion": "seguimiento", "filtros_actuales": {}},
+    )
+    assert contrato["filtros"]["concepto"] == "Comidas afuera"
+
+
+def test_reconciliacion_actualiza_exceso_con_monto_ejecutado():
+    columnas = ["concepto", "monto_presupuestado", "monto_ejecutado", "exceso"]
+    filas, _ = seguimiento.reconciliar_presupuesto_fuente(
+        columnas, [("Comidas afuera", 7700000, 305270, -7394730)],
+        {"concepto:comidas afuera": 220000},
+    )
+    assert filas == [("Comidas afuera", 220000, 305270, 85270)]
