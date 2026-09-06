@@ -803,7 +803,9 @@ class PostgresDestino(Destino):
         cols = ("kpi", "nombre", "descripcion", "preguntas_ejemplo", "formula_sql",
                 "tabla", "dimensiones", "unidad", "supuestos", "minimo_datos",
                 "instruccion", "tipo_resultado", "detalle_kpi", "clave_entidad",
-                "orden_default", "periodo_default", "moneda_default", "aliases")
+                "orden_default", "periodo_default", "moneda_default", "aliases",
+                "metricas", "operaciones_permitidas", "operaciones",
+                "periodicidades", "relaciones", "sinonimos")
         ids_nuevos = {str(f.get("kpi", "")).strip().lower() for f in filas if f.get("kpi")}
         with self.conectar().begin() as cx:
             cx.execute(text(

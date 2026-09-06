@@ -38,7 +38,7 @@ from collections import defaultdict
 
 import config
 import registry
-from bot import (artefactos, catalogo, contrato_consulta, correo, dashboard, edicion, ejecutor_consultas, formato, intencion, kpis,
+from bot import (artefactos, capacidades, catalogo, contrato_consulta, correo, dashboard, edicion, ejecutor_consultas, formato, intencion, kpis,
                  memoria, nl2sql, seguimiento, warehouse_ro)
 from bot.salida import Respuesta
 from bot.tiempo import fecha_local
@@ -710,8 +710,12 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         # gasto. El generador SQL recibirá el contrato corregido y deberá usar
         # COUNT(*).
         if seguimiento.operacion_resultado(pregunta_efectiva) == "conteo":
-            plan["operacion"] = "conteo"
-            plan["metrica"] = "conteo"
+            # COUNT necesita su propia expresión. Reutilizar una fórmula KPI
+            # de SUM produciría una cifra válida pero respondería otra cosa.
+            plan.update(
+                operacion="conteo", metrica="conteo",
+                accion="sql_libre", kpi="", sql="", mensaje="",
+            )
         # Una pregunta autónoma no debe convertirse en seguimiento solo por
         # existir historial. Esto es especialmente importante para frases
         # como "¿qué gastos hubo ayer?", que tienen período propio pero no
@@ -767,6 +771,27 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
         return Respuesta(
             "No quiero darte un resultado equivocado. "
             f"{motivo_semantica} ¿Quieres que lo consulte con otra dimensión o métrica?"
+        )
+
+    # El planificador interpreta texto libre, pero no puede transformar una
+    # necesidad que la metadata no declara (por ejemplo, ventas o proyecciones)
+    # en un total de gastos. La capa de capacidades es opcional por cliente:
+    # se cierra automáticamente cuando el Sheet ya contiene su contrato
+    # estructurado, sin romper catálogos aún no migrados.
+    es_continuacion = (
+        bool(historial)
+        and plan.get("relacion") in {"seguimiento", "modificacion"}
+        and seguimiento._es_frase_seguimiento(pregunta_efectiva)
+    )
+    ok_capacidad, motivo_capacidad = capacidades.validar(
+        pregunta_efectiva, plan, kpis_def, ctx,
+        es_seguimiento=es_continuacion,
+    )
+    if not ok_capacidad:
+        logger.info("[%s] capacidad no declarada: %s", cid, motivo_capacidad)
+        return Respuesta(
+            f"{motivo_capacidad} "
+            "Puedo consultar únicamente las métricas y dimensiones habilitadas para este chat."
         )
 
     contrato = seguimiento.contrato_seguimiento(

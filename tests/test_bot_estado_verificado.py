@@ -3,7 +3,9 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from bot import contrato_consulta, formato, kpis, seguimiento
+import pytest
+
+from bot import capacidades, contrato_consulta, formato, kpis, seguimiento
 from bot import responder as R
 
 
@@ -1031,6 +1033,98 @@ def test_validacion_semantica_rechaza_dimension_no_declarada():
     ok, motivo = kpis.validar_plan_semantico(plan, kpis_def, object())
     assert not ok
     assert "concepto" in motivo
+
+
+def _kpi_capacidad():
+    return {
+        "kpi": "gasto_categoria",
+        "nombre": "Gasto por categoría",
+        "preguntas_ejemplo": "cuanto gasté por categoría; gastos de alimentación",
+        "aliases": "gastos; pagos; categorías",
+        "dimensiones": "categoria; moneda; fecha",
+        "metricas": "gastado",
+        "operaciones": "total; desglose; ranking; detalle; conteo; comparacion",
+        "periodicidades": "diario; mensual",
+    }
+
+
+def test_capacidad_estructurada_rechaza_dominio_sin_declarar():
+    ok, motivo = capacidades.validar(
+        "¿Cuánto vendí este mes?",
+        {"accion": "usar_kpi", "kpi": "gasto_categoria"},
+        [_kpi_capacidad()], object(),
+    )
+    assert not ok
+    assert "métrica o dimensión" in motivo
+
+
+def test_capacidad_estructurada_rechaza_operacion_no_declarada():
+    ok, motivo = capacidades.validar(
+        "¿Cuál será mi gasto estimado a fin de mes?",
+        {"accion": "usar_kpi", "kpi": "gasto_categoria"},
+        [_kpi_capacidad()], object(),
+    )
+    assert not ok
+    assert "proyeccion" in motivo
+
+
+def test_capacidad_estructurada_rechaza_periodo_no_declarado():
+    ok, motivo = capacidades.validar(
+        "¿Cuál es mi presupuesto anual?",
+        {"accion": "usar_kpi", "kpi": "gasto_categoria"},
+        [_kpi_capacidad()], object(),
+    )
+    assert not ok
+    assert "anual" in motivo
+
+
+@pytest.mark.parametrize("pregunta,operacion", [
+    ("¿Cuál fue mi flujo de caja en agosto?", "flujo_caja"),
+    ("¿Cuánto voy a gastar al cierre de septiembre?", "proyeccion"),
+    ("¿Cuánto pagué de IVA este mes?", "impuesto_fiscal"),
+    ("¿Qué gastos fueron deducibles de impuestos?", "impuesto_fiscal"),
+])
+def test_capacidad_rechaza_operaciones_financieras_no_declaradas(pregunta, operacion):
+    ok, motivo = capacidades.validar(
+        pregunta, {"accion": "usar_kpi", "kpi": "gasto_categoria"},
+        [_kpi_capacidad()], object(),
+    )
+    assert not ok
+    assert operacion in motivo
+
+
+def test_capacidad_estructurada_permite_consulta_valida_y_variantes():
+    ok, motivo = capacidades.validar(
+        "¿Cuánto pagué por categoría este mes?",
+        {"accion": "usar_kpi", "kpi": "gasto_categoria"},
+        [_kpi_capacidad()], object(),
+    )
+    assert ok
+    assert motivo == ""
+
+
+def test_capacidad_estructurada_no_cierra_catalogo_aun_no_migrado():
+    ok, motivo = capacidades.validar(
+        "¿Cuánto vendí este mes?",
+        {"accion": "sql_libre", "kpi": ""},
+        [{"kpi": "legacy", "dimensiones": "producto"}], object(),
+    )
+    assert ok
+    assert motivo == ""
+
+
+def test_capacidad_no_deja_que_un_kpi_heredado_eluda_el_contrato_cliente():
+    ok, motivo = capacidades.validar(
+        "¿Cuál es mi presupuesto anual?",
+        {"accion": "usar_kpi", "kpi": "presupuesto_heredado"},
+        [
+            {"kpi": "presupuesto_heredado"},
+            _kpi_capacidad(),
+        ],
+        object(),
+    )
+    assert not ok
+    assert "anual" in motivo
 
 
 def test_validacion_semantica_no_restringe_metadata_legacy():

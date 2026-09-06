@@ -171,7 +171,8 @@ def _kpis_texto(kpis: list, pregunta: str = "") -> str:
         # requiera cambios de código.
         for campo in (
             "tipo_resultado", "detalle_kpi", "clave_entidad", "orden_default",
-            "periodo_default", "moneda_default", "aliases",
+            "periodo_default", "moneda_default", "aliases", "metricas",
+            "operaciones", "periodicidades",
         ):
             if k.get(campo):
                 campos.append(f"{campo}: {k[campo]}")
@@ -297,6 +298,16 @@ def validar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[bool, st
         return False, (
             f"El KPI '{elegido.get('kpi', nombre)}' no declara la métrica '{metrica}'. "
             f"Métricas disponibles: {', '.join(sorted(declaradas_metricas))}."
+        )
+    declaradas_operaciones = (
+        valores("operaciones") | valores("operaciones_permitidas")
+        | valores("operaciones_disponibles")
+    )
+    operacion = str(plan.get("operacion", "")).strip().lower()
+    if operacion and declaradas_operaciones and operacion not in declaradas_operaciones:
+        return False, (
+            f"El KPI '{elegido.get('kpi', nombre)}' no declara la operación '{operacion}'. "
+            f"Operaciones disponibles: {', '.join(sorted(declaradas_operaciones))}."
         )
     return True, ""
 
