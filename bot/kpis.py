@@ -326,7 +326,8 @@ def reparar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[dict, st
     generador vuelva a construir una consulta sobre el esquema real.
     """
     plan = dict(plan or {})
-    if plan.get("accion") != "usar_kpi":
+    accion_original = str(plan.get("accion", ""))
+    if accion_original not in {"usar_kpi", "sql_libre"}:
         return plan, ""
 
     def tokens(valor) -> set[str]:
@@ -348,12 +349,67 @@ def reparar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[dict, st
         "conteo": {"conteo", "cantidad", "count", "total_movimientos"},
     }
 
+    def tablas_de_formula(formula: str) -> set[str]:
+        """Obtiene las relaciones reales de una fórmula ya declarada.
+
+        No se usa texto de usuario para esto: las fórmulas vienen de la
+        metadata. Esta procedencia evita que un seguimiento de presupuesto
+        salte a una suma genérica de movimientos al cambiar la métrica.
+        """
+        try:
+            arbol = sqlglot.parse_one(formula, read="postgres")
+        except Exception:
+            return set()
+        ctes = {
+            str(cte.alias_or_name).strip().lower()
+            for cte in arbol.find_all(exp.CTE)
+            if str(cte.alias_or_name).strip()
+        }
+        return {
+            str(tabla.name).strip().lower()
+            for tabla in arbol.find_all(exp.Table)
+            if str(tabla.name).strip()
+            and str(tabla.name).strip().lower() not in ctes
+        }
+
+    fuentes_requeridas = {
+        str(tabla).strip().lower()
+        for tabla in (plan.get("tablas_fuente") or [])
+        if str(tabla).strip()
+    }
+    metricas_contexto = {
+        str(metrica_previa).strip().lower()
+        for metrica_previa in (plan.get("metricas_contexto") or [])
+        if str(metrica_previa).strip()
+    }
+    periodo_contexto = dict(plan.get("periodo_contexto") or {})
+
     def compatible(kpi: dict) -> tuple[int, str]:
         dimensiones = tokens(kpi.get("dimensiones"))
         dimensiones = {aliases.get(x, x) for x in dimensiones}
+        metricas_kpi = tokens(kpi.get("metricas"))
+        operaciones = (
+            tokens(kpi.get("operaciones"))
+            | tokens(kpi.get("operaciones_permitidas"))
+            | tokens(kpi.get("operaciones_disponibles"))
+        )
+        # Si el KPI declara operaciones, esa declaración es parte del
+        # contrato. Dejarlo competir aun siendo incompatible provoca que un
+        # seguimiento de COUNT herede un KPI de desglose y falle antes de que
+        # pueda reutilizar su SQL verificado.
+        if operacion and operaciones and operacion not in operaciones:
+            return -1, ""
         try:
             formula = sql_canonico(kpi, ctx)
         except Exception:
+            return -1, ""
+        # Un seguimiento puede ampliar una consulta (plan -> ejecución), pero
+        # no abandonar silenciosamente una relación que ya produjo un resultado
+        # verificado. Si no existe una fórmula compatible, SQL libre conserva
+        # la validación posterior del contrato completo.
+        fuentes_formula = tablas_de_formula(formula)
+        if (fuentes_requeridas and fuentes_formula
+                and not fuentes_requeridas.issubset(fuentes_formula)):
             return -1, ""
         salida = tokens(formula)
         # Alias/columnas de la fórmula. La búsqueda sobre el SQL canonizado
@@ -367,12 +423,45 @@ def reparar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[dict, st
             puntaje += 2
             if entidad in salida:
                 puntaje += 1
+            # Entre dos fórmulas que proyectan la misma entidad, se prefiere
+            # la granularidad más cercana. Un KPI por concepto también puede
+            # contener categoría, pero no es el candidato natural para un
+            # total por categoría: puede devolver varias líneas y perder los
+            # defaults de la vista agregada.
+            dimensiones_negocio = dimensiones - {"fecha", "mes", "periodo", "moneda"}
+            extras = dimensiones_negocio - {entidad}
+            if not extras:
+                puntaje += 2
         if metrica:
             esperadas = metric_aliases.get(metrica, set())
             if esperadas and not (esperadas & salida):
                 return -1, ""
             if esperadas:
                 puntaje += 2
+            # Cuando dos fórmulas proyectan la misma métrica y dimensión,
+            # preferir la que la declara de manera más específica. La
+            # metadata expresa aquí que una vista de "presupuesto" es mejor
+            # candidata inicial que una vista mixta de ejecución; un
+            # seguimiento sí puede promover luego la vista mixta al pedir
+            # gastado o disponible.
+            metricas_declaradas = {
+                nombre for nombre, sinonimos in metric_aliases.items()
+                if sinonimos & metricas_kpi
+            }
+            if metricas_declaradas == {metrica}:
+                puntaje += 1
+        # Si el turno anterior estaba sustentado por otra métrica (por
+        # ejemplo presupuesto) y ahora pide gastado, se prefiere una fórmula
+        # que declare ambas. Esa declaración es una relación semántica de la
+        # metadata, no una regla del dominio financiero.
+        if metricas_contexto and metricas_contexto != {metrica}:
+            if metricas_contexto & metricas_kpi:
+                puntaje += 2
+        # Una fórmula con parámetros explícitos de período es preferible a
+        # una vista de período implícito cuando el contrato ya trae un rango.
+        # Así la selección sigue la fecha del usuario, no CURRENT_DATE.
+        if periodo_contexto and admite_periodo_parametrizado(formula):
+            puntaje += 1
         if operacion in {"ranking", "desglose", "comparacion"} and entidad:
             puntaje += 1
         return puntaje, formula
@@ -398,6 +487,17 @@ def reparar_plan_semantico(plan: dict | None, kpis: list, ctx) -> tuple[dict, st
 
     candidatos.sort(key=lambda x: (x[0], str(x[1].get("kpi", ""))), reverse=True)
     mejor_puntaje, mejor, formula = candidatos[0]
+    # Un SQL libre puede ser la propuesta conservadora del LLM aunque el
+    # contrato ya identifique de manera inequívoca un KPI canónico. Preferir
+    # esa fórmula evita perder defaults metadata-driven (por ejemplo moneda
+    # del presupuesto). Sólo se promociona con dimensión + métrica explícitas
+    # y un ganador único; ante empate se conserva SQL libre.
+    if accion_original == "sql_libre":
+        empate = len(candidatos) > 1 and candidatos[1][0] == mejor_puntaje
+        if entidad and metrica and mejor_puntaje >= 4 and not empate:
+            plan.update(accion="usar_kpi", kpi=str(mejor.get("kpi", "")), sql=formula)
+            return plan, f"KPI canónico seleccionado '{mejor.get('kpi')}'"
+        return plan, ""
     elegido = str(plan.get("kpi", "")).strip().lower()
     if elegido == str(mejor.get("kpi", "")).strip().lower():
         return plan, ""

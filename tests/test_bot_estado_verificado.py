@@ -375,6 +375,37 @@ def test_seguimiento_promueve_filtros_confirmados_por_el_resultado():
     assert contrato["filtros"]["moneda"] == "CRC"
 
 
+def test_delta_de_seguimiento_ignora_operacion_alucinada_y_conserva_total():
+    estado = seguimiento.crear_estado(
+        "gasto agosto", "SELECT categoria, moneda, gastado", "", "",
+        ["categoria", "moneda", "gastado"], [("Alimentacion", "CRC", 100)],
+    )
+    estado["contrato"] = {
+        "operacion": "total", "metrica": "gastado", "entidad": "categoria",
+        "filtros": {"categoria": "Alimentacion", "moneda": "CRC"},
+        "periodo": estado["periodo"], "relacion": "nueva",
+    }
+    contrato = seguimiento.contrato_seguimiento(
+        "Y en septiembre?",
+        [{"rol": "assistant", "contenido": "100", "estado": estado}],
+        # Simula el error real del planificador: cambiar sin que el usuario lo pida.
+        {"relacion": "seguimiento", "operacion": "ranking", "metrica": "gastado"},
+    )
+    assert contrato["operacion"] == "total"
+    assert contrato["filtros"]["categoria"] == "Alimentacion"
+    assert contrato["periodo"]["inicio"] == "2026-09-01"
+
+
+def test_pregunta_sola_de_metrica_hereda_entidad_ya_fijada():
+    previo = {
+        "operacion": "total", "metrica": "presupuesto", "entidad": "categoria",
+        "filtros": {"categoria": "Alimentacion"}, "periodo": {},
+    }
+    assert contrato_consulta.es_seguimiento(
+        "Cuanto se gasto en agosto?", previo, {"relacion": "nueva"},
+    )
+
+
 def test_pregunta_relativa_sin_pronombre_conserva_el_contrato_activo():
     estado = seguimiento.crear_estado(
         "transporte", "SELECT categoria, moneda, gastado", "", "",
@@ -423,6 +454,23 @@ def test_suma_de_detalle_anterior_se_resuelve_localmente_por_moneda():
     assert resultado["columnas"] == ["moneda", "gastado"]
     assert ("CRC", Decimal("350")) in resultado["filas"]
     assert ("USD", Decimal("4")) in resultado["filas"]
+
+
+def test_ranking_despues_de_sumar_recupera_el_detalle_verificado():
+    detalle = seguimiento.crear_estado(
+        "movimientos", "SELECT detalle", "", "",
+        ["descripcion", "moneda", "monto"],
+        [("A", "CRC", 100), ("B", "CRC", 250)],
+    )
+    suma = seguimiento.resolver_sobre_resultado(
+        "Cuanto suman?", [{"rol": "assistant", "estado": detalle}],
+    )
+    mayor = seguimiento.resolver_referencia(
+        "Cual fue el mas alto?",
+        [{"rol": "assistant", "estado": suma["estado"]}],
+    )
+    assert mayor is not None
+    assert mayor["filas"] == [("B", "CRC", 250)]
 
 
 def test_monto_de_fila_identificada_se_proyecta_sin_nueva_consulta():
@@ -662,6 +710,18 @@ def test_concepto_nuevo_reemplaza_linea_y_concepto_anteriores():
     )
     assert contrato["filtros"]["concepto"] == "Comidas afuera"
     assert "linea_id" not in contrato["filtros"]
+
+
+def test_sql_de_concepto_proyecta_categoria_heredada_sin_exigir_literal_redundante():
+    sql = (
+        "SELECT categoria, concepto, SUM(monto) AS gastado FROM movimientos "
+        "WHERE concepto = 'Comidas afuera' GROUP BY categoria, concepto"
+    )
+    ok, motivo = seguimiento.validar_contrato_sql(sql, {
+        "operacion": "total", "metrica": "gastado", "entidad": "concepto",
+        "filtros": {"categoria": "Alimentacion", "concepto": "Comidas afuera"},
+    })
+    assert ok, motivo
 
 
 def test_referencia_selecciona_mayor_y_conserva_fila_para_seguimiento():
@@ -1142,6 +1202,60 @@ def test_capacidad_usa_vocabulario_global_si_el_plan_eligio_kpi_vecino():
     assert motivo == ""
 
 
+def test_comparacion_de_dos_resultados_verificados_conserva_filtros_y_periodos():
+    agosto = seguimiento.crear_estado(
+        "gasto agosto", "", "", "CRC",
+        ["moneda", "categoria", "gasto_neto"],
+        [("CRC", "Alimentacion", 763007.09)],
+    )
+    agosto["periodo"] = {"inicio": "2026-08-01"}
+    agosto["contrato"] = {"metrica": "gastado", "filtros": {"categoria": "Alimentacion"}}
+    septiembre = seguimiento.crear_estado(
+        "gasto septiembre", "", "", "CRC",
+        ["moneda", "categoria", "gasto_neto"],
+        [("CRC", "Alimentacion", 80953)], previo=agosto,
+    )
+    septiembre["periodo"] = {"inicio": "2026-09-01"}
+    septiembre["contrato"] = {
+        "metrica": "gastado",
+        "filtros": {"categoria": "Alimentacion", "moneda": "CRC"},
+    }
+    resultado = seguimiento.resolver_comparacion_historial(
+        "Cual tuvo mas gasto?",
+        [{"rol": "assistant", "estado": agosto},
+         {"rol": "assistant", "estado": septiembre}],
+    )
+    assert resultado is not None
+    assert "Agosto de 2026 fue mayor" in resultado["texto"]
+    assert "682.054,09" in resultado["texto"]
+
+
+def test_comparacion_de_dos_filtros_en_el_mismo_periodo_usa_entidades_mostradas():
+    vivienda = seguimiento.crear_estado(
+        "vivienda agosto", "", "", "CRC",
+        ["moneda", "categoria", "gasto_neto"],
+        [("CRC", "Vivienda", 1783262)],
+    )
+    vivienda["periodo"] = {"inicio": "2026-08-01"}
+    vivienda["filtros"] = {"categoria": "Vivienda", "moneda": "CRC"}
+    vivienda["contrato"] = {"metrica": "gastado", "filtros": vivienda["filtros"]}
+    deudas = seguimiento.crear_estado(
+        "deudas agosto", "", "", "CRC",
+        ["moneda", "categoria", "gasto_neto"],
+        [("CRC", "Deudas", 436977)], previo=vivienda,
+    )
+    deudas["periodo"] = {"inicio": "2026-08-01"}
+    deudas["filtros"] = {"categoria": "Deudas", "moneda": "CRC"}
+    deudas["contrato"] = {"metrica": "gastado", "filtros": deudas["filtros"]}
+    resultado = seguimiento.resolver_comparacion_historial(
+        "¿Cuál fue mayor?",
+        [{"rol": "assistant", "estado": vivienda},
+         {"rol": "assistant", "estado": deudas}],
+    )
+    assert resultado is not None
+    assert "Vivienda fue mayor" in resultado["texto"]
+
+
 def test_validacion_semantica_no_restringe_metadata_legacy():
     plan = {"accion": "usar_kpi", "kpi": "gasto", "entidad": "concepto",
             "metrica": "gastado"}
@@ -1313,3 +1427,32 @@ def test_validador_acepta_linea_id_como_filtro_mas_fuerte_que_concepto():
         "filtros": {"linea_id": "gas_salud", "concepto": "Salud imprevistos"},
     })
     assert ok
+
+
+def test_estado_guarda_solo_tablas_fisicas_no_aliases_de_cte():
+    estado = seguimiento.crear_estado(
+        "ejecución", "WITH p AS (SELECT * FROM presupuesto) SELECT * FROM p",
+        "", "", ["categoria", "gastado"], [("Alimentacion", 10)],
+    )
+    assert estado["tablas_fuente"] == ["presupuesto"]
+
+
+def test_comparacion_puede_pedir_otra_metrica_expuesta_en_las_filas():
+    def estado(concepto, presupuesto, gastado):
+        return {
+            "columnas": ["categoria", "concepto", "presupuesto", "gastado", "moneda"],
+            "filas": [("Alimentacion", concepto, presupuesto, gastado, "CRC")],
+            "filas_totales": 1,
+            "filtros": {"categoria": "Alimentacion", "concepto": concepto},
+            "periodo": {"inicio": "2026-08-01"},
+            "contrato": {"metrica": "gastado", "filtros": {"concepto": concepto}},
+        }
+    primero = estado("Comedera", 400000, 457737)
+    segundo = estado("Comidas afuera", 220000, 305270)
+    resultado = seguimiento.resolver_comparacion_historial(
+        "¿Cuál tiene mayor presupuesto?",
+        [{"rol": "assistant", "estado": primero}, {"rol": "assistant", "estado": segundo}],
+    )
+    assert resultado is not None
+    assert resultado["estado"]["contrato"]["metrica"] == "presupuesto"
+    assert "Comedera" in resultado["texto"]

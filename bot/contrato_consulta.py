@@ -35,6 +35,11 @@ _PREGUNTA_INCOMPLETA = re.compile(
     r"^\s*(?:[¿?¡!]+\s*)?(?:cual|cuanto|cuantos|que)\b.*\b(?:mayor|menor|"
     r"mas|menos|primero|ultimo|detalle|comercio|concepto|categoria)\b"
 )
+_PREGUNTA_METRICA_RELATIVA = re.compile(
+    r"^\s*(?:[¿?¡!]+\s*)?(?:cuanto|cual)\b.*\b(?:se\s+"
+    r"(?:gasto|gastado)|fue\s+el\s+gasto|queda|quedo|disponible|"
+    r"porcentaje|pct)\b"
+)
 
 
 def _normalizar_texto(valor) -> str:
@@ -62,12 +67,19 @@ def es_seguimiento(pregunta: str, previo: dict | None,
         return False
     relacion = _texto((propuesta or {}).get("relacion"))
     texto = _normalizar_texto(pregunta)
-    return relacion in {"seguimiento", "modificacion"} or bool(
-        _PISTAS_CONTINUIDAD.search(texto) or _PREGUNTA_INCOMPLETA.search(texto)
-    )
+    if relacion in {"seguimiento", "modificacion"}:
+        return True
+    if _PISTAS_CONTINUIDAD.search(texto) or _PREGUNTA_INCOMPLETA.search(texto):
+        return True
+    # Tras un resultado que ya fijó una entidad, «¿cuánto se gastó?» es una
+    # pregunta incompleta por construcción: no debe caer a un total global.
+    # El usuario puede romper el contexto nombrando una entidad/filtro nuevo.
+    filtros = (previo or {}).get("filtros") or {}
+    return bool(filtros and _PREGUNTA_METRICA_RELATIVA.search(texto))
 
 
-def _cambio_explicito_de_metrica(texto: str, propuesta: dict) -> str:
+def _cambio_explicito_de_metrica(texto: str, propuesta: dict,
+                                 *, aceptar_propuesta: bool = True) -> str:
     """Reconoce una métrica pedida expresamente por el usuario.
 
     La prioridad es deliberadamente la frase actual: un plan que llegue con
@@ -83,11 +95,14 @@ def _cambio_explicito_de_metrica(texto: str, propuesta: dict) -> str:
         return "gastado"
     if re.search(r"\b(?:presupuesto|presupuestado|planeado)\b", texto):
         return "presupuesto"
+    if not aceptar_propuesta:
+        return ""
     propuesta_metrica = _texto((propuesta or {}).get("metrica"))
     return propuesta_metrica if propuesta_metrica in METRICAS else ""
 
 
-def _cambio_explicito_de_operacion(texto: str, propuesta: dict) -> str:
+def _cambio_explicito_de_operacion(texto: str, propuesta: dict,
+                                   *, aceptar_propuesta: bool = True) -> str:
     if re.search(r"\b(?:cuant[oa]s|cantidad|numero)\b", texto):
         return "conteo"
     # «ese total» puede ser una referencia al resultado previo; si el usuario
@@ -99,11 +114,14 @@ def _cambio_explicito_de_operacion(texto: str, propuesta: dict) -> str:
         return "total"
     if re.search(r"\b(?:mayor|menor|top|mas alto|mas alta|mas caro|mas cara|menos)\b", texto):
         return "ranking"
+    if not aceptar_propuesta:
+        return ""
     propuesta_operacion = _texto((propuesta or {}).get("operacion"))
     return propuesta_operacion if propuesta_operacion in OPERACIONES else ""
 
 
-def _cambio_explicito_de_entidad(texto: str, propuesta: dict) -> str:
+def _cambio_explicito_de_entidad(texto: str, propuesta: dict,
+                                 *, aceptar_propuesta: bool = True) -> str:
     for entidad, patron in (
         ("concepto", r"\bconceptos?\b|\b(?:lineas?|cosas?)\s+del\s+presupuesto\b"),
         ("categoria", r"\bcategorias?\b"),
@@ -113,6 +131,8 @@ def _cambio_explicito_de_entidad(texto: str, propuesta: dict) -> str:
     ):
         if re.search(patron, texto):
             return entidad
+    if not aceptar_propuesta:
+        return ""
     entidad = _ALIASES_ENTIDAD.get(_texto((propuesta or {}).get("entidad")),
                                     _texto((propuesta or {}).get("entidad")))
     return entidad if entidad in ENTIDADES else ""
@@ -160,9 +180,18 @@ def aplicar_delta(pregunta: str, previo: dict | None,
         "periodo": anterior.get("periodo") or {}, "relacion": "seguimiento",
     }, previo=anterior)
     cambios = {}
-    operacion = _cambio_explicito_de_operacion(texto, propuesta)
-    metrica = _cambio_explicito_de_metrica(texto, propuesta)
-    entidad = _cambio_explicito_de_entidad(texto, propuesta)
+    # En un seguimiento, Gemini sólo puede proponer filtros explícitos. La
+    # operación, métrica y entidad cambian exclusivamente por palabras del
+    # usuario; de lo contrario se conserva el contrato verificado anterior.
+    operacion = _cambio_explicito_de_operacion(
+        texto, propuesta, aceptar_propuesta=False,
+    )
+    metrica = _cambio_explicito_de_metrica(
+        texto, propuesta, aceptar_propuesta=False,
+    )
+    entidad = _cambio_explicito_de_entidad(
+        texto, propuesta, aceptar_propuesta=False,
+    )
     if operacion and operacion != base["operacion"]:
         cambios["operacion"] = operacion
     if metrica and metrica != base["metrica"]:

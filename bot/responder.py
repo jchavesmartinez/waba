@@ -633,6 +633,14 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
     # resuelven sobre las filas persistidas y así conservan exactamente el
     # orden, filtros y cifras que el usuario acaba de ver.
     if fmt == formato.TEXTO and not sql_reutilizado:
+        comparacion_previa = seguimiento.resolver_comparacion_historial(
+            pregunta, historial,
+        )
+        if comparacion_previa is not None:
+            return Respuesta(
+                comparacion_previa["texto"],
+                estado=comparacion_previa["estado"],
+            )
         calculo_previo = seguimiento.resolver_sobre_resultado(
             pregunta, historial,
         )
@@ -739,19 +747,76 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             # devolver solo totales o repetir el ultimo resumen.
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
 
-    # Normaliza el contrato de toda pregunta (también las nuevas) antes de
-    # elegir o reparar un KPI. Gemini propone el plan, pero no puede etiquetar
-    # «presupuesto» como gasto ni cambiar una dimensión que el usuario nombró.
-    contrato_propuesto = contrato_consulta.aplicar_delta(
-        pregunta_efectiva, None, plan,
-        periodo=seguimiento.periodo_explicito(pregunta_efectiva),
-    ).get("contrato") or {}
-    for clave, destino in (
-        ("operacion", "operacion"), ("metrica", "metrica"),
-        ("entidad", "entidad"),
-    ):
-        if contrato_propuesto.get(clave):
-            plan[destino] = contrato_propuesto[clave]
+    # En un seguimiento se construye primero el delta sobre el contrato
+    # verificado. Hacer la reparación/validación del KPI antes de esto dejaba
+    # que Gemini cambiara «total» por «ranking» o borrara el concepto y la
+    # validación rechazaba una pregunta humana perfectamente válida.
+    previo_estado = seguimiento.ultimo_estado(historial)
+    es_seguimiento_real = bool(
+        previo_estado and contrato_consulta.es_seguimiento(
+            pregunta_efectiva,
+            dict(previo_estado.get("contrato") or previo_estado), plan,
+        )
+    )
+    contrato = {}
+    if es_seguimiento_real:
+        contrato = seguimiento.contrato_seguimiento(
+            pregunta_efectiva, historial, plan,
+        )
+        if contrato.get("aclaracion"):
+            estado_aclaracion = dict(contrato.get("estado_previo") or {})
+            estado_aclaracion["contrato"] = contrato_consulta.copiar(
+                contrato.get("contrato") or {},
+            )
+            estado_aclaracion["pendiente"] = {"tipo": "delta"}
+            return Respuesta(str(contrato["aclaracion"]), estado=estado_aclaracion)
+        if contrato:
+            plan.update(
+                relacion="seguimiento",
+                operacion=contrato.get("operacion") or plan.get("operacion"),
+                metrica=contrato.get("metrica") or plan.get("metrica"),
+                entidad=contrato.get("agrupacion") or plan.get("entidad"),
+                # Incluye los filtros heredados en la propuesta SQL; no son
+                # una sugerencia de Gemini sino parte del contrato ejecutable.
+                filtros_actuales=dict(contrato.get("filtros") or {}),
+                # Procedencia del resultado anterior. La reparación de KPI
+                # puede añadir relaciones necesarias, pero no descartar una
+                # tabla que ya sustentó un resultado verificado.
+                tablas_fuente=list(previo_estado.get("tablas_fuente") or []),
+                metricas_contexto=[
+                    str((previo_estado.get("contrato") or previo_estado).get(
+                        "metrica", "",
+                    ))
+                ],
+                periodo_contexto=dict(contrato.get("periodo") or {}),
+            )
+            # Si el usuario sólo cambió un filtro o el período, el KPI ya
+            # ejecutado es la fuente más fiable de la forma de salida. Así un
+            # seguimiento de una línea presupuestaria no degrada de
+            # presupuesto/gastado/disponible a un simple total de gasto por
+            # una nueva clasificación de Gemini.
+            conserva_forma = (
+                contrato.get("operacion") == contrato.get("operacion_previa")
+                and contrato.get("metrica") == contrato.get("metrica_previa")
+                and contrato.get("agrupacion") == contrato.get("agrupacion_previa")
+            )
+            if conserva_forma and previo_estado.get("kpi"):
+                plan.update(
+                    accion="usar_kpi", kpi=str(previo_estado["kpi"]),
+                    sql="", mensaje="", heredar_kpi=True,
+                )
+    else:
+        # Normaliza sólo preguntas nuevas antes de elegir o reparar un KPI.
+        contrato_propuesto = contrato_consulta.aplicar_delta(
+            pregunta_efectiva, None, plan,
+            periodo=seguimiento.periodo_explicito(pregunta_efectiva),
+        ).get("contrato") or {}
+        for clave, destino in (
+            ("operacion", "operacion"), ("metrica", "metrica"),
+            ("entidad", "entidad"),
+        ):
+            if contrato_propuesto.get(clave):
+                plan[destino] = contrato_propuesto[clave]
 
     # Reparación metadata-driven: el modelo propone un KPI, pero no puede
     # combinar una dimensión de uno con la fórmula de otro. Si existe otro KPI
@@ -794,9 +859,8 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             "Puedo consultar únicamente las métricas y dimensiones habilitadas para este chat."
         )
 
-    contrato = seguimiento.contrato_seguimiento(
-        pregunta_efectiva, historial, plan,
-    )
+    # ``contrato`` ya se construyó antes de reparar el KPI para que la
+    # reparación vea el delta estable. Para una pregunta nueva permanece vacío.
     if contrato:
         if contrato.get("aclaracion"):
             estado_aclaracion = dict(contrato.get("estado_previo") or {})
@@ -816,7 +880,12 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             or bool(contrato.get("relacion_temporal"))
             or bool(contrato.get("referencia_conjunto"))
         )
-        if cambio_forma:
+        # Si la reparación metadata-driven ya eligió una fórmula compatible
+        # con el contrato actualizado, conservarla. Forzar SQL libre aquí
+        # descartaba sus defaults (relaciones, moneda, período) y hacía que
+        # un simple cambio de métrica mezclara universos distintos. Cuando no
+        # existe KPI compatible se mantiene el camino SQL libre y sus barreras.
+        if cambio_forma and not (plan.get("accion") == "usar_kpi" and plan.get("kpi")):
             plan.update(accion="sql_libre", kpi="", sql="", mensaje="")
 
         # Un KPI que no expone una dimensión heredada no puede aplicar ese
@@ -1022,6 +1091,14 @@ def _responder_datos(cliente: dict, numero: str, pregunta: str,
             if filtros_sql:
                 logger.info("[%s] KPI parametrizado con contexto: %s",
                             cid, sorted(filtros_sql))
+                # Los defaults y filtros que la fórmula canónica aplicó son
+                # parte del resultado verificado. Persistirlos en el contrato
+                # evita que un seguimiento de presupuesto pierda, por ejemplo,
+                # la moneda CRC implícita y sume después todas las divisas.
+                filtros_contrato = contrato_universal.setdefault("filtros", {})
+                for clave, valor in filtros_sql.items():
+                    if clave in contrato_consulta.FILTROS and valor not in (None, ""):
+                        filtros_contrato.setdefault(clave, str(valor))
         if sql:
             # La formula ya viene materializada de forma deterministica desde la
             # metadata: el modelo eligio QUE KPI corresponde, pero no puede

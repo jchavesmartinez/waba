@@ -62,6 +62,31 @@ def _nombre(valor) -> str:
     return _normalizar(valor).replace(" ", "_")
 
 
+def tablas_fuente_sql(sql: str) -> list[str]:
+    """Devuelve tablas físicas de un SQL ya validado.
+
+    La procedencia se conserva desde la ejecución, nunca desde la prosa. Es
+    genérica para cualquier dominio que declare fórmulas SQL en metadata.
+    """
+    try:
+        import sqlglot
+        from sqlglot import exp
+        arbol = sqlglot.parse_one(str(sql or ""), read="postgres")
+    except Exception:
+        return []
+    ctes = {
+        str(cte.alias_or_name).strip().lower()
+        for cte in arbol.find_all(exp.CTE)
+        if str(cte.alias_or_name).strip()
+    }
+    return sorted({
+        str(tabla.name).strip().lower()
+        for tabla in arbol.find_all(exp.Table)
+        if str(tabla.name).strip()
+        and str(tabla.name).strip().lower() not in ctes
+    })
+
+
 def normalizar_clave(valor) -> str:
     """Normalizacion publica para cruzar dimensiones ejecutadas."""
     return _normalizar(valor)
@@ -106,6 +131,143 @@ def ultimo_estado(historial: list) -> dict:
         if isinstance(estado, dict) and estado.get("columnas") is not None:
             return estado
     return {}
+
+
+def _etiqueta_periodo(estado: dict) -> str:
+    """Nombre humano del período guardado, sin inferir fechas nuevas."""
+    inicio = str((estado or {}).get("periodo", {}).get("inicio", ""))[:10]
+    match = re.fullmatch(r"(20\d{2})-(\d{2})-\d{2}", inicio)
+    if not match:
+        return inicio or "el período anterior"
+    anio, mes = match.groups()
+    nombre = next((n for n, numero in _MESES.items() if numero == int(mes)), mes)
+    return f"{nombre} de {anio}"
+
+
+def _etiqueta_comparacion(estado: dict) -> str:
+    """Etiqueta la entidad/filtro que distingue un resultado verificado."""
+    filtros = dict((estado or {}).get("filtros") or {})
+    for clave in ("descripcion", "concepto", "categoria", "linea_id", "moneda"):
+        if filtros.get(clave):
+            return str(filtros[clave])
+    return _etiqueta_periodo(estado)
+
+
+def _metrica_comparacion_pedida(texto: str, predeterminada: str) -> str:
+    """Reconoce una métrica explícita para comparar filas verificadas."""
+    if re.search(r"\b(?:presupuesto|presupuestado|planeado)\b", texto):
+        return "presupuesto"
+    if re.search(r"\b(?:disponible|queda[n]?|resta[n]?|falta[n]?)\b", texto):
+        return "disponible"
+    if re.search(r"\b(?:exceso|exced|sobregir)\b", texto):
+        return "exceso"
+    if re.search(r"\b(?:cantidad|numero|cuantos|movimientos?|transacciones?)\b", texto):
+        return "conteo"
+    if re.search(r"\b(?:gastado|gasto|gaste)\b", texto):
+        return "gastado"
+    return predeterminada
+
+
+def resolver_comparacion_historial(pregunta: str, historial: list):
+    """Compara dos resultados consecutivos ya verificados.
+
+    Frases como «¿cuál de los dos fue mayor?» no requieren un tercer SQL: los
+    dos importes, sus filtros y períodos ya fueron ejecutados y persistidos.
+    Se compara sólo cuando ambos resultados son una fila, misma métrica,
+    filtros equivalentes y una única moneda compatible. Si no se cumplen esas
+    condiciones, se deja continuar por el contrato normal.
+    """
+    t = _normalizar(pregunta)
+    if not re.search(
+        r"\b(?:cual\s+(?:de\s+)?(?:los\s+)?(?:dos|ambos).*(?:mayor|menor)|"
+        r"cual\s+fue\s+(?:el|la)?\s*(?:mayor|menor)|"
+        r"cual.*(?:mayor|menor).*\b(?:dos|ambos)|aument(?:o|aron)?|"
+        r"cual.*\b(?:mayor|menor)\s+(?:presupuesto|gastado|gasto|disponible|exceso|movimientos?|transacciones?)|"
+        r"cual.*\b(?:mas|menos)\s+(?:presupuesto|gastado|gasto|disponible|exceso|movimientos?|transacciones?)|"
+        r"baj(?:o|aron)?|vari(?:o|aron|acion)|diferencia|ha\s+variado)\b", t,
+    ):
+        return None
+    estados = [turno.get("estado") for turno in historial or []
+               if turno.get("rol") == "assistant" and isinstance(turno.get("estado"), dict)]
+    estados = [e for e in estados if e.get("columnas") and e.get("filas")]
+    if len(estados) < 2:
+        return None
+    anterior, actual = estados[-2], estados[-1]
+    if (int(anterior.get("filas_totales", len(anterior.get("filas") or []))) != 1
+            or int(actual.get("filas_totales", len(actual.get("filas") or []))) != 1):
+        return None
+    contrato_a = dict(anterior.get("contrato") or {})
+    contrato_b = dict(actual.get("contrato") or {})
+    metrica_a = str(contrato_a.get("metrica") or anterior.get("metrica") or "")
+    metrica_b = str(contrato_b.get("metrica") or actual.get("metrica") or "")
+    if not metrica_a or metrica_a != metrica_b:
+        return None
+    metrica = _metrica_comparacion_pedida(t, metrica_a)
+    # El estado ejecutado incluye filtros que el SQL confirmó (por ejemplo la
+    # única moneda de la respuesta); el contrato puede no haberla nombrado en
+    # el primer turno. Para comparar resultados ya ejecutados, esa evidencia
+    # es más completa y evita rechazar agosto/sep por una omisión inocua.
+    filtros_a = dict(anterior.get("filtros") or contrato_a.get("filtros") or {})
+    filtros_b = dict(actual.get("filtros") or contrato_b.get("filtros") or {})
+    mismo_periodo = _etiqueta_periodo(anterior) == _etiqueta_periodo(actual)
+    mismos_filtros = filtros_a == filtros_b
+    # Se comparan dos períodos del mismo filtro, o dos filtros/entidades del
+    # mismo período. Mezclar ambas variaciones a la vez sería ambiguo.
+    if (mismo_periodo and mismos_filtros) or (not mismo_periodo and not mismos_filtros):
+        return None
+    aliases = {
+        "gastado": _GASTADO + _MONTOS_DETALLE,
+        "presupuesto": _PRESUPUESTO,
+        "disponible": _DISPONIBLE,
+        "exceso": _EXCESO,
+        "conteo": ("conteo", "cantidad", "count", "total_movimientos"),
+    }.get(metrica, ())
+    i_a = _indice(anterior["columnas"], aliases)
+    i_b = _indice(actual["columnas"], aliases)
+    if i_a is None or i_b is None:
+        return None
+    valor_a = _decimal(anterior["filas"][0][i_a])
+    valor_b = _decimal(actual["filas"][0][i_b])
+    if valor_a is None or valor_b is None:
+        return None
+    mon_a = _indice(anterior["columnas"], _GRUPOS_FILTRO["moneda"])
+    mon_b = _indice(actual["columnas"], _GRUPOS_FILTRO["moneda"])
+    moneda_a = (
+        str(anterior["filas"][0][mon_a]) if mon_a is not None
+        else str(filtros_a.get("moneda", ""))
+    )
+    moneda_b = (
+        str(actual["filas"][0][mon_b]) if mon_b is not None
+        else str(filtros_b.get("moneda", ""))
+    )
+    if moneda_a != moneda_b:
+        return None
+    etiqueta_a, etiqueta_b = (
+        (_etiqueta_periodo(anterior), _etiqueta_periodo(actual))
+        if mismos_filtros else (_etiqueta_comparacion(anterior), _etiqueta_comparacion(actual))
+    )
+    diferencia = valor_b - valor_a
+    if re.search(r"\b(?:mayor|aument|subio|subieron|mas\s+(?:presupuesto|gastado|gasto|disponible|exceso))\b", t):
+        ganador = etiqueta_b if valor_b > valor_a else etiqueta_a
+        texto = f"{ganador.capitalize()} fue mayor por {_formato_numero(abs(diferencia))}."
+    elif re.search(r"\b(?:menor|baj|disminuy|menos\s+(?:presupuesto|gastado|gasto|disponible|exceso))\b", t):
+        ganador = etiqueta_b if valor_b < valor_a else etiqueta_a
+        texto = f"{ganador.capitalize()} fue menor por {_formato_numero(abs(diferencia))}."
+    else:
+        direccion = "aumentó" if diferencia > 0 else "disminuyó" if diferencia < 0 else "no cambió"
+        texto = f"De {etiqueta_a} a {etiqueta_b} {direccion} {_formato_numero(abs(diferencia))}."
+    columnas = ["periodo_anterior", metrica, "periodo_actual", metrica, "diferencia"]
+    filas = [(etiqueta_a, valor_a, etiqueta_b, valor_b, diferencia)]
+    estado = crear_estado(
+        pregunta, "", "", actual.get("unidad", ""), columnas, filas,
+        previo=actual, operacion="comparacion", agrupacion="",
+    )
+    estado["contrato"] = contrato_consulta.crear({
+        "operacion": "comparacion", "metrica": metrica, "entidad": "",
+        "filtros": filtros_b, "periodo": actual.get("periodo") or {},
+        "relacion": "seguimiento",
+    }, previo=contrato_b)
+    return {"texto": texto, "columnas": columnas, "filas": filas, "estado": estado}
 
 
 def contexto_segun_plan(historial: list, plan: dict) -> dict:
@@ -593,6 +755,14 @@ def contrato_seguimiento(pregunta: str, historial: list,
         "periodo": dict(contrato_previo.get("periodo") or previo.get("periodo") or {}),
         "relacion": "seguimiento",
     }
+    # Una aclaración posterior responde una decisión que el bot ya dejó
+    # pendiente y persistió de forma verificada. No es una inferencia nueva
+    # del planificador; por eso se incorpora a la base del delta antes de
+    # bloquear propuestas implícitas de Gemini.
+    if pendiente.get("operacion"):
+        previo_delta["operacion"] = str(pendiente["operacion"])
+    if pendiente.get("metrica"):
+        previo_delta["metrica"] = str(pendiente["metrica"])
     propuesta_delta = dict(plan or {})
     # Una aclaración responde a una intención pendiente que ya fue mostrada;
     # no permitimos que un plan nuevo la degrade a un total genérico.
@@ -721,7 +891,7 @@ def resolver_referencia(pregunta: str, historial: list):
         return None
     ordinal_solicitado = _ordinal_mencionado(t)
     seleccion_explicita = bool(re.search(
-        r"\b(?:primero|primera|ultimo|ultima|mayor|menor|mas\s+car[oa]|"
+        r"\b(?:primero|primera|ultimo|ultima|mayor|menor|mas\s+(?:car[oa]|alto|alta)|"
         r"que\s+mas|que\s+menos|segundo|segunda|tercero|tercera|cuarto|cuarta|"
         r"quinto|quinta|sexto|sexta|septimo|septima|octavo|octava|noveno|novena|"
         r"decimo|decima)\b",
@@ -744,6 +914,20 @@ def resolver_referencia(pregunta: str, historial: list):
         t,
     ):
         return None
+    # Un total calculado localmente conserva el detalle que lo compuso. Si el
+    # usuario pide «¿cuál fue el más alto?» después de «¿cuánto suman?», la
+    # referencia correcta es ese detalle, no la única fila del total.
+    origen = estado.get("origen_resultado") if isinstance(estado, dict) else None
+    if seleccion_explicita and isinstance(origen, dict):
+        columnas_origen = list(origen.get("columnas") or [])
+        filas_origen = list(origen.get("filas") or [])
+        if columnas_origen and filas_origen:
+            estado = dict(estado)
+            estado["columnas"] = columnas_origen
+            estado["filas"] = filas_origen
+            estado["filas_totales"] = int(origen.get("filas_totales", len(filas_origen)))
+            if origen.get("filtros"):
+                estado["filtros"] = dict(origen["filtros"])
     columnas = list(estado.get("columnas") or [])
     filas = [tuple(f) for f in estado.get("filas") or []]
     if not filas:
@@ -805,6 +989,22 @@ def resolver_referencia(pregunta: str, historial: list):
     estado_nuevo["filas_totales"] = 1
     estado_nuevo["seleccion"] = {"indice": indice, "criterio": criterio}
     estado_nuevo["modo"] = "resumen"
+    # La fila elegida vuelve inequívocas las dimensiones que proyectaba la
+    # lista. Persistirlas como filtros permite que «¿y su presupuesto?» use
+    # la selección, no toda la lista previa.
+    filtros_seleccion = filtros_unicos(columnas, seleccionada)
+    if filtros_seleccion:
+        estado_nuevo["filtros"] = {
+            **dict(estado_nuevo.get("filtros") or {}),
+            **filtros_seleccion,
+        }
+        contrato_seleccion = dict(estado_nuevo.get("contrato") or {})
+        if contrato_seleccion:
+            contrato_seleccion["filtros"] = {
+                **dict(contrato_seleccion.get("filtros") or {}),
+                **filtros_seleccion,
+            }
+            estado_nuevo["contrato"] = contrato_consulta.copiar(contrato_seleccion)
     return {
         "columnas": columnas,
         "filas": seleccionada,
@@ -866,6 +1066,12 @@ def resolver_sobre_resultado(pregunta: str, historial: list):
             estado.get("unidad", ""), columnas_nuevas, filas_nuevas,
             previo=estado,
         )
+        nuevo["origen_resultado"] = {
+            "columnas": [str(c) for c in columnas],
+            "filas": [[_json_valor(v) for v in fila] for fila in filas],
+            "filas_totales": int(estado.get("filas_totales", len(filas))),
+            "filtros": dict(estado.get("filtros") or {}),
+        }
         return {"columnas": columnas_nuevas, "filas": filas_nuevas,
                 "estado": nuevo, "sql": estado.get("sql", "")}
 
@@ -930,8 +1136,9 @@ def resolver_sobre_resultado(pregunta: str, historial: list):
         ("descripcion", ("descripcion", "comercio"), r"\b(?:descripcion|comercio|nombre)\b"),
         ("categoria", ("categoria", "cuenta_contable"), r"\b(?:categoria|cuenta contable)\b"),
         ("concepto", ("concepto",), r"\bconcepto\b"),
-        ("monto", ("gasto_neto", "gastado", "monto_neto", "monto_crc", "monto", "importe", "total"), r"\b(?:monto|gastado|gaste)\b"),
+        ("monto", ("gasto_neto", "gastado", "total_gastado", "total_gasto", "monto_neto", "monto_crc", "monto", "importe", "total"), r"\b(?:monto|gastado|gaste|gasto)\b"),
         ("disponible", ("disponible", "saldo_disponible", "diferencia"), r"\b(?:queda|quedan|disponible|saldo)\b"),
+        ("porcentaje", _PORCENTAJE, r"\b(?:porcentaje|pct)\b"),
         ("moneda", ("moneda", "monto_moneda", "currency"), r"\bmoneda\b"),
         ("fecha", ("fecha", "fecha_transaccion"), r"\b(?:fecha|dia)\b"),
     )
@@ -1038,9 +1245,14 @@ def validar_contrato_sql(sql: str, contrato: dict) -> tuple[bool, str]:
     if operacion == "total" and not any(arbol.find_all(exp.Sum)):
         return False, "el seguimiento debía devolver un total con SUM"
     dimension = contrato.get("agrupacion")
+    # Un KPI parametrizado puede envolver su SELECT canónico en ``SELECT *
+    # FROM (...)`` para aplicar un filtro. La métrica sigue proyectada por el
+    # SELECT interno; mirar sólo el nivel exterior convertiría ese envoltorio
+    # seguro en un falso incumplimiento del contrato.
     proyectadas = {
         _nombre(sel.alias_or_name or sel.sql())
-        for sel in arbol.expressions
+        for select in arbol.find_all(exp.Select)
+        for sel in select.expressions
     }
     if contrato.get("metrica") == "exceso" and not (
             set(_EXCESO) & proyectadas):
@@ -1068,6 +1280,8 @@ def validar_contrato_sql(sql: str, contrato: dict) -> tuple[bool, str]:
     filtros_contrato = contrato.get("filtros") or {}
     linea_id = filtros_contrato.get("linea_id")
     linea_presente = bool(linea_id and _normalizar(linea_id) in sql_normalizado)
+    concepto = filtros_contrato.get("concepto")
+    concepto_presente = bool(concepto and _normalizar(concepto) in sql_normalizado)
     for clave, valor in filtros_contrato.items():
         if valor in (None, ""):
             continue
@@ -1075,6 +1289,14 @@ def validar_contrato_sql(sql: str, contrato: dict) -> tuple[bool, str]:
         # concepto y categoría. Exigir además las etiquetas humanas haría
         # rechazar una consulta más precisa que la requerida.
         if linea_presente and clave in {"concepto", "categoria"}:
+            continue
+        # Un concepto puede reemplazar el literal de categoría en un KPI que
+        # devuelve la categoría como columna. En ese caso la ejecución filtra
+        # después las filas por la categoría heredada; exigir ambos literales
+        # antes de ejecutar bloquearía un seguimiento más específico sin
+        # aumentar la seguridad.
+        if (clave == "categoria" and concepto_presente
+                and set(_GRUPOS_FILTRO["categoria"]) & proyectadas):
             continue
         if _normalizar(valor) not in sql_normalizado:
             return False, f"el SQL perdió el filtro heredado {clave}={valor}"
@@ -1184,7 +1406,37 @@ def crear_estado(pregunta: str, sql: str, kpi: str, unidad: str,
         "metrica": metrica_resultado(columnas),
         "dimensiones": [str(c) for c in columnas],
         "orden": "consulta",
+        "tablas_fuente": tablas_fuente_sql(sql),
     }
+    contrato_previo = dict((previo or {}).get("contrato") or {})
+    if contrato_previo:
+        # Una selección, proyección o suma local no es una intención nueva.
+        # Mantener el contrato evita perder filtros y período en el turno que
+        # siga a esa operación verificada.
+        base["contrato"] = contrato_consulta.copiar(contrato_previo)
+    periodo_previo = dict((previo or {}).get("periodo") or {})
+    mismo_periodo = (
+        not periodo_previo
+        or (periodo_previo.get("inicio") == base["periodo"].get("inicio")
+            and periodo_previo.get("fin_exclusivo", periodo_previo.get("fin_inclusivo"))
+            == base["periodo"].get("fin_exclusivo", base["periodo"].get("fin_inclusivo")))
+    )
+    # Si un agregado se deriva de un detalle del mismo universo, conservar el
+    # detalle permite resolver «¿cuál fue el mayor?» sin reinterpretar filtros
+    # ni volver a consultar. Un cambio de período no lo hereda.
+    if (not es_detalle and mismo_periodo and (previo or {}).get("columnas")
+            and (previo or {}).get("filas")
+            and int((previo or {}).get("filas_totales", len((previo or {}).get("filas") or [])))
+            == len((previo or {}).get("filas") or [])):
+        columnas_previas = list((previo or {}).get("columnas") or [])
+        filas_previas = list((previo or {}).get("filas") or [])
+        if _parece_detalle({"columnas": columnas_previas}):
+            base["origen_resultado"] = {
+                "columnas": [str(c) for c in columnas_previas],
+                "filas": [[_json_valor(v) for v in fila] for fila in filas_previas],
+                "filas_totales": len(filas_previas),
+                "filtros": dict((previo or {}).get("filtros") or {}),
+            }
     if sql_detalle and campos_detalle.get("fecha") and campos_detalle.get("monto"):
         base["sql_detalle"] = sql_detalle
         base["campos_detalle"] = campos_detalle
