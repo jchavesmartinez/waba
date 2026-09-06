@@ -968,6 +968,22 @@ def test_validar_resultado_acepta_contrato_compatible():
     assert motivo == ""
 
 
+def test_validar_resultado_acepta_detalle_de_transacciones_sin_id_tecnico():
+    ok, motivo = seguimiento.validar_resultado(
+        ["fecha_transaccion", "comercio", "monto"],
+        [("2026-09-05", "Walmart", 12000)],
+        {"operacion": "detalle", "entidad": "transaccion", "metrica": "gastado"},
+    )
+    assert ok
+    assert motivo == ""
+
+
+def test_periodo_explicito_reconoce_fecha_escrita_completa():
+    periodo = seguimiento.periodo_explicito("gastos del 5 de setiembre de 2026")
+    assert periodo["inicio"] == "2026-09-05"
+    assert periodo["fin_exclusivo"] == "2026-09-06"
+
+
 def test_mencionar_un_concepto_de_la_lista_lo_convierte_en_filtro():
     previo = seguimiento.crear_estado(
         "excesos", "SELECT concepto", "", "CRC",

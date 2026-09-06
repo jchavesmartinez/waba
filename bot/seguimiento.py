@@ -190,6 +190,20 @@ def periodo_explicito(pregunta: str) -> dict:
         fin = hoy.replace(day=1)
         inicio = (fin - timedelta(days=1)).replace(day=1)
         return rango(inicio, fin, "mes")
+    # Fecha completa escrita de forma natural: "5 de setiembre de 2026".
+    # Debe resolverse antes del fallback mensual; de otro modo la consulta
+    # pierde el día y termina buscando todo setiembre.
+    fecha_escrita = re.search(
+        r"\b(\d{1,2})\s+de\s+(" + "|".join(_MESES) + r")"
+        r"(?:\s+de)?\s+(20\d{2})\b", t,
+    )
+    if fecha_escrita:
+        dia, nombre_mes, anio = fecha_escrita.groups()
+        try:
+            inicio = date(int(anio), _MESES[nombre_mes], int(dia))
+        except ValueError:
+            return {}
+        return rango(inicio, inicio + timedelta(days=1), "dia")
     mes = next((numero for nombre, numero in _MESES.items()
                 if re.search(rf"\b{nombre}\b", t)), None)
     anio_m = re.search(r"\b(20\d{2})\b", t)
@@ -1112,9 +1126,18 @@ def validar_resultado(columnas, filas, contexto: dict | None = None) -> tuple[bo
             "concepto": ("concepto",),
             "descripcion": ("descripcion", "comercio"),
             "moneda": ("moneda", "currency", "codigo_moneda"),
-            "transaccion": ("movimiento_id", "transaccion_id", "id"),
+            # Una transacción no necesita exponer un ID técnico para ser una
+            # respuesta humana válida. Fecha + comercio/descripción + monto
+            # constituyen el detalle mínimo; el ID puede quedar oculto.
+            "transaccion": (),
         }.get(entidad, ())
-        if candidatos and not any(c in nombres for c in candidatos):
+        if entidad == "transaccion":
+            tiene_fecha = any(n == "fecha" or n.startswith("fecha_") for n in nombres)
+            tiene_descripcion = bool(set(_GRUPOS_FILTRO["descripcion"]) & set(nombres))
+            tiene_monto = any(n in nombres for n in _MONTOS_DETALLE)
+            if not (tiene_fecha and tiene_descripcion and tiene_monto):
+                return False, "el resultado no proyecta el detalle de transacción solicitado"
+        elif candidatos and not any(c in nombres for c in candidatos):
             return False, f"el resultado no proyecta la entidad solicitada {entidad}"
     metrica = str(contexto.get("metrica") or "").strip().lower()
     if metrica and operacion in {"total", "ranking", "desglose", "comparacion"}:

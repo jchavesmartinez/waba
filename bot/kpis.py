@@ -755,6 +755,11 @@ def _parsear(texto: str) -> dict:
         clave = str(clave).strip().lower()
         valor = str(valor).strip()
         if clave in permitidos and valor:
+            # Una fecha ISO nunca es un comercio/descripción. El período se
+            # resuelve de forma determinística; conservarla como filtro de
+            # texto produce WHERE descripcion ILIKE '%2026-09-05%'.
+            if clave == "descripcion" and re.fullmatch(r"20\d{2}-\d{2}-\d{2}", valor):
+                continue
             filtros_actuales[clave] = valor
     operaciones = {"", "total", "conteo", "ranking", "detalle", "desglose", "comparacion"}
     metricas = {"", "gastado", "presupuesto", "disponible", "exceso", "conteo"}
