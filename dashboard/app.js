@@ -79,7 +79,7 @@
         const fill = document.createElement("span"); fill.className = `bar-fill ${cls}`;
         fill.style.width = `${Math.min(100, Math.abs(number(row[key])) / max * 100)}%`;
         track.append(fill);
-        const value = document.createElement("strong"); value.textContent = format(row[key], key);
+        const value = document.createElement("strong"); value.textContent = format(row[key], key, row.moneda);
         line.append(labelEl, track, value); container.append(line);
       });
   };
@@ -143,9 +143,11 @@
       if (categories.has(categoryId)) return;
       const conceptKey = keyMatch(movement, /^concepto$|rubro/i);
       const conceptName = movement[conceptKey] || "Gastos sin identificar";
-      const conceptId = `${categoryId}|${normalized(conceptName)}`;
+      const currencyKey = keyMatch(movement, /^moneda$/i);
+      const moneda = movement[currencyKey] || "CRC";
+      const conceptId = `${categoryId}|${normalized(conceptName)}|${normalized(moneda)}`;
       const entry = unclassified.get(conceptId) || {
-        categoria: categoryName, concepto: conceptName, gastado: 0,
+        categoria: categoryName, concepto: conceptName, moneda, gastado: 0,
       };
       entry.gastado += number(movement[keyMatch(movement, /^monto$|gasto.?neto|gastado/i)]);
       unclassified.set(conceptId, entry);
@@ -154,12 +156,17 @@
       const categoryId = normalized(entry.categoria);
       const row = {
         categoria: entry.categoria,
-        concepto: entry.concepto,
+        concepto: `${entry.concepto} · ${entry.moneda}`,
+        origen_concepto: entry.concepto,
+        moneda: entry.moneda,
         presupuesto: 0,
         gastado: entry.gastado,
       };
-      const bucket = categories.get(categoryId) || { name: entry.categoria, rows: [], totals: {} };
+      const bucket = categories.get(categoryId) || {
+        name: entry.categoria, rows: [], totals: {}, monedas: new Set(),
+      };
       bucket.rows.push(row);
+      if (bucket.monedas) bucket.monedas.add(entry.moneda);
       bucket.totals.presupuesto = (number(bucket.totals.presupuesto) || 0) + row.presupuesto;
       bucket.totals.gastado = (number(bucket.totals.gastado) || 0) + row.gastado;
       categories.set(categoryId, bucket);
@@ -178,10 +185,13 @@
       const categoryHeading = document.createElement("span"); categoryHeading.className = "nivel-titulo"; categoryHeading.textContent = bucket.name;
       const categoryMeta = document.createElement("span"); categoryMeta.className = "nivel-meta";
       const categoryKeys = metricKeys(bucket.totals);
-      categoryMeta.textContent = [
-        categoryKeys.budget && `Presupuesto: ${format(bucket.totals[categoryKeys.budget], categoryKeys.budget)}`,
-        categoryKeys.spent && `Gastado: ${format(bucket.totals[categoryKeys.spent], categoryKeys.spent)}`,
-      ].filter(Boolean).join(" · ");
+      const multipleCurrencies = bucket.monedas && bucket.monedas.size > 1;
+      categoryMeta.textContent = multipleCurrencies
+        ? "Gastos en varias monedas"
+        : [
+          categoryKeys.budget && `Presupuesto: ${format(bucket.totals[categoryKeys.budget], categoryKeys.budget, bucket.monedas ? [...bucket.monedas][0] : "")}`,
+          categoryKeys.spent && `Gastado: ${format(bucket.totals[categoryKeys.spent], categoryKeys.spent, bucket.monedas ? [...bucket.monedas][0] : "")}`,
+        ].filter(Boolean).join(" · ");
       categorySummary.append(categoryHeading, categoryMeta); categoryDetails.append(categorySummary);
       const conceptsWrap = document.createElement("div"); conceptsWrap.className = "nivel-hijos";
       const rows = bucket.rows.filter((row) => keyMatch(row, /^concepto$|rubro/i));
@@ -193,17 +203,20 @@
         const conceptHeading = document.createElement("span"); conceptHeading.className = "nivel-titulo"; conceptHeading.textContent = row[conceptKey];
         const conceptKeys = metricKeys(row); const conceptMeta = document.createElement("span"); conceptMeta.className = "nivel-meta";
         conceptMeta.textContent = [
-          conceptKeys.budget && `Presupuesto: ${format(row[conceptKeys.budget], conceptKeys.budget)}`,
-          conceptKeys.spent && `Gastado: ${format(row[conceptKeys.spent], conceptKeys.spent)}`,
+          conceptKeys.budget && `Presupuesto: ${format(row[conceptKeys.budget], conceptKeys.budget, row.moneda)}`,
+          conceptKeys.spent && `Gastado: ${format(row[conceptKeys.spent], conceptKeys.spent, row.moneda)}`,
         ].filter(Boolean).join(" · ");
         conceptSummary.append(conceptHeading, conceptMeta); conceptDetails.append(conceptSummary);
         const conceptBody = document.createElement("div"); conceptBody.className = "nivel-detalle"; appendMetricBars(conceptBody, row);
         const matches = movements.filter((movement, index) => {
+          const originalConcept = row.origen_concepto || row[conceptKey];
           const sameLine = conceptLineKey && movementLine(movement) && movementLine(movement) === normalized(row[conceptLineKey]);
-          const sameConcept = movementConcept(movement) === normalized(row[conceptKey]);
+          const sameConcept = movementConcept(movement) === normalized(originalConcept);
           const sameCategory = movementCategory(movement) && movementCategory(movement) === normalized(bucket.name);
-          const sameName = normalized(movementName(movement)) === normalized(row[conceptKey]);
-          if ((sameLine || sameConcept || sameName) && (!movementCategory(movement) || sameCategory)) { usedMovements.add(index); return true; }
+          const sameName = normalized(movementName(movement)) === normalized(originalConcept);
+          const movementCurrency = movement[keyMatch(movement, /^moneda$/i)];
+          const sameCurrency = !row.moneda || !movementCurrency || normalized(movementCurrency) === normalized(row.moneda);
+          if ((sameLine || sameConcept || sameName) && (!movementCategory(movement) || sameCategory) && sameCurrency) { usedMovements.add(index); return true; }
           return false;
         });
         if (matches.length) {
