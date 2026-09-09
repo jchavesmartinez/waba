@@ -268,9 +268,19 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
     dashboard conserva sus KPIs planos en lugar de inventar asociaciones.
     """
     presupuesto = _tabla_por_nombre(ctx, ("presupuesto",))
+    # La tabla lógica ``movimientos`` es el contrato canónico: ya unifica los
+    # movimientos bancarios y los manuales, y resuelve la línea presupuestaria.
+    # Antes esta vista leía solo las fuentes crudas. Eso dejaba vacíos los
+    # detalles de conceptos cuyos cargos vinieran del banco (por ejemplo,
+    # Comedera), aunque el KPI agregado sí los sumara desde la canónica.
+    canonicos = _tabla_por_nombre(
+        ctx,
+        ("movimientos", "movimientos_canonicos", "movimientos canonicos",
+         "finanzas__movimientos"),
+    )
     transacciones = _tabla_por_nombre(ctx, ("transacciones", "finanzas__transacciones"))
     manuales = _tabla_por_nombre(ctx, ("gastos_manuales", "gastos manuales"))
-    if not presupuesto or not (transacciones or manuales):
+    if not presupuesto or not (canonicos or transacciones or manuales):
         return []
 
     pcols = _columnas_de(presupuesto)
@@ -282,7 +292,38 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
         return []
 
     partes = []
-    if transacciones:
+    ccols = _columnas_de(canonicos) if canonicos else set()
+    # Preferir la canónica evita duplicar el mismo gasto al unir sus fuentes.
+    # ``monto_neto`` ya incorpora el signo de reversos; si no está disponible,
+    # el contrato admite ``monto`` como alternativa de compatibilidad.
+    monto_canonico = (
+        "monto_neto" if "monto_neto" in ccols
+        else "monto" if "monto" in ccols
+        else ""
+    )
+    requeridas_canonicas = {
+        "linea_presupuesto_id", "fecha", "descripcion", "moneda",
+    }
+    usa_canonicos = bool(canonicos and monto_canonico and
+                          requeridas_canonicas.issubset(ccols))
+    if usa_canonicos:
+        tabla = _identificador(canonicos.tabla_real)
+        # No filtramos por etiquetas de tipo: entre conectores la misma compra
+        # puede llamarse COMPRA, GASTO o CARGO. La canónica normaliza el signo
+        # en monto_neto y la línea presupuestaria ya limita este árbol a líneas
+        # de gasto. Filtrar aquí dejó invisibles los movimientos BAC.
+        partes.append(
+            "SELECT CAST(m.linea_presupuesto_id AS text) AS linea_id, "
+            "m.fecha AS fecha, m.descripcion AS descripcion, "
+            "UPPER(COALESCE(NULLIF(CAST(m.moneda AS text),''),'CRC')) AS moneda, "
+            f"m.{_identificador(monto_canonico)} AS monto "
+            f"FROM {tabla} m WHERE m.fecha >= DATE '{inicio}' "
+            f"AND m.fecha < DATE '{fin}' AND m.linea_presupuesto_id IS NOT NULL"
+        )
+
+    # Clientes en transición todavía pueden no tener el modelo canónico. En
+    # ese caso conservamos el comportamiento histórico de unir las fuentes.
+    if not usa_canonicos and transacciones:
         cols = _columnas_de(transacciones)
         requeridas = {"linea_presupuesto_id", "fecha_transaccion", "monto", "monto_moneda", "tipo_transaccion"}
         if requeridas.issubset(cols) and ("comercio" in cols):
@@ -296,7 +337,7 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
                 f"FROM {tabla} t WHERE t.fecha_transaccion >= DATE '{inicio}' "
                 f"AND t.fecha_transaccion < DATE '{fin}'"
             )
-    if manuales:
+    if not usa_canonicos and manuales:
         cols = _columnas_de(manuales)
         requeridas = {"linea_presupuesto_id", "fecha", "descripcion", "monto", "moneda", "tipo_movimiento", "activo", "incluir_en_gasto"}
         if requeridas.issubset(cols):

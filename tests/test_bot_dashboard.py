@@ -3,7 +3,7 @@ import time
 import pytest
 
 import config
-from bot import dashboard
+from bot import catalogo, dashboard
 
 
 @pytest.fixture
@@ -77,3 +77,56 @@ def test_render_incrusta_snapshot_sin_llamadas_del_frontend(
     assert "__DASHBOARD_DATA__" not in html
     assert '"nombre":"Cliente A"' in html
     assert "/dashboard-assets/app.js" in html
+
+
+def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):
+    """El árbol no debe perder cargos bancarios al existir la tabla canónica."""
+    presupuesto = catalogo.TablaPermitida(
+        tabla_logica="presupuesto", tabla_real="presupuesto", fuente_id="sheet",
+        columnas_config={"linea_id": {}, "categoria": {}, "concepto": {}},
+    )
+    canonicos = catalogo.TablaPermitida(
+        tabla_logica="movimientos", tabla_real="finanzas__movimientos", fuente_id="modelo",
+        columnas_config={
+            "linea_presupuesto_id": {}, "fecha": {}, "descripcion": {},
+            "moneda": {}, "monto_neto": {}, "tipo_movimiento": {},
+        },
+    )
+    manuales = catalogo.TablaPermitida(
+        tabla_logica="gastos_manuales", tabla_real="gastos_manuales", fuente_id="sheet",
+        columnas_config={
+            "linea_presupuesto_id": {}, "fecha": {}, "descripcion": {},
+            "monto": {}, "moneda": {}, "tipo_movimiento": {}, "activo": {},
+            "incluir_en_gasto": {},
+        },
+    )
+    ctx = catalogo.Contexto(
+        schema_text="", tablas_reales={"presupuesto", "finanzas__movimientos", "gastos_manuales"},
+        permitidas=[presupuesto, canonicos, manuales],
+    )
+    capturado = {}
+
+    def ejecutar(_cliente, sql, limite):
+        capturado["sql"] = sql
+        capturado["limite"] = limite
+        return (
+            ["linea_id", "categoria", "concepto", "fecha", "descripcion", "moneda", "monto"],
+            [("gas_comedera", "Alimentacion", "Comedera", "2026-09-05",
+              "WALMART", "CRC", 23148)],
+        )
+
+    monkeypatch.setattr(dashboard.nl2sql, "validar_sql", lambda *_: (True, ""))
+    monkeypatch.setattr(dashboard.warehouse_ro, "ejecutar", ejecutar)
+
+    filas = dashboard._movimientos_jerarquia(
+        {"cliente_id": "cliente_a"}, ctx,
+        {"inicio": "2026-09-01", "fin_exclusivo": "2026-10-01"},
+    )
+
+    assert 'FROM "finanzas__movimientos" m' in capturado["sql"]
+    assert 'FROM "gastos_manuales" g' not in capturado["sql"]
+    assert filas == [{
+        "linea_id": "gas_comedera", "categoria": "Alimentacion",
+        "concepto": "Comedera", "fecha": "2026-09-05",
+        "descripcion": "WALMART", "moneda": "CRC", "monto": 23148,
+    }]
