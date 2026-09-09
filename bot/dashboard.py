@@ -358,7 +358,14 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
     ptabla = _identificador(presupuesto.tabla_real)
     sql = (
         "WITH movimientos AS (" + " UNION ALL ".join(partes) + ") "
-        f"SELECT m.linea_id, p.categoria, p.concepto, m.fecha, m.descripcion, m.moneda, m.monto "
+        # Una línea que aún no existe en el presupuesto no debe desaparecer
+        # del dashboard. Es información real, pero sin clasificar: mostrarla
+        # bajo una etiqueta explícita evita atribuirla erróneamente a una
+        # categoría presupuestaria y permite que el usuario vea su detalle.
+        f"SELECT m.linea_id, "
+        "COALESCE(NULLIF(TRIM(CAST(p.categoria AS text)),''),'Sin clasificar') AS categoria, "
+        "COALESCE(NULLIF(TRIM(CAST(p.concepto AS text)),''),'Gastos sin identificar') AS concepto, "
+        "m.fecha, m.descripcion, m.moneda, m.monto "
         f"FROM movimientos m LEFT JOIN {ptabla} p "
         "ON TRIM(CAST(p.linea_id AS text)) = TRIM(m.linea_id) "
         "WHERE m.linea_id IS NOT NULL "

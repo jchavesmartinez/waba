@@ -129,6 +129,41 @@
     const movementLine = (row) => normalized(row[keyMatch(row, /^linea_id$|linea_presupuesto_id/i)]);
     const movementCategory = (row) => normalized(row[keyMatch(row, /^categoria$|categoría/i)]);
     const movementConcept = (row) => normalized(row[keyMatch(row, /^concepto$|rubro/i)]);
+
+    // Los KPIs del presupuesto sólo contienen líneas presupuestadas. Un
+    // movimiento sin línea no debe ocultarse por ello: llega desde el backend
+    // como "Sin clasificar / Gastos sin identificar" y se agrega como un nodo
+    // de presupuesto cero. No se le asigna una categoría de negocio inventada.
+    const unclassified = new Map();
+    movements.forEach((movement) => {
+      const categoryKey = keyMatch(movement, /^categoria$|categoría/i);
+      const category = movement[categoryKey];
+      const categoryName = category || "Sin clasificar";
+      const categoryId = normalized(categoryName);
+      if (categories.has(categoryId)) return;
+      const conceptKey = keyMatch(movement, /^concepto$|rubro/i);
+      const conceptName = movement[conceptKey] || "Gastos sin identificar";
+      const conceptId = `${categoryId}|${normalized(conceptName)}`;
+      const entry = unclassified.get(conceptId) || {
+        categoria: categoryName, concepto: conceptName, gastado: 0,
+      };
+      entry.gastado += number(movement[keyMatch(movement, /^monto$|gasto.?neto|gastado/i)]);
+      unclassified.set(conceptId, entry);
+    });
+    unclassified.forEach((entry) => {
+      const categoryId = normalized(entry.categoria);
+      const row = {
+        categoria: entry.categoria,
+        concepto: entry.concepto,
+        presupuesto: 0,
+        gastado: entry.gastado,
+      };
+      const bucket = categories.get(categoryId) || { name: entry.categoria, rows: [], totals: {} };
+      bucket.rows.push(row);
+      bucket.totals.presupuesto = (number(bucket.totals.presupuesto) || 0) + row.presupuesto;
+      bucket.totals.gastado = (number(bucket.totals.gastado) || 0) + row.gastado;
+      categories.set(categoryId, bucket);
+    });
     const usedMovements = new Set();
 
     const panel = document.createElement("article"); panel.className = "panel panel-jerarquia";

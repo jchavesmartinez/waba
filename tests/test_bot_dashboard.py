@@ -130,3 +130,39 @@ def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):
         "concepto": "Comedera", "fecha": "2026-09-05",
         "descripcion": "WALMART", "moneda": "CRC", "monto": 23148,
     }]
+
+
+def test_jerarquia_no_oculta_movimientos_sin_linea_de_presupuesto(monkeypatch):
+    """Una línea no mapeada aparece explícitamente como sin clasificar."""
+    presupuesto = catalogo.TablaPermitida(
+        tabla_logica="presupuesto", tabla_real="presupuesto", fuente_id="sheet",
+        columnas_config={"linea_id": {}, "categoria": {}, "concepto": {}},
+    )
+    canonicos = catalogo.TablaPermitida(
+        tabla_logica="movimientos", tabla_real="movimientos", fuente_id="modelo",
+        columnas_config={
+            "linea_presupuesto_id": {}, "fecha": {}, "descripcion": {},
+            "moneda": {}, "monto_neto": {},
+        },
+    )
+    ctx = catalogo.Contexto(
+        schema_text="", tablas_reales={"presupuesto", "movimientos"},
+        permitidas=[presupuesto, canonicos],
+    )
+
+    def ejecutar(_cliente, _sql, limite):
+        assert limite > 0
+        return (
+            ["linea_id", "categoria", "concepto", "fecha", "descripcion", "moneda", "monto"],
+            [("sin_clasificar", "Sin clasificar", "Gastos sin identificar",
+              "2026-09-05", "Comercio pendiente", "CRC", 1000)],
+        )
+
+    monkeypatch.setattr(dashboard.nl2sql, "validar_sql", lambda *_: (True, ""))
+    monkeypatch.setattr(dashboard.warehouse_ro, "ejecutar", ejecutar)
+    filas = dashboard._movimientos_jerarquia(
+        {"cliente_id": "cliente_a"}, ctx,
+        {"inicio": "2026-09-01", "fin_exclusivo": "2026-10-01"},
+    )
+    assert filas[0]["categoria"] == "Sin clasificar"
+    assert filas[0]["concepto"] == "Gastos sin identificar"
