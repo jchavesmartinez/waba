@@ -27,6 +27,11 @@ psycopg2-binary==2.9.12
 # se puede desacoplar para NO cargar pandas en el bot.)
 pandas==3.0.5
 
+# La reclasificacion desde el dashboard puede sincronizar de inmediato un
+# movimiento manual. Esa ruta comparte el sincronizador de ingesta, que usa
+# DuckDB temporalmente; sin esta dependencia el servicio ni siquiera inicia.
+duckdb==1.5.5
+
 # Resolucion numero->cliente desde el Sheet maestro (reusa registry.py)
 gspread==6.2.1
 google-auth==2.56.3
