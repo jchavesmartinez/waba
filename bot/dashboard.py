@@ -308,6 +308,21 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
                           requeridas_canonicas.issubset(ccols))
     if usa_canonicos:
         tabla = _identificador(canonicos.tabla_real)
+        # Estos identificadores nunca se muestran como texto de negocio. Viajan
+        # al navegador solo para que la edición confirmada pueda volver a
+        # validar exactamente el movimiento seleccionado en el servidor.
+        extras = []
+        for columna, alias in (
+            ("_clave", "movimiento_clave"),
+            ("fuente", "fuente"),
+            ("clave_origen", "clave_origen"),
+            ("_modelo_id", "modelo_canonico"),
+        ):
+            if columna in ccols:
+                extras.append(f"CAST(m.{_identificador(columna)} AS text) AS {alias}")
+            else:
+                extras.append(f"NULL::text AS {alias}")
+        extras_sql = ", ".join(extras)
         # No filtramos por etiquetas de tipo: entre conectores la misma compra
         # puede llamarse COMPRA, GASTO o CARGO. La canónica normaliza el signo
         # en monto_neto y la línea presupuestaria ya limita este árbol a líneas
@@ -316,7 +331,7 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
             "SELECT CAST(m.linea_presupuesto_id AS text) AS linea_id, "
             "m.fecha AS fecha, m.descripcion AS descripcion, "
             "UPPER(COALESCE(NULLIF(CAST(m.moneda AS text),''),'CRC')) AS moneda, "
-            f"m.{_identificador(monto_canonico)} AS monto "
+            f"m.{_identificador(monto_canonico)} AS monto, {extras_sql} "
             f"FROM {tabla} m WHERE m.fecha >= DATE '{inicio}' "
             f"AND m.fecha < DATE '{fin}' AND m.linea_presupuesto_id IS NOT NULL"
         )
@@ -355,6 +370,12 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
     if not partes:
         return []
 
+    # Las columnas técnicas existen únicamente cuando usamos el contrato
+    # canónico; el fallback histórico conserva su forma de siete columnas.
+    extras_final = (
+        ", m.movimiento_clave, m.fuente, m.clave_origen, m.modelo_canonico"
+        if usa_canonicos else ""
+    )
     ptabla = _identificador(presupuesto.tabla_real)
     sql = (
         "WITH movimientos AS (" + " UNION ALL ".join(partes) + ") "
@@ -365,7 +386,7 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
         f"SELECT m.linea_id, "
         "COALESCE(NULLIF(TRIM(CAST(p.categoria AS text)),''),'Sin clasificar') AS categoria, "
         "COALESCE(NULLIF(TRIM(CAST(p.concepto AS text)),''),'Gastos sin identificar') AS concepto, "
-        "m.fecha, m.descripcion, m.moneda, m.monto "
+        f"m.fecha, m.descripcion, m.moneda, m.monto{extras_final} "
         f"FROM movimientos m LEFT JOIN {ptabla} p "
         "ON TRIM(CAST(p.linea_id AS text)) = TRIM(m.linea_id) "
         "WHERE m.linea_id IS NOT NULL "
@@ -416,6 +437,7 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
         ).isoformat(timespec="minutes"),
         "kpis": _ejecutar_kpis(cliente, periodo),
         "movimientos": _movimientos_jerarquia(cliente, ctx, periodo) if not ctx.error_lectura else [],
+        "lineas_presupuesto": _lineas_presupuesto(cliente, ctx) if not ctx.error_lectura else [],
     }
     with _CACHE_LOCK:
         _CACHE[clave] = (ahora, snapshot)
@@ -423,6 +445,51 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
             mas_antigua = min(_CACHE, key=lambda k: _CACHE[k][0])
             _CACHE.pop(mas_antigua, None)
     return snapshot
+
+
+def _lineas_presupuesto(cliente: dict, ctx) -> list[dict]:
+    """Expone únicamente las líneas de gasto válidas para reclasificar.
+
+    El selector del dashboard se llena desde el presupuesto real del cliente;
+    no acepta categorías o conceptos arbitrarios escritos por el navegador.
+    """
+    presupuesto = _tabla_por_nombre(ctx, ("presupuesto",))
+    if not presupuesto:
+        return []
+    columnas = _columnas_de(presupuesto)
+    if not {"linea_id", "categoria", "concepto"}.issubset(columnas):
+        return []
+    condicion = ""
+    if "tipo" in columnas:
+        condicion = " WHERE LOWER(COALESCE(CAST(tipo AS text), 'gasto')) = 'gasto'"
+    sql = (
+        f"SELECT CAST(linea_id AS text) AS linea_id, CAST(categoria AS text) AS categoria, "
+        f"CAST(concepto AS text) AS concepto FROM {_identificador(presupuesto.tabla_real)}"
+        + condicion + " ORDER BY categoria, concepto"
+    )
+    ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
+    if not ok:
+        logger.warning("consulta de líneas presupuestarias rechazada: %s", motivo)
+        return []
+    try:
+        columnas_resultado, filas = warehouse_ro.ejecutar(
+            cliente, sql, limite=int(config.DASHBOARD_MAX_FILAS_POR_KPI) * 5,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("no se pudieron cargar líneas presupuestarias: %s", exc)
+        return []
+    return [
+        {str(col): _serializable(valor) for col, valor in zip(columnas_resultado, fila)}
+        for fila in filas
+        if str(fila[0] or "").strip()
+    ]
+
+
+def invalidar_cache(cliente_id: str) -> None:
+    """Descarta snapshots de un cliente tras una edición confirmada."""
+    with _CACHE_LOCK:
+        for clave in [k for k in _CACHE if k[0] == str(cliente_id)]:
+            _CACHE.pop(clave, None)
 
 
 def renderizar(token: str) -> str:

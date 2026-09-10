@@ -76,6 +76,20 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .movimientos li span strong { color: var(--ink); overflow-wrap: anywhere; }
 .movimientos li small { color: var(--muted); font-size: .72rem; }
 .movimientos li > strong { color: var(--ink); white-space: nowrap; }
+.editar-movimiento { appearance: none; border: 1px solid var(--line); background: #f1f8e9; color: var(--green); border-radius: 8px; min-width: 32px; height: 30px; font-size: 1rem; font-weight: 800; cursor: pointer; }
+.editar-movimiento:focus-visible, .editor-movimiento button:focus-visible, .editor-movimiento select:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 2px; }
+.editor-movimiento { width: min(92vw, 440px); border: 0; border-radius: 18px; padding: 0; box-shadow: 0 18px 50px rgba(20, 40, 30, .28); color: var(--ink); }
+.editor-movimiento::backdrop { background: rgba(15, 25, 19, .48); }
+.editor-movimiento form { display: grid; gap: 14px; padding: 22px; }
+.editor-movimiento h2 { margin: 0; font-size: 1.15rem; }
+.editor-descripcion, .editor-nota { margin: 0; color: var(--muted); font-size: .85rem; }
+.editor-movimiento label { display: grid; gap: 7px; color: var(--ink); font-weight: 750; font-size: .88rem; }
+.editor-movimiento select { width: 100%; padding: 11px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); font: inherit; }
+.editor-acciones { display: flex; justify-content: flex-end; gap: 9px; }
+.editor-acciones button { border: 0; border-radius: 9px; padding: 10px 13px; font: inherit; font-weight: 750; cursor: pointer; background: var(--green); color: white; }
+.editor-acciones button:first-child { background: #edf1ed; color: var(--ink); }
+.editor-acciones button:disabled { opacity: .65; cursor: wait; }
+.editor-error { margin: 0; color: #ae3f3a; font-size: .84rem; }
 .indicadores { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .tabla-wrap { overflow: auto; max-height: 390px; border: 1px solid var(--line); border-radius: 12px; }
 table { width: 100%; border-collapse: collapse; font-size: .86rem; }

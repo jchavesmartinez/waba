@@ -35,12 +35,12 @@ from html import escape
 from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
 import registry
-from bot import audio, correo, dashboard, entregas, menu, whatsapp
+from bot import audio, correo, dashboard, dashboard_edicion, entregas, menu, whatsapp
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -399,6 +399,33 @@ def ver_dashboard(token: str):
             headers=cabeceras,
         )
     return HTMLResponse(html, headers=cabeceras)
+
+
+@app.post("/dashboard/{token}/movimientos/reclasificar")
+async def reclasificar_movimiento_dashboard(token: str, request: Request):
+    """Aplica una clasificación puntual, validada por el enlace del dashboard."""
+    cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        datos = await request.json()
+        if not isinstance(datos, dict):
+            raise dashboard_edicion.ErrorReclasificacion("la solicitud de edición no es válida")
+        resultado = dashboard_edicion.reclasificar(
+            token, datos.get("movimiento_clave"), datos.get("linea_id"),
+        )
+        return JSONResponse(resultado, headers=cabeceras)
+    except dashboard.EnlaceInvalido:
+        return JSONResponse(
+            {"ok": False, "error": "El enlace venció. Solicite un dashboard nuevo desde WhatsApp."},
+            status_code=410, headers=cabeceras,
+        )
+    except dashboard_edicion.ErrorReclasificacion as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400, headers=cabeceras)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo reclasificar un movimiento desde dashboard")
+        return JSONResponse(
+            {"ok": False, "error": "No pude guardar la clasificación. Inténtelo nuevamente."},
+            status_code=503, headers=cabeceras,
+        )
 
 
 @app.get("/webhook")

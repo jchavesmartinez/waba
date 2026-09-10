@@ -34,6 +34,48 @@
   const rowObject = (kpi, row) => Object.fromEntries(kpi.columnas.map((c, i) => [c, row[i]]));
   const keyMatch = (obj, pattern) => Object.keys(obj).find((key) => pattern.test(key));
   const normalized = (value) => String(value ?? "").trim().toLocaleLowerCase("es").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const lines = Array.isArray(data.lineas_presupuesto) ? data.lineas_presupuesto : [];
+  const abrirEditor = (movement) => {
+    if (!movement.movimiento_clave || !lines.length) return;
+    const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento";
+    const form = document.createElement("form"); form.method = "dialog";
+    const title = document.createElement("h2"); title.textContent = "Reclasificar movimiento";
+    const detail = document.createElement("p"); detail.className = "editor-descripcion";
+    detail.textContent = `${movement.descripcion || "Movimiento"} · ${String(movement.fecha || "").slice(0, 10)}`;
+    const label = document.createElement("label"); label.textContent = "Concepto presupuestario";
+    const select = document.createElement("select"); select.required = true;
+    lines.forEach((line) => {
+      const option = document.createElement("option"); option.value = line.linea_id;
+      option.textContent = `${line.categoria} · ${line.concepto}`;
+      option.selected = line.linea_id === movement.linea_id;
+      select.append(option);
+    });
+    label.append(select);
+    const note = document.createElement("p"); note.className = "editor-nota";
+    note.textContent = "Se aplicará solo a este movimiento y quedará guardado para futuras sincronizaciones.";
+    const actions = document.createElement("div"); actions.className = "editor-acciones";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
+    cancel.addEventListener("click", () => dialog.close());
+    const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar clasificación";
+    const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
+    actions.append(cancel, save); form.append(title, detail, label, note, error, actions); dialog.append(form);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault(); save.disabled = true; cancel.disabled = true; error.hidden = true;
+      try {
+        const response = await fetch(`${window.location.pathname}/movimientos/reclasificar`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ movimiento_clave: movement.movimiento_clave, linea_id: select.value }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar la clasificación.");
+        window.location.reload();
+      } catch (reason) {
+        error.textContent = reason.message || "No pude guardar la clasificación.";
+        error.hidden = false; save.disabled = false; cancel.disabled = false;
+      }
+    });
+    document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove()); dialog.showModal();
+  };
   const dimensionFor = (kpi, row) => {
     const texto = `${kpi.kpi || ""} ${kpi.nombre || ""} ${kpi.descripcion || ""}`.toLowerCase();
     // Prefer the exact dimension named by the KPI. A concept KPI can also
@@ -230,7 +272,13 @@
             detail.append(name, date);
             const keys = metricKeys(movement); const value = document.createElement("strong");
             value.textContent = keys.spent ? format(movement[keys.spent], keys.spent, movement.moneda || commerceKpi?.unidad) : "";
-            item.append(detail, value); movementList.append(item);
+            item.append(detail, value);
+            if (movement.movimiento_clave && lines.length) {
+              const edit = document.createElement("button"); edit.type = "button"; edit.className = "editar-movimiento";
+              edit.setAttribute("aria-label", `Reclasificar ${movementName(movement)}`); edit.title = "Reclasificar"; edit.textContent = "✎";
+              edit.addEventListener("click", () => abrirEditor(movement)); item.append(edit);
+            }
+            movementList.append(item);
           });
           conceptBody.append(movementList);
         }
