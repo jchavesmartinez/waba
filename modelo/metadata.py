@@ -42,6 +42,7 @@ CATEGORIAS_SHEET = "_categorias"
 OVERRIDES_SHEET = "_overrides"
 JOINS_SHEET = "_joins"
 MOVIMIENTOS_CANONICOS_SHEET = "_movimientos_canonicos"
+MONEDAS_SHEET = "_monedas"
 
 _MODELOS_COLS = (
     "modelo_id",        # identificador unico dentro del cliente
@@ -145,6 +146,19 @@ _MOVIMIENTOS_CANONICOS_COLS = (
     "concepto_referencia",
 )
 
+# Equivalencias entre los códigos que llegan de una fuente y el código vigente
+# que entiende el proveedor de tasas. Es metadata porque un conector puede
+# usar una abreviatura propia o legado sin obligar a cambiar el código de cada
+# cliente. ``factor_unidades`` permite declarar redenominaciones de manera
+# explícita y auditable; normalmente vale 1.
+_MONEDAS_COLS = (
+    "modelo_id",
+    "codigo_origen",
+    "codigo_mercado",
+    "factor_unidades",
+    "activo",
+)
+
 
 def leer(cliente: dict) -> dict:
     """
@@ -160,7 +174,7 @@ def leer(cliente: dict) -> dict:
     spreadsheet_id = str(cliente.get("catalogo_spreadsheet_id", "")).strip()
     vacio = {"modelos": [], "campos": [], "clasificacion": [],
              "categorias": [], "overrides": [], "joins": [],
-             "movimientos_canonicos": []}
+             "movimientos_canonicos": [], "monedas": []}
 
     if not spreadsheet_id:
         return vacio
@@ -204,6 +218,10 @@ def leer(cliente: dict) -> dict:
         "movimientos_canonicos": _leer_pestania(
             libro, cid, MOVIMIENTOS_CANONICOS_SHEET,
             _MOVIMIENTOS_CANONICOS_COLS, clave="modelo_id", silencioso=True),
+        "monedas": [m for m in _leer_pestania(
+            libro, cid, MONEDAS_SHEET, _MONEDAS_COLS,
+            clave="modelo_id", silencioso=True)
+            if _es_si(m.get("activo", "si"))],
     }
 
 
@@ -258,6 +276,12 @@ def _leer_pestania(libro, cid: str, nombre: str, columnas: tuple,
 def campos_de(metadata: dict, modelo_id: str) -> list:
     return [c for c in metadata.get("campos", [])
             if c.get("modelo_id") == modelo_id]
+
+
+def monedas_de(metadata: dict, modelo_id: str) -> list:
+    """Equivalencias declaradas para un modelo financiero canónico."""
+    return [m for m in metadata.get("monedas", [])
+            if m.get("modelo_id") == modelo_id]
 
 
 def clasificacion_de(metadata: dict, modelo_id: str, clasifica_en: str = "") -> list:

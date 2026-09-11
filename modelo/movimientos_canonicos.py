@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from .metadata import movimientos_canonicos_de
+from .metadata import movimientos_canonicos_de, monedas_de
 from .moneda_funcional import ConversorMoneda, ErrorTipoCambio
 from .tipos import convertir
 
@@ -70,7 +70,9 @@ def construir(destino, cliente_id: str, esquema_raw: str, esquema_sem: str,
 
     moneda_funcional = str(fila_modelo.get("moneda_funcional", "")).strip().upper()
     try:
-        conversor = ConversorMoneda(moneda_funcional) if moneda_funcional else None
+        conversor = ConversorMoneda(
+            moneda_funcional, equivalencias=monedas_de(metadata, modelo_id)) \
+            if moneda_funcional else None
     except ErrorTipoCambio as exc:
         raise RuntimeError(f"moneda_funcional inválida: {exc}") from exc
 

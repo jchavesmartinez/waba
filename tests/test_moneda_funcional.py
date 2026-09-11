@@ -53,6 +53,23 @@ def test_moneda_que_ya_es_funcional_no_consulta_el_proveedor():
     assert cliente.llamadas == []
 
 
+def test_equivalencia_de_metadata_usa_el_codigo_vigente_sin_perder_origen():
+    cliente = _ClienteHttp()
+    conversor = ConversorMoneda(
+        "CRC", cliente,
+        equivalencias=[{
+            "codigo_origen": "MXP", "codigo_mercado": "MXN",
+            "factor_unidades": "1",
+        }],
+    )
+
+    salida = conversor.convertir(Decimal("10"), "MXP", "2026-09-05")
+
+    assert salida["monto"] == Decimal("4516.40")
+    assert salida["tasa"] == Decimal("451.64")
+    assert cliente.llamadas[0][1]["base"] == "MXN"
+
+
 def test_movimiento_canonico_conserva_origen_y_normaliza_el_contrato():
     class ConversorFalso:
         moneda_funcional = "CRC"

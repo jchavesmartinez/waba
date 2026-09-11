@@ -31,28 +31,34 @@ class ConversorMoneda:
     un lote con cientos de compras USD del mismo día hace una sola consulta.
     """
 
-    def __init__(self, moneda_funcional: str, cliente_http=None):
+    def __init__(self, moneda_funcional: str, cliente_http=None,
+                 equivalencias: list[dict] | None = None):
         self.moneda_funcional = _validar_moneda(moneda_funcional)
         self._http = cliente_http or httpx.Client(timeout=10.0)
         self._tasas: dict[tuple[str, str], tuple[Decimal, str]] = {}
+        self._equivalencias = _equivalencias(equivalencias or [])
 
     def convertir(self, monto, moneda_origen: str, fecha) -> dict:
         origen = _validar_moneda(moneda_origen)
         fecha_iso = _fecha_iso(fecha)
         importe = _decimal(monto)
-        if origen == self.moneda_funcional:
+        moneda_mercado, factor = self._equivalencias.get(
+            origen, (origen, Decimal("1")))
+        importe_mercado = importe * factor
+        if moneda_mercado == self.moneda_funcional:
             return {
-                "monto": importe,
+                "monto": importe_mercado,
                 "moneda": self.moneda_funcional,
-                "tasa": Decimal("1"),
+                "tasa": factor,
                 "fecha_tasa": fecha_iso,
-                "proveedor": "origen",
+                "proveedor": "origen" if origen == moneda_mercado else "metadata",
             }
-        tasa, fecha_tasa = self._tasa(origen, fecha_iso)
+        tasa, fecha_tasa = self._tasa(moneda_mercado, fecha_iso)
         return {
-            "monto": importe * tasa,
+            "monto": importe_mercado * tasa,
             "moneda": self.moneda_funcional,
-            "tasa": tasa,
+            # Tasa efectiva por unidad de la moneda que venía en la fuente.
+            "tasa": factor * tasa,
             "fecha_tasa": fecha_tasa,
             "proveedor": "frankfurter",
         }
@@ -120,3 +126,19 @@ def _decimal(valor) -> Decimal:
     if not decimal.is_finite():
         raise ErrorTipoCambio(f"importe no finito para conversión: '{valor}'")
     return decimal
+
+
+def _equivalencias(filas: list[dict]) -> dict[str, tuple[str, Decimal]]:
+    salida: dict[str, tuple[str, Decimal]] = {}
+    for fila in filas:
+        origen = _validar_moneda(fila.get("codigo_origen", ""))
+        mercado = _validar_moneda(fila.get("codigo_mercado", ""))
+        factor = _decimal(fila.get("factor_unidades", "1"))
+        if factor <= 0:
+            raise ErrorTipoCambio(
+                f"factor_unidades debe ser positivo para equivalencia {origen}/{mercado}"
+            )
+        if origen in salida:
+            raise ErrorTipoCambio(f"equivalencia de moneda duplicada: {origen}")
+        salida[origen] = (mercado, factor)
+    return salida
