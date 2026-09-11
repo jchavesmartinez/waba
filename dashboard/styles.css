@@ -90,6 +90,8 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .editor-acciones button:first-child { background: #edf1ed; color: var(--ink); }
 .editor-acciones button:disabled { opacity: .65; cursor: wait; }
 .editor-error { margin: 0; color: #ae3f3a; font-size: .84rem; }
+.aviso-dashboard { position: fixed; z-index: 20; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; align-items: center; gap: 9px; width: min(calc(100vw - 32px), 420px); padding: 13px 16px; border-radius: 12px; background: #176b4d; color: white; box-shadow: 0 14px 32px rgba(20, 50, 35, .28); font-size: .9rem; font-weight: 700; }
+.aviso-dashboard span:first-child { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: #b9e769; color: #16452f; font-weight: 900; }
 .indicadores { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .tabla-wrap { overflow: auto; max-height: 390px; border: 1px solid var(--line); border-radius: 12px; }
 table { width: 100%; border-collapse: collapse; font-size: .86rem; }

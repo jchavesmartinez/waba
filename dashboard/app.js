@@ -35,6 +35,13 @@
   const keyMatch = (obj, pattern) => Object.keys(obj).find((key) => pattern.test(key));
   const normalized = (value) => String(value ?? "").trim().toLocaleLowerCase("es").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const lines = Array.isArray(data.lineas_presupuesto) ? data.lineas_presupuesto : [];
+  const mostrarAviso = (mensaje) => {
+    const aviso = document.createElement("div"); aviso.className = "aviso-dashboard";
+    aviso.setAttribute("role", "status"); aviso.setAttribute("aria-live", "polite");
+    const icono = document.createElement("span"); icono.setAttribute("aria-hidden", "true"); icono.textContent = "✓";
+    const texto = document.createElement("span"); texto.textContent = mensaje;
+    aviso.append(icono, texto); document.body.append(aviso);
+  };
   const abrirEditor = (movement) => {
     if (!movement.movimiento_clave || !lines.length) return;
     const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento";
@@ -68,7 +75,9 @@
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar la clasificación.");
-        window.location.reload();
+        dialog.close();
+        mostrarAviso("Clasificación guardada. Actualizando dashboard…");
+        window.setTimeout(() => window.location.reload(), 1200);
       } catch (reason) {
         error.textContent = reason.message || "No pude guardar la clasificación.";
         error.hidden = false; save.disabled = false; cancel.disabled = false;
