@@ -717,7 +717,12 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
     """Recorre el registro completo y sincroniza lo que corresponda."""
     destinos = _Destinos(config.WAREHOUSE_TIPO)
     resumen = {"ok": 0, "ok_con_alertas": 0, "ok_con_bloqueo": 0,
-               "error": 0, "omitido": 0, "filas": 0, "alertas": []}
+               "error": 0, "omitido": 0, "filas": 0, "alertas": [],
+               # El resumen agregado sirve para monitoreo, pero los flujos de
+               # escritura necesitan saber si SU fuente llegó bien. Una fuente
+               # de correo caída no debe impedir publicar un gasto que sí se
+               # guardó y sincronizó desde Google Sheets.
+               "fuentes": []}
 
     try:
         for cliente in registry.listar_clientes():
@@ -779,6 +784,13 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
                 resumen["alertas"] += corrida.alertas
                 resumen[corrida.estado] = resumen.get(corrida.estado, 0) + 1
                 resumen["filas"] += corrida.filas
+                resumen["fuentes"].append({
+                    "cliente_id": cid,
+                    "fuente_id": str(fuente.get("fuente_id", "")),
+                    "estado": corrida.estado,
+                    "error": corrida.error,
+                    "tablas": sorted(corrida.tablas_logicas),
+                })
                 # tablas_logicas trae el nombre TAL COMO lo declara el
                 # catalogo (sin el prefijo fuente_id__ que usa el warehouse
                 # fisicamente) -- ver Corrida.tablas_logicas y B-40.

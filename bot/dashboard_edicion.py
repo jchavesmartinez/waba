@@ -135,11 +135,29 @@ def _actualizar_movimiento_manual(cliente: dict, cfg: dict, clave: str,
     raise ErrorReclasificacion("no encontré el registro manual que desea reclasificar")
 
 
-def _sincronizar_fuente_manual(cliente: dict) -> None:
+def _sincronizar_fuente_manual(cliente: dict, fuente_id: str,
+                               entidad: str = "movimiento") -> None:
+    """Sincroniza todo el cliente, validando solamente la fuente editada.
+
+    El catálogo se reconstruye de forma consolidada y por ello una sincronía
+    completa sigue siendo necesaria. Sin embargo, una falla en otra fuente
+    (por ejemplo, correo) no invalida una escritura que Google Sheets ya
+    aceptó y cuya propia fuente se cargó correctamente.
+    """
     resumen = sync.sincronizar_todo(cliente_filtro=cliente["cliente_id"], forzar=True)
-    if resumen.get("error") or resumen.get("ok_con_bloqueo"):
+    fuente = str(fuente_id or "").strip()
+    corridas = [c for c in resumen.get("fuentes", [])
+                if str(c.get("fuente_id", "")).strip() == fuente]
+    # Las versiones previas no devolvían el desglose. En ese caso conserva el
+    # comportamiento seguro, en vez de asumir que el origen fue sincronizado.
+    if not corridas:
         raise ErrorReclasificacion(
-            "guardé la clasificación manual, pero no pude sincronizarla todavía"
+            f"guardé {entidad} en su fuente, pero no pude verificar su sincronización"
+        )
+    estado = str(corridas[-1].get("estado", "error"))
+    if estado in {"error", "ok_con_bloqueo"}:
+        raise ErrorReclasificacion(
+            f"guardé {entidad} en su fuente, pero esa fuente no pudo sincronizarse todavía"
         )
 
 
@@ -206,7 +224,8 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object) -> dict
         )
     else:
         _actualizar_movimiento_manual(cliente, origen, clave_origen, linea)
-        _sincronizar_fuente_manual(cliente)
+        _sincronizar_fuente_manual(cliente, str(movimiento.get("fuente", "")),
+                                   "la clasificación")
     _reconstruir(cliente)
     dashboard.invalidar_cache(str(cliente.get("cliente_id", "")))
     return {
@@ -260,7 +279,7 @@ def crear_movimiento(token: str, valores: object) -> dict:
             cliente, politica, "crear", borrador.valores)
     except escritura_google_sheets.ErrorEscritura as exc:
         raise ErrorReclasificacion(str(exc)) from exc
-    _sincronizar_fuente_manual(cliente)
+    _sincronizar_fuente_manual(cliente, politica.origen_fuente_id, "el movimiento")
     _reconstruir(cliente)
     dashboard.invalidar_cache(str(cliente.get("cliente_id", "")))
     return {

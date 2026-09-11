@@ -139,3 +139,32 @@ def test_crear_manual_guarda_en_origen_reconstruye_e_impone_linea(monkeypatch):
     assert recibido["valores"]["categoria"] == "Alimentacion"
     assert recibido["valores"]["moneda"] == "USD"
     assert llamadas == ["sync", "reconstruir", "cache"]
+
+
+def test_sincronizacion_manual_ignora_error_de_otra_fuente(monkeypatch):
+    monkeypatch.setattr(
+        dashboard_edicion.sync, "sincronizar_todo",
+        lambda **_: {
+            "error": 1,
+            "fuentes": [
+                {"fuente_id": "googledrive_db", "estado": "ok"},
+                {"fuente_id": "correo_zoho", "estado": "error", "error": "credencial"},
+            ],
+        },
+    )
+
+    dashboard_edicion._sincronizar_fuente_manual(
+        {"cliente_id": "cliente_a"}, "googledrive_db", "el movimiento",
+    )
+
+
+def test_sincronizacion_manual_rechaza_fallo_de_su_propia_fuente(monkeypatch):
+    monkeypatch.setattr(
+        dashboard_edicion.sync, "sincronizar_todo",
+        lambda **_: {"fuentes": [{"fuente_id": "googledrive_db", "estado": "error"}]},
+    )
+
+    with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="guardé el movimiento"):
+        dashboard_edicion._sincronizar_fuente_manual(
+            {"cliente_id": "cliente_a"}, "googledrive_db", "el movimiento",
+        )
