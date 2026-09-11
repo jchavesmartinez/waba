@@ -11,7 +11,7 @@ import logging
 import re
 
 import config
-from bot import catalogo, dashboard, warehouse_ro
+from bot import catalogo, dashboard, edicion, escritura_google_sheets, warehouse_ro
 from gclient import abrir_libro_escritura
 from modelo import metadata
 from modelo.construir import construir_cliente
@@ -214,4 +214,58 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object) -> dict
         "linea_id": destino["linea_id"],
         "categoria": destino["categoria"],
         "concepto": destino["concepto"],
+    }
+
+
+def _politica_creacion_manual(cliente: dict) -> edicion.PoliticaEdicion:
+    politica = edicion.politica_para(cliente, "gastos_manuales")
+    if not politica or "crear" not in politica.acciones:
+        raise ErrorReclasificacion("este dashboard no tiene gastos manuales habilitados para crear")
+    if politica.origen_tipo != "google_sheets":
+        raise ErrorReclasificacion("el origen de gastos manuales no admite creación desde el dashboard")
+    return politica
+
+
+def crear_movimiento(token: str, valores: object) -> dict:
+    """Crea un gasto manual desde el dashboard, en su fuente y no en Neon."""
+    _, cliente = dashboard.validar_enlace(token)
+    if not isinstance(valores, dict):
+        raise ErrorReclasificacion("la solicitud de creación no es válida")
+    politica = _politica_creacion_manual(cliente)
+    entrada = {str(k): v for k, v in valores.items() if isinstance(k, str)}
+
+    # La relación presupuesto es siempre validada en el servidor. El navegador
+    # sólo elige entre líneas que ya recibió; no puede inventar una categoría
+    # ni un concepto, y la categoría queda coherente con la línea elegida.
+    campo_linea = next((c for c in politica.campos.values()
+                         if c.generador == "concepto_a_linea_id"), None)
+    destino = None
+    if campo_linea:
+        linea = str(entrada.get(campo_linea.nombre, "")).strip()
+        if not _VALOR_SEGURO.fullmatch(linea):
+            raise ErrorReclasificacion("seleccione un concepto presupuestario válido")
+        ctx = catalogo.construir_contexto(cliente)
+        destino = _validar_linea(cliente, ctx, linea)
+        entrada[campo_linea.nombre] = destino["linea_id"]
+        if "categoria" in politica.campos:
+            entrada["categoria"] = destino["categoria"]
+
+    borrador = edicion.validar_borrador(politica, "crear", entrada)
+    if borrador.errores:
+        raise ErrorReclasificacion("; ".join(borrador.errores))
+    if borrador.faltantes:
+        raise ErrorReclasificacion("faltan: " + ", ".join(borrador.faltantes))
+    try:
+        guardado = escritura_google_sheets.aplicar_confirmado(
+            cliente, politica, "crear", borrador.valores)
+    except escritura_google_sheets.ErrorEscritura as exc:
+        raise ErrorReclasificacion(str(exc)) from exc
+    _sincronizar_fuente_manual(cliente)
+    _reconstruir(cliente)
+    dashboard.invalidar_cache(str(cliente.get("cliente_id", "")))
+    return {
+        "ok": True,
+        "movimiento_id": guardado.get("clave", ""),
+        "categoria": destino.get("categoria", "") if destino else "",
+        "concepto": destino.get("concepto", "") if destino else "",
     }

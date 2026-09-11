@@ -190,6 +190,10 @@ def validar_borrador(politica: PoliticaEdicion, accion: str,
                 if numero <= 0:
                     raise ValueError("debe ser mayor que cero")
                 valor = str(numero)
+            elif campo.tipo == "moneda_iso":
+                valor = str(valor).strip().upper()
+                if not re.fullmatch(r"[A-Z]{3}", valor):
+                    raise ValueError("use un código ISO de 3 letras, por ejemplo CRC o USD")
             elif campo.tipo == "lista":
                 opciones = {v.casefold(): v for v in campo.valores}
                 elegido = opciones.get(str(valor).strip().casefold())

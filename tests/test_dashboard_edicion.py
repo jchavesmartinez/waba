@@ -1,6 +1,29 @@
 import pytest
 
 from bot import dashboard_edicion
+from bot.edicion import CampoEdicion, PoliticaEdicion
+
+
+def _politica_creacion():
+    return PoliticaEdicion(
+        tabla="gastos_manuales", origen="Google Sheets", clave_primaria="movimiento_id",
+        anulacion_campo="activo", origen_tipo="google_sheets",
+        origen_fuente_id="finanzas", hoja_origen="gastos_manuales", acciones=("crear",),
+        campos={
+            "movimiento_id": CampoEdicion("movimiento_id", "Identificador", calculado=True,
+                                             generador="id_aleatorio_fecha"),
+            "fecha": CampoEdicion("fecha", "Fecha", requerido=True, tipo="fecha_iso"),
+            "descripcion": CampoEdicion("descripcion", "Descripción", requerido=True),
+            "categoria": CampoEdicion("categoria", "Categoría", tipo="lista",
+                                        valores=("Alimentacion",)),
+            "linea_presupuesto_id": CampoEdicion(
+                "linea_presupuesto_id", "Concepto presupuestario", requerido=True,
+                generador="concepto_a_linea_id"),
+            "monto": CampoEdicion("monto", "Monto", requerido=True, tipo="monto_positivo"),
+            "moneda": CampoEdicion("moneda", "Moneda", requerido=True,
+                                    tipo="moneda_iso", defecto="CRC"),
+        },
+    )
 
 
 def test_reclasificar_guarda_override_reconstruye_e_invalida(monkeypatch):
@@ -85,3 +108,34 @@ def test_reclasificar_manual_actualiza_origen_y_luego_reconstruye(monkeypatch):
     assert llamadas == [
         ("origen", "MAN-1", "gas_comedera"), ("sync",), ("reconstruir",), ("cache",),
     ]
+
+
+def test_crear_manual_guarda_en_origen_reconstruye_e_impone_linea(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    llamadas, recibido = [], {}
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
+    monkeypatch.setattr(dashboard_edicion.edicion, "politica_para", lambda *_: _politica_creacion())
+    monkeypatch.setattr(dashboard_edicion.catalogo, "construir_contexto", lambda _: object())
+    monkeypatch.setattr(
+        dashboard_edicion, "_validar_linea",
+        lambda *_: {"linea_id": "gas_comedera", "categoria": "Alimentacion", "concepto": "Comedera"},
+    )
+    monkeypatch.setattr(
+        dashboard_edicion.escritura_google_sheets, "aplicar_confirmado",
+        lambda _cliente, _politica, accion, valores: recibido.update(accion=accion, valores=valores) or {"clave": "MAN-1"},
+    )
+    monkeypatch.setattr(dashboard_edicion, "_sincronizar_fuente_manual", lambda *_: llamadas.append("sync"))
+    monkeypatch.setattr(dashboard_edicion, "_reconstruir", lambda *_: llamadas.append("reconstruir"))
+    monkeypatch.setattr(dashboard_edicion.dashboard, "invalidar_cache", lambda *_: llamadas.append("cache"))
+
+    resultado = dashboard_edicion.crear_movimiento("token", {
+        "fecha": "2026-09-05", "descripcion": "Compra manual", "monto": "25.5",
+        "moneda": "usd", "linea_presupuesto_id": "gas_comedera", "categoria": "Otra",
+    })
+
+    assert resultado == {"ok": True, "movimiento_id": "MAN-1", "categoria": "Alimentacion", "concepto": "Comedera"}
+    assert recibido["accion"] == "crear"
+    assert recibido["valores"]["linea_presupuesto_id"] == "gas_comedera"
+    assert recibido["valores"]["categoria"] == "Alimentacion"
+    assert recibido["valores"]["moneda"] == "USD"
+    assert llamadas == ["sync", "reconstruir", "cache"]

@@ -36,6 +36,23 @@ def test_borrador_rechaza_fecha_ambigua_y_monto_no_positivo():
     assert any("Monto" in e for e in r.errores)
 
 
+def test_borrador_acepta_cualquier_moneda_iso_y_rechaza_codigo_invalido():
+    politica = _politica()
+    politica = PoliticaEdicion(**{
+        **politica.__dict__,
+        "campos": {**politica.campos, "moneda": CampoEdicion(
+            "moneda", "Moneda", requerido=True, tipo="moneda_iso", defecto="CRC")},
+    })
+    valido = validar_borrador(politica, "crear", {
+        "fecha": "2026-09-03", "monto": "25", "moneda": "eur",
+    })
+    invalido = validar_borrador(politica, "crear", {
+        "fecha": "2026-09-03", "monto": "25", "moneda": "colones",
+    })
+    assert valido.valores["moneda"] == "EUR"
+    assert any("ISO" in error for error in invalido.errores)
+
+
 def test_modificar_exige_id_pero_no_aplica_valores_por_defecto():
     r = validar_borrador(_politica(), "modificar", {"movimiento_id": "MAN-01"})
     assert r.listo_para_confirmar

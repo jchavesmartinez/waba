@@ -60,3 +60,23 @@ def test_escritura_rechaza_fuente_distinta(monkeypatch):
         assert "Google Sheets" in str(e)
     else:
         raise AssertionError("debió rechazar la fuente")
+
+
+def test_referencia_acepta_linea_id_validada_desde_el_dashboard():
+    politica = _politica()
+    politica = PoliticaEdicion(**{
+        **politica.__dict__,
+        "campos": {"linea_presupuesto_id": CampoEdicion(
+            "linea_presupuesto_id", "Concepto", generador="concepto_a_linea_id")},
+    })
+
+    class Presupuesto:
+        def row_values(self, _fila): return ["linea_id", "concepto"]
+        def get_all_values(self): return [["linea_id", "concepto"], ["gas_comedera", "Comedera"]]
+
+    class Libro:
+        def worksheets(self): return [Presupuesto()]
+
+    salida = escritor._resolver_referencias(
+        Libro(), politica, {"linea_presupuesto_id": "gas_comedera"})
+    assert salida["linea_presupuesto_id"] == "gas_comedera"

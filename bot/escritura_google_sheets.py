@@ -119,6 +119,14 @@ def _resolver_referencias(libro, politica: PoliticaEdicion,
                 continue
             filas = hoja_ref.get_all_values()
             i_concepto, i_linea = encabezados.index(col_concepto), encabezados.index(col_linea)
+            # El dashboard ya conoce y valida el linea_id. Aceptarlo evita
+            # volver a traducir una llave estable a concepto y luego buscarla
+            # otra vez; WhatsApp puede seguir enviando el concepto legible.
+            directos = [str(fila[i_linea]).strip() for fila in filas[1:]
+                        if i_linea < len(fila) and str(fila[i_linea]).strip() == str(salida[nombre]).strip()]
+            if directos:
+                candidatos.extend(directos)
+                continue
             for fila in filas[1:]:
                 concepto = fila[i_concepto] if i_concepto < len(fila) else ""
                 linea = fila[i_linea] if i_linea < len(fila) else ""

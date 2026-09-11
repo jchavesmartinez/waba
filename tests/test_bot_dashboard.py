@@ -79,6 +79,32 @@ def test_render_incrusta_snapshot_sin_llamadas_del_frontend(
     assert "/dashboard-assets/app.js" in html
 
 
+def test_formulario_manual_solo_expone_campos_habilitados_por_metadata():
+    manuales = catalogo.TablaPermitida(
+        tabla_logica="gastos_manuales", tabla_real="gastos_manuales", fuente_id="finanzas",
+        configuracion={
+            "editable": "si", "acciones_permitidas": "crear,modificar",
+            "origen_tipo": "google_sheets", "hoja_origen": "gastos_manuales",
+            "origen_fuente_id": "finanzas", "clave_primaria": "movimiento_id",
+        },
+        columnas_config={
+            "movimiento_id": {"calculado_por_sistema": "si", "generador": "id_aleatorio_fecha"},
+            "fecha": {"requerido": "si", "tipo_validacion": "fecha_iso", "etiqueta_usuario": "Fecha"},
+            "linea_presupuesto_id": {"requerido": "si", "generador": "concepto_a_linea_id", "etiqueta_usuario": "Concepto"},
+            "categoria": {"etiqueta_usuario": "Categoría"},
+        },
+    )
+    ctx = catalogo.Contexto(schema_text="", permitidas=[manuales])
+
+    formulario = dashboard._formulario_creacion_manual(ctx)
+
+    assert formulario["tabla"] == "gastos_manuales"
+    campos = {campo["nombre"]: campo for campo in formulario["campos"]}
+    assert "movimiento_id" not in campos
+    assert campos["linea_presupuesto_id"]["seleccion_linea"] is True
+    assert campos["categoria"]["derivado_de_linea"] is True
+
+
 def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):
     """El árbol no debe perder cargos bancarios al existir la tabla canónica."""
     presupuesto = catalogo.TablaPermitida(

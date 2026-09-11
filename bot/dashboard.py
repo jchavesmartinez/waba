@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 import config
 import registry
-from bot import catalogo, kpis, nl2sql, seguimiento, warehouse_ro
+from bot import catalogo, edicion, kpis, nl2sql, seguimiento, warehouse_ro
 from bot.tiempo import fecha_local
 
 logger = logging.getLogger("fachavi.bot.dashboard")
@@ -438,6 +438,7 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
         "kpis": _ejecutar_kpis(cliente, periodo),
         "movimientos": _movimientos_jerarquia(cliente, ctx, periodo) if not ctx.error_lectura else [],
         "lineas_presupuesto": _lineas_presupuesto(cliente, ctx) if not ctx.error_lectura else [],
+        "creacion_manual": _formulario_creacion_manual(ctx) if not ctx.error_lectura else None,
     }
     with _CACHE_LOCK:
         _CACHE[clave] = (ahora, snapshot)
@@ -445,6 +446,41 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
             mas_antigua = min(_CACHE, key=lambda k: _CACHE[k][0])
             _CACHE.pop(mas_antigua, None)
     return snapshot
+
+
+def _formulario_creacion_manual(ctx) -> dict | None:
+    """Expone al navegador solo la política de creación declarada en metadata.
+
+    El frontend nunca decide la hoja, el identificador ni qué columnas puede
+    escribir. Si un cliente no habilita explícitamente ``crear`` para su tabla
+    manual, el botón simplemente no se muestra.
+    """
+    tabla = _tabla_por_nombre(ctx, ("gastos_manuales", "gastos manuales"))
+    politica = edicion.politica_desde_tabla(tabla)
+    if not politica or "crear" not in politica.acciones:
+        return None
+    if politica.origen_tipo != "google_sheets" or not politica.hoja_origen:
+        return None
+    campos = []
+    tiene_linea = any(c.generador == "concepto_a_linea_id"
+                      for c in politica.campos.values())
+    for campo in politica.campos.values():
+        if campo.calculado or not campo.editable:
+            continue
+        campos.append({
+            "nombre": campo.nombre,
+            "etiqueta": campo.etiqueta,
+            "requerido": campo.requerido,
+            "tipo": campo.tipo,
+            "valores": list(campo.valores),
+            "defecto": campo.defecto,
+            "ejemplo": campo.ejemplo,
+            "seleccion_linea": campo.generador == "concepto_a_linea_id",
+            # La categoría proviene de la línea seleccionada; mostrarla como
+            # lectura evita que una captura manual la contradiga.
+            "derivado_de_linea": tiene_linea and campo.nombre == "categoria",
+        })
+    return {"tabla": politica.tabla, "campos": campos}
 
 
 def _lineas_presupuesto(cliente: dict, ctx) -> list[dict]:

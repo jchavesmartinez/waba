@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="robots" content="noindex,nofollow,noarchive">
   <title>Dashboard financiero · Fachavi</title>
-  <link rel="stylesheet" href="/dashboard-assets/styles.css?v=reclasificacion-confirmacion-20260910">
+  <link rel="stylesheet" href="/dashboard-assets/styles.css?v=crear-movimiento-20260911">
 </head>
 <body>
   <main class="shell">
@@ -15,7 +15,10 @@
         <h1 id="cliente">Dashboard financiero</h1>
         <p id="periodo" class="periodo"></p>
       </div>
-      <div class="estado"><span></span> Datos verificados</div>
+      <div class="hero-acciones">
+        <button id="agregar-movimiento" class="agregar-movimiento" type="button" hidden>＋ Agregar movimiento</button>
+        <div class="estado"><span></span> Datos verificados</div>
+      </div>
     </header>
 
     <section id="resumen" class="cards" aria-label="Resumen"></section>
@@ -24,10 +27,10 @@
 
     <footer>
       <span id="actualizado"></span>
-      <span>Edición de clasificaciones disponible</span>
+      <span>Edición y creación de movimientos disponible</span>
     </footer>
   </main>
   <script id="dashboard-data" type="application/json">__DASHBOARD_DATA__</script>
-  <script src="/dashboard-assets/app.js?v=reclasificacion-confirmacion-20260910" defer></script>
+  <script src="/dashboard-assets/app.js?v=crear-movimiento-20260911" defer></script>
 </body>
 </html>

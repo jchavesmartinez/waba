@@ -428,6 +428,31 @@ async def reclasificar_movimiento_dashboard(token: str, request: Request):
         )
 
 
+@app.post("/dashboard/{token}/movimientos/crear")
+async def crear_movimiento_dashboard(token: str, request: Request):
+    """Crea un gasto manual en la fuente editable declarada por metadata."""
+    cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        datos = await request.json()
+        if not isinstance(datos, dict):
+            raise dashboard_edicion.ErrorReclasificacion("la solicitud de creación no es válida")
+        resultado = dashboard_edicion.crear_movimiento(token, datos.get("valores"))
+        return JSONResponse(resultado, headers=cabeceras)
+    except dashboard.EnlaceInvalido:
+        return JSONResponse(
+            {"ok": False, "error": "El enlace venció. Solicite un dashboard nuevo desde WhatsApp."},
+            status_code=410, headers=cabeceras,
+        )
+    except dashboard_edicion.ErrorReclasificacion as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400, headers=cabeceras)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo crear un gasto manual desde dashboard")
+        return JSONResponse(
+            {"ok": False, "error": "No pude guardar el movimiento. Inténtelo nuevamente."},
+            status_code=503, headers=cabeceras,
+        )
+
+
 @app.get("/webhook")
 def verificar(request: Request):
     """Handshake de verificacion del webhook (Meta lo llama una sola vez)."""

@@ -35,6 +35,8 @@
   const keyMatch = (obj, pattern) => Object.keys(obj).find((key) => pattern.test(key));
   const normalized = (value) => String(value ?? "").trim().toLocaleLowerCase("es").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const lines = Array.isArray(data.lineas_presupuesto) ? data.lineas_presupuesto : [];
+  const creation = data.creacion_manual && Array.isArray(data.creacion_manual.campos)
+    ? data.creacion_manual : null;
   const mostrarAviso = (mensaje) => {
     const aviso = document.createElement("div"); aviso.className = "aviso-dashboard";
     aviso.setAttribute("role", "status"); aviso.setAttribute("aria-live", "polite");
@@ -80,6 +82,83 @@
         window.setTimeout(() => window.location.reload(), 1200);
       } catch (reason) {
         error.textContent = reason.message || "No pude guardar la clasificación.";
+        error.hidden = false; save.disabled = false; cancel.disabled = false;
+      }
+    });
+    document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove()); dialog.showModal();
+  };
+  const abrirCreador = () => {
+    if (!creation) return;
+    const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento editor-creacion";
+    const form = document.createElement("form");
+    const title = document.createElement("h2"); title.textContent = "Agregar movimiento";
+    const note = document.createElement("p"); note.className = "editor-nota";
+    note.textContent = "Se guardará como gasto manual y aparecerá en el dashboard al actualizarse.";
+    const controls = new Map();
+    const derived = new Map();
+    const updateDerived = () => {
+      const lineField = creation.campos.find((field) => field.seleccion_linea);
+      const selected = lineField ? lines.find((line) => line.linea_id === controls.get(lineField.nombre)?.value) : null;
+      derived.forEach((control, name) => {
+        control.value = name === "categoria" ? (selected?.categoria || "") : "";
+      });
+    };
+    creation.campos.forEach((field) => {
+      const label = document.createElement("label"); label.textContent = field.etiqueta;
+      let control;
+      if (field.derivado_de_linea) {
+        control = document.createElement("input"); control.type = "text"; control.readOnly = true;
+        control.placeholder = "Se completa al elegir el concepto"; derived.set(field.nombre, control);
+      } else if (field.seleccion_linea) {
+        control = document.createElement("select"); control.required = Boolean(field.requerido);
+        const empty = document.createElement("option"); empty.value = ""; empty.textContent = "Seleccione un concepto"; control.append(empty);
+        lines.forEach((line) => {
+          const option = document.createElement("option"); option.value = line.linea_id;
+          option.textContent = `${line.categoria} · ${line.concepto}`; control.append(option);
+        });
+        control.addEventListener("change", updateDerived);
+      } else if (Array.isArray(field.valores) && field.valores.length) {
+        control = document.createElement("select");
+        if (!field.requerido) { const empty = document.createElement("option"); empty.value = ""; empty.textContent = "Sin especificar"; control.append(empty); }
+        field.valores.forEach((value) => {
+          const option = document.createElement("option"); option.value = value; option.textContent = value;
+          option.selected = value === field.defecto; control.append(option);
+        });
+      } else {
+        control = document.createElement("input");
+        if (field.tipo === "fecha_iso") control.type = "date";
+        else if (field.tipo === "monto_positivo") { control.type = "number"; control.min = "0.01"; control.step = "0.01"; control.inputMode = "decimal"; }
+        else { control.type = "text"; if (field.tipo === "moneda_iso") { control.maxLength = 3; control.pattern = "[A-Za-z]{3}"; control.autocapitalize = "characters"; } }
+        control.value = field.defecto || "";
+        control.placeholder = field.ejemplo || "";
+      }
+      control.name = field.nombre; control.required = Boolean(field.requerido); controls.set(field.nombre, control);
+      label.append(control); form.append(label);
+    });
+    const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
+    const actions = document.createElement("div"); actions.className = "editor-acciones";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
+    cancel.addEventListener("click", () => dialog.close());
+    const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar movimiento";
+    actions.append(cancel, save); form.prepend(title, note); form.append(error, actions); dialog.append(form);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!form.reportValidity()) return;
+      const valores = {};
+      creation.campos.filter((field) => !field.derivado_de_linea).forEach((field) => {
+        const control = controls.get(field.nombre); if (control) valores[field.nombre] = control.value;
+      });
+      save.disabled = true; cancel.disabled = true; error.hidden = true;
+      try {
+        const response = await fetch(`${window.location.pathname}/movimientos/crear`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ valores }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el movimiento.");
+        dialog.close(); mostrarAviso("Movimiento guardado. Actualizando dashboard…");
+        window.setTimeout(() => window.location.reload(), 1200);
+      } catch (reason) {
+        error.textContent = reason.message || "No pude guardar el movimiento.";
         error.hidden = false; save.disabled = false; cancel.disabled = false;
       }
     });
@@ -302,6 +381,8 @@
   byId("cliente").textContent = data.cliente.nombre;
   byId("periodo").textContent = data.periodo.etiqueta;
   byId("actualizado").textContent = "Actualizado: " + new Date(data.actualizado_en).toLocaleString("es-CR");
+  const addMovement = byId("agregar-movimiento");
+  if (creation) { addMovement.hidden = false; addMovement.addEventListener("click", abrirCreador); }
 
   const summary = findKpi("presupuesto_disponible") || data.kpis.find((k) => k.filas.length === 1 && k.columnas.some((c) => /presupuesto/i.test(c)));
   const summaryRow = summary?.filas?.[0] ? rowObject(summary, summary.filas[0]) : null;
