@@ -51,6 +51,9 @@ _MODELOS_COLS = (
     "columna_texto",    # de que columna del origen sale el texto a extraer
     "filtro",           # SQL: que filas del origen aplican
     "activo",
+    # Moneda objetivo ISO-4217 opcional. Cuando existe, los extractores
+    # financieros normalizan sus montos conservando el original y la tasa.
+    "moneda_funcional",
 )
 
 _CAMPOS_COLS = (

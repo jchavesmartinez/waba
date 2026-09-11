@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 
 from .metadata import movimientos_canonicos_de
+from .moneda_funcional import ConversorMoneda, ErrorTipoCambio
 from .tipos import convertir
 
 
@@ -33,9 +34,15 @@ COLUMNAS = [
     ("categoria", "texto"),
     ("linea_presupuesto_id", "texto"),
     ("concepto", "texto"),
+    ("monto_original", "decimal"),
+    ("moneda_original", "texto"),
     ("moneda", "texto"),
     ("monto", "decimal"),
     ("monto_neto", "decimal"),
+    ("moneda_funcional", "texto"),
+    ("tipo_cambio", "decimal"),
+    ("fecha_tipo_cambio", "fecha_iso"),
+    ("proveedor_tipo_cambio", "texto"),
     ("tipo_movimiento", "texto"),
     ("titular", "texto"),
     ("medio_pago", "texto"),
@@ -61,6 +68,12 @@ def construir(destino, cliente_id: str, esquema_raw: str, esquema_sem: str,
             "pero no tiene filas en '_movimientos_canonicos'."
         )
 
+    moneda_funcional = str(fila_modelo.get("moneda_funcional", "")).strip().upper()
+    try:
+        conversor = ConversorMoneda(moneda_funcional) if moneda_funcional else None
+    except ErrorTipoCambio as exc:
+        raise RuntimeError(f"moneda_funcional inválida: {exc}") from exc
+
     filas, rechazos = [], []
     for config in fuentes:
         _validar_fuente(config, modelo_id)
@@ -69,7 +82,8 @@ def construir(destino, cliente_id: str, esquema_raw: str, esquema_sem: str,
         crudas = _leer(destino, esquema, origen, config.get("filtro", ""))
         referencias = _referencias(destino, config, esquema_raw, esquema_sem)
         for cruda in crudas:
-            resultado, motivo = _proyectar(cruda, config, modelo_id, referencias)
+            resultado, motivo = _proyectar(
+                cruda, config, modelo_id, referencias, conversor)
             if motivo:
                 rechazo = _rechazo(cruda, config, modelo_id, motivo)
                 rechazos.append(rechazo)
@@ -105,7 +119,7 @@ def construir(destino, cliente_id: str, esquema_raw: str, esquema_sem: str,
 
 
 def _proyectar(cruda: dict, cfg: dict, modelo_id: str,
-               referencias: dict) -> tuple[dict | None, str]:
+               referencias: dict, conversor: ConversorMoneda | None = None) -> tuple[dict | None, str]:
     if not _incluida(cruda, cfg):
         return None, ""
 
@@ -138,6 +152,14 @@ def _proyectar(cruda: dict, cfg: dict, modelo_id: str,
     fuente = _texto(cfg.get("fuente"))
     if not fuente:
         return None, "la fuente no declara una etiqueta"
+    # Un error de tasa no puede convertirse en un rechazo silencioso: omitir
+    # justo un gasto en moneda extranjera daría un total CRC incompleto. La
+    # excepción sube hasta la construcción del modelo, que conserva la última
+    # tabla completa publicada en vez de sustituirla por una parcial.
+    conversion = conversor.convertir(monto, moneda, fecha) if conversor else {
+        "monto": monto, "moneda": moneda, "tasa": None,
+        "fecha_tasa": None, "proveedor": "",
+    }
     return {
         "_clave": f"{fuente}:{clave}",
         "_origen": clave,
@@ -149,9 +171,17 @@ def _proyectar(cruda: dict, cfg: dict, modelo_id: str,
         "categoria": categoria,
         "linea_presupuesto_id": linea,
         "concepto": concepto,
-        "moneda": moneda,
-        "monto": monto,
-        "monto_neto": monto * signo,
+        # El contrato normaliza solo cuando metadata declara una moneda
+        # funcional. La fuente queda completa en *_original para auditoría.
+        "monto_original": monto,
+        "moneda_original": moneda,
+        "moneda": conversion["moneda"],
+        "monto": conversion["monto"],
+        "monto_neto": conversion["monto"] * signo,
+        "moneda_funcional": conversor.moneda_funcional if conversor else "",
+        "tipo_cambio": conversion["tasa"],
+        "fecha_tipo_cambio": conversion["fecha_tasa"],
+        "proveedor_tipo_cambio": conversion["proveedor"],
         "tipo_movimiento": tipo,
         "titular": _texto(valor("titular")),
         "medio_pago": _texto(valor("medio_pago")),

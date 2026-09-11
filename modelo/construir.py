@@ -81,7 +81,11 @@ def construir_cliente(destino, cliente: dict, probar: bool = False) -> dict:
                        f"{type(e).__name__}: {e}")
                 logger.exception(msg)
                 total["alertas"].append(msg)
-                continue
+                # Una tabla canónica financiera incompleta es peor que la
+                # versión anterior. Tampoco se vuelve a publicar el catálogo
+                # de metadata, pues eso escondería una tabla semántica que
+                # sigue siendo válida mientras se recupera la tasa externa.
+                return total
             total["modelos"] += 1
             total["filas"] += resultado["filas"]
             total["rechazos"] += resultado["rechazos"]
