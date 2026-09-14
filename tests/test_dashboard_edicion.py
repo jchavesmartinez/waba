@@ -26,7 +26,7 @@ def _politica_creacion():
     )
 
 
-def test_reclasificar_guarda_override_reconstruye_e_invalida(monkeypatch):
+def test_reclasificar_guarda_override_y_encola_materializacion(monkeypatch):
     cliente = {"cliente_id": "cliente_a", "catalogo_spreadsheet_id": "sheet"}
     guardado, overrides = {}, []
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
@@ -51,8 +51,10 @@ def test_reclasificar_guarda_override_reconstruye_e_invalida(monkeypatch):
         dashboard_edicion, "_guardar_override",
         lambda *args: overrides.append(args[1:]),
     )
-    monkeypatch.setattr(dashboard_edicion, "_reconstruir", lambda _: guardado.update(reconstruido=True))
-    monkeypatch.setattr(dashboard_edicion.dashboard, "invalidar_cache", lambda cid: guardado.update(cache=cid))
+    monkeypatch.setattr(
+        dashboard_edicion, "_encolar_reconstruccion",
+        lambda *args: guardado.update(cola=args[1:], version=8) or 8,
+    )
 
     resultado = dashboard_edicion.reclasificar(
         "token", "bac:movimiento-1", "gas_comedera", "SINPE",
@@ -61,13 +63,13 @@ def test_reclasificar_guarda_override_reconstruye_e_invalida(monkeypatch):
     assert resultado == {
         "ok": True, "linea_id": "gas_comedera",
         "categoria": "Alimentacion", "concepto": "Comedera", "medio_pago": "SINPE",
+        "estado": "pendiente", "version": 8,
     }
     assert overrides == [
         ("transacciones", "correo-1", "linea_presupuesto_id", "gas_comedera", "Reclasificado desde dashboard: Alimentacion > Comedera"),
         ("transacciones", "correo-1", "tarjeta", "SINPE", "Método de pago actualizado desde dashboard"),
     ]
-    assert guardado["reconstruido"] is True
-    assert guardado["cache"] == "cliente_a"
+    assert guardado["cola"] == ("bac:movimiento-1", "")
 
 
 def test_reclasificar_rechaza_identificador_no_seguro(monkeypatch):
@@ -91,7 +93,7 @@ def test_modelo_origen_resuelve_fuente_manual():
     assert configuracion["tabla_origen"] == "gastos_manuales"
 
 
-def test_reclasificar_manual_actualiza_origen_y_luego_reconstruye(monkeypatch):
+def test_reclasificar_manual_actualiza_origen_y_encola_sincronizacion(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     llamadas = []
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
@@ -109,15 +111,13 @@ def test_reclasificar_manual_actualiza_origen_y_luego_reconstruye(monkeypatch):
         }],
     })
     monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("raw", {"tabla_origen": "gastos_manuales"}))
-    monkeypatch.setattr(dashboard_edicion, "_actualizar_movimiento_manual", lambda *args: llamadas.append(("origen", args[2], args[3], args[4])))
-    monkeypatch.setattr(dashboard_edicion, "_sincronizar_fuente_manual", lambda *_: llamadas.append(("sync",)))
-    monkeypatch.setattr(dashboard_edicion, "_reconstruir", lambda *_: llamadas.append(("reconstruir",)))
-    monkeypatch.setattr(dashboard_edicion.dashboard, "invalidar_cache", lambda *_: llamadas.append(("cache",)))
+    monkeypatch.setattr(dashboard_edicion, "_actualizar_movimiento_manual", lambda *args: llamadas.append(("origen", args[2], args[3], args[4])) or "googledrive_db")
+    monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *args: llamadas.append(("cola", args[1], args[2])) or 1)
 
     dashboard_edicion.reclasificar("token", "manual-1", "gas_comedera")
 
     assert llamadas == [
-        ("origen", "MAN-1", "gas_comedera", "Efectivo"), ("sync",), ("reconstruir",), ("cache",),
+        ("origen", "MAN-1", "gas_comedera", "Efectivo"), ("cola", "manual-1", "googledrive_db"),
     ]
 
 
@@ -133,6 +133,29 @@ def test_reclasificar_rechaza_medio_pago_vacio(monkeypatch):
 
     with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="indique un método"):
         dashboard_edicion.reclasificar("token", "manual-1", "gas", "")
+
+
+def test_procesar_reconstrucciones_solo_invalida_version_vigente(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    trabajos = iter([
+        {"movimiento_clave": "manual-1", "version": 3, "fuente_id": "googledrive_db"},
+        {"movimiento_clave": "bac-2", "version": 4, "fuente_id": ""},
+        None,
+    ])
+    llamadas = []
+    monkeypatch.setattr(dashboard_edicion, "_tomar_reconstruccion", lambda _: next(trabajos))
+    monkeypatch.setattr(dashboard_edicion, "_sincronizar_fuente_manual", lambda _c, fuente, _: llamadas.append(("sync", fuente)))
+    monkeypatch.setattr(dashboard_edicion, "_reconstruir", lambda _: llamadas.append(("reconstruir",)))
+    # La primera terminó después de una edición más nueva y no puede invalidar
+    # el snapshot; la segunda sí corresponde a la última versión.
+    vigentes = iter([False, True])
+    monkeypatch.setattr(dashboard_edicion, "_terminar_reconstruccion", lambda *_: next(vigentes))
+    monkeypatch.setattr(dashboard_edicion.dashboard, "invalidar_cache", lambda cid: llamadas.append(("cache", cid)))
+
+    assert dashboard_edicion.procesar_reconstrucciones(cliente) == 2
+    assert llamadas == [
+        ("sync", "googledrive_db"), ("reconstruir",), ("reconstruir",), ("cache", "cliente_a"),
+    ]
 
 
 def test_crear_manual_guarda_en_origen_reconstruye_e_impone_linea(monkeypatch):

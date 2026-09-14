@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 
 import config
+import registry
 from bot import catalogo, dashboard, edicion, escritura_google_sheets, warehouse_ro
 from gclient import abrir_libro_escritura
 from modelo import metadata
 from modelo.construir import construir_cliente
 from warehouse import crear_destino
+from sqlalchemy import text
 import sync
 
 logger = logging.getLogger("fachavi.bot.dashboard_edicion")
@@ -27,6 +30,10 @@ class ErrorReclasificacion(ValueError):
 
 _VALOR_SEGURO = re.compile(r"^[\w.:-]{1,300}$", re.UNICODE)
 _MEDIO_PAGO_MAXIMO = 120
+_ESQUEMA_JOBS = "_bot"
+_TABLA_JOBS = "dashboard_edicion_jobs"
+_LOCKS_PROCESAMIENTO: dict[str, threading.Lock] = {}
+_LOCKS_PROCESAMIENTO_GUARDIA = threading.Lock()
 
 
 def _identificador(valor: str) -> str:
@@ -108,7 +115,7 @@ def _modelo_origen(datos: dict, movimiento: dict) -> tuple[str, dict]:
 
 
 def _actualizar_movimiento_manual(cliente: dict, cfg: dict, clave: str,
-                                  linea_id: str, medio_pago: str) -> None:
+                                  linea_id: str, medio_pago: str) -> str:
     """Actualiza un gasto manual en su hoja fuente, nunca en Neon.
 
     La pestaña y sus columnas se resuelven desde `_movimientos_canonicos` y la
@@ -140,7 +147,7 @@ def _actualizar_movimiento_manual(cliente: dict, cfg: dict, clave: str,
         if len(fila) > indice_clave and str(fila[indice_clave]).strip() == clave:
             hoja.update_cell(numero, encabezados.index(columna_linea) + 1, linea_id)
             hoja.update_cell(numero, encabezados.index(columna_medio_pago) + 1, medio_pago)
-            return
+            return str(fuente.get("fuente_id", "")).strip()
     raise ErrorReclasificacion("no encontré el registro manual que desea reclasificar")
 
 
@@ -241,6 +248,212 @@ def _reconstruir(cliente: dict) -> None:
         )
 
 
+def _motor_jobs(cliente: dict):
+    """Abre el mismo Neon del cliente para la cola durable de ediciones."""
+    destino = crear_destino(config.WAREHOUSE_TIPO, config.dsn_de_cliente(cliente))
+    if not hasattr(destino, "conectar"):
+        destino.cerrar()
+        raise ErrorReclasificacion(
+            "las ediciones en segundo plano requieren un warehouse PostgreSQL"
+        )
+    return destino, destino.conectar()
+
+
+def _asegurar_jobs(cx) -> None:
+    cx.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{_ESQUEMA_JOBS}"'))
+    cx.execute(text(
+        f'''CREATE TABLE IF NOT EXISTS "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}" (
+            cliente_id TEXT NOT NULL,
+            movimiento_clave TEXT NOT NULL,
+            version BIGINT NOT NULL DEFAULT 1,
+            fuente_id TEXT NOT NULL DEFAULT '',
+            estado TEXT NOT NULL DEFAULT 'pendiente',
+            creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            actualizado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            bloqueado_en TIMESTAMPTZ,
+            ultimo_error TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (cliente_id, movimiento_clave)
+        )'''
+    ))
+
+
+def _encolar_reconstruccion(cliente: dict, movimiento_clave: str,
+                            fuente_id: str = "") -> int:
+    """Persiste una edición pendiente y devuelve su versión creciente.
+
+    La clave única es el movimiento canónico. Dos guardados consecutivos no
+    crean dos trabajos que puedan pelear: el segundo incrementa ``version`` y
+    reemplaza el trabajo pendiente. El worker solo marca listo la versión que
+    efectivamente reconstruyó.
+    """
+    destino, motor = _motor_jobs(cliente)
+    try:
+        with motor.begin() as cx:
+            _asegurar_jobs(cx)
+            fila = cx.execute(text(f'''
+                INSERT INTO "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}"
+                    (cliente_id, movimiento_clave, fuente_id)
+                VALUES (:cliente_id, :movimiento_clave, :fuente_id)
+                ON CONFLICT (cliente_id, movimiento_clave) DO UPDATE SET
+                    version = "{_TABLA_JOBS}".version + 1,
+                    fuente_id = EXCLUDED.fuente_id,
+                    estado = 'pendiente',
+                    actualizado_en = CURRENT_TIMESTAMP,
+                    bloqueado_en = NULL,
+                    ultimo_error = ''
+                RETURNING version
+            '''), {
+                "cliente_id": str(cliente.get("cliente_id", "")),
+                "movimiento_clave": movimiento_clave,
+                "fuente_id": fuente_id,
+            }).scalar_one()
+            return int(fila)
+    finally:
+        destino.cerrar()
+
+
+def _tomar_reconstruccion(cliente: dict) -> dict | None:
+    destino, motor = _motor_jobs(cliente)
+    try:
+        with motor.begin() as cx:
+            _asegurar_jobs(cx)
+            fila = cx.execute(text(f'''
+                WITH siguiente AS (
+                    SELECT cliente_id, movimiento_clave
+                    FROM "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}"
+                    WHERE cliente_id = :cliente_id AND (
+                        estado = 'pendiente' OR
+                        (estado = 'procesando' AND bloqueado_en < CURRENT_TIMESTAMP - INTERVAL '10 minutes')
+                    )
+                    ORDER BY actualizado_en
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}" trabajo
+                SET estado = 'procesando', bloqueado_en = CURRENT_TIMESTAMP
+                FROM siguiente
+                WHERE trabajo.cliente_id = siguiente.cliente_id
+                  AND trabajo.movimiento_clave = siguiente.movimiento_clave
+                RETURNING trabajo.movimiento_clave, trabajo.version, trabajo.fuente_id
+            '''), {"cliente_id": str(cliente.get("cliente_id", ""))}).mappings().first()
+            return dict(fila) if fila else None
+    finally:
+        destino.cerrar()
+
+
+def _terminar_reconstruccion(cliente: dict, trabajo: dict) -> bool:
+    """Marca listo únicamente si nadie guardó una versión posterior."""
+    destino, motor = _motor_jobs(cliente)
+    try:
+        with motor.begin() as cx:
+            actualizadas = cx.execute(text(f'''
+                UPDATE "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}"
+                SET estado = 'listo', actualizado_en = CURRENT_TIMESTAMP,
+                    bloqueado_en = NULL, ultimo_error = ''
+                WHERE cliente_id = :cliente_id AND movimiento_clave = :movimiento_clave
+                  AND version = :version AND estado = 'procesando'
+            '''), {
+                "cliente_id": str(cliente.get("cliente_id", "")),
+                "movimiento_clave": trabajo["movimiento_clave"],
+                "version": trabajo["version"],
+            }).rowcount
+            return bool(actualizadas)
+    finally:
+        destino.cerrar()
+
+
+def _fallar_reconstruccion(cliente: dict, trabajo: dict, error: Exception) -> None:
+    destino, motor = _motor_jobs(cliente)
+    try:
+        with motor.begin() as cx:
+            cx.execute(text(f'''
+                UPDATE "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}"
+                SET estado = 'error', actualizado_en = CURRENT_TIMESTAMP,
+                    bloqueado_en = NULL, ultimo_error = :error
+                WHERE cliente_id = :cliente_id AND movimiento_clave = :movimiento_clave
+                  AND version = :version AND estado = 'procesando'
+            '''), {
+                "cliente_id": str(cliente.get("cliente_id", "")),
+                "movimiento_clave": trabajo["movimiento_clave"],
+                "version": trabajo["version"], "error": str(error)[:500],
+            })
+    finally:
+        destino.cerrar()
+
+
+def procesar_reconstrucciones(cliente: dict, maximo: int = 20) -> int:
+    """Materializa trabajos durables; es seguro invocarlo varias veces."""
+    cliente_id = str(cliente.get("cliente_id", ""))
+    with _LOCKS_PROCESAMIENTO_GUARDIA:
+        candado = _LOCKS_PROCESAMIENTO.setdefault(cliente_id, threading.Lock())
+    # La segunda edición queda en Neon como pendiente. No iniciamos otra
+    # reconstrucción en paralelo: el trabajo que ya está activo la recogerá
+    # al terminar su versión actual, conservando el orden de versiones.
+    if not candado.acquire(blocking=False):
+        return 0
+    procesadas = 0
+    try:
+        while procesadas < maximo:
+            trabajo = _tomar_reconstruccion(cliente)
+            if not trabajo:
+                return procesadas
+            try:
+                if str(trabajo.get("fuente_id", "")).strip():
+                    _sincronizar_fuente_manual(cliente, str(trabajo["fuente_id"]), "el movimiento")
+                _reconstruir(cliente)
+            except Exception as exc:  # el cambio ya quedó guardado; el estado queda visible y reintentable
+                logger.exception("[%s] no se pudo materializar edición %s", cliente.get("cliente_id"), trabajo.get("movimiento_clave"))
+                _fallar_reconstruccion(cliente, trabajo, exc)
+                return procesadas
+            if _terminar_reconstruccion(cliente, trabajo):
+                dashboard.invalidar_cache(cliente_id)
+            procesadas += 1
+        return procesadas
+    finally:
+        candado.release()
+
+
+def procesar_reconstrucciones_cliente(cliente_id: str) -> int:
+    cliente = next((c for c in registry.listar_clientes()
+                    if str(c.get("cliente_id", "")) == str(cliente_id)), None)
+    return procesar_reconstrucciones(cliente) if cliente else 0
+
+
+def recuperar_reconstrucciones_pendientes() -> None:
+    """Al iniciar el web procesa ediciones que sobrevivieron un reinicio."""
+    try:
+        clientes = registry.listar_clientes()
+    except Exception:
+        logger.exception("no se pudo leer el registro para recuperar ediciones pendientes")
+        return
+    for cliente in clientes:
+        try:
+            procesar_reconstrucciones(cliente)
+        except Exception:  # un cliente no debe bloquear la recuperación de los demás
+            logger.exception("[%s] no se pudo recuperar ediciones pendientes", cliente.get("cliente_id"))
+
+
+def estado_reconstruccion(token: str, movimiento_clave: object) -> dict:
+    _, cliente = dashboard.validar_enlace(token)
+    clave = str(movimiento_clave or "").strip()
+    if not _VALOR_SEGURO.fullmatch(clave):
+        raise ErrorReclasificacion("la solicitud de edición no es válida")
+    destino, motor = _motor_jobs(cliente)
+    try:
+        with motor.begin() as cx:
+            _asegurar_jobs(cx)
+            fila = cx.execute(text(f'''
+                SELECT estado, version, actualizado_en, ultimo_error
+                FROM "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}"
+                WHERE cliente_id = :cliente_id AND movimiento_clave = :movimiento_clave
+            '''), {"cliente_id": str(cliente.get("cliente_id", "")), "movimiento_clave": clave}).mappings().first()
+            if not fila:
+                return {"ok": True, "estado": "listo"}
+            return {"ok": True, "estado": str(fila["estado"]), "version": int(fila["version"])}
+    finally:
+        destino.cerrar()
+
+
 def reclasificar(token: str, movimiento_clave: object, linea_id: object,
                  medio_pago: object = None) -> dict:
     """Valida, persiste y reconstruye una edición puntual del movimiento."""
@@ -260,6 +473,7 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
     clave_origen = str(movimiento.get("clave_origen", "")).strip()
     if not _VALOR_SEGURO.fullmatch(clave_origen):
         raise ErrorReclasificacion("el movimiento no tiene una identidad estable para corregirse")
+    fuente_id = ""
     if capa == "semantic":
         _guardar_override(
             cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
@@ -272,17 +486,18 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
             "Método de pago actualizado desde dashboard",
         )
     else:
-        _actualizar_movimiento_manual(cliente, origen, clave_origen, linea, medio)
-        _sincronizar_fuente_manual(cliente, str(movimiento.get("fuente", "")),
-                                   "la clasificación")
-    _reconstruir(cliente)
-    dashboard.invalidar_cache(str(cliente.get("cliente_id", "")))
+        fuente_id = _actualizar_movimiento_manual(cliente, origen, clave_origen, linea, medio)
+    version = _encolar_reconstruccion(
+        cliente, clave, fuente_id,
+    )
     return {
         "ok": True,
         "linea_id": destino["linea_id"],
         "categoria": destino["categoria"],
         "concepto": destino["concepto"],
         "medio_pago": medio,
+        "estado": "pendiente",
+        "version": version,
     }
 
 

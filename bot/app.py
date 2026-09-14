@@ -32,6 +32,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict, deque
+from contextlib import asynccontextmanager
 from html import escape
 from urllib.parse import parse_qs
 
@@ -50,7 +51,17 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("fachavi.bot.app")
 
-app = FastAPI(title="FACHAVI — WhatsApp bot (Meta Cloud API)")
+@asynccontextmanager
+async def _ciclo_vida(_: FastAPI):
+    """Retoma trabajos de dashboard que quedaron pendientes tras un reinicio."""
+    threading.Thread(
+        target=dashboard_edicion.recuperar_reconstrucciones_pendientes,
+        name="dashboard-ediciones-recuperacion", daemon=True,
+    ).start()
+    yield
+
+
+app = FastAPI(title="FACHAVI — WhatsApp bot (Meta Cloud API)", lifespan=_ciclo_vida)
 app.mount(
     "/dashboard-assets",
     StaticFiles(directory=str(dashboard.ASSETS_DIR)),
@@ -512,7 +523,8 @@ async def responder_chat_dashboard(token: str, request: Request):
 
 
 @app.post("/dashboard/{token}/movimientos/reclasificar")
-async def reclasificar_movimiento_dashboard(token: str, request: Request):
+async def reclasificar_movimiento_dashboard(token: str, request: Request,
+                                            tareas: BackgroundTasks):
     """Aplica una clasificación puntual, validada por el enlace del dashboard."""
     cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
     try:
@@ -522,6 +534,14 @@ async def reclasificar_movimiento_dashboard(token: str, request: Request):
         resultado = dashboard_edicion.reclasificar(
             token, datos.get("movimiento_clave"), datos.get("linea_id"),
             datos.get("medio_pago"),
+        )
+        # La escritura fuente ya fue confirmada. La sincronización pesada va
+        # después de responder para que el navegador pueda actualizar su vista
+        # al instante; la cola durable en Neon permite retomarla si Render cae.
+        payload, _ = dashboard.validar_enlace(token)
+        tareas.add_task(
+            dashboard_edicion.procesar_reconstrucciones_cliente,
+            str(payload["cid"]),
         )
         return JSONResponse(resultado, headers=cabeceras)
     except dashboard.EnlaceInvalido:
@@ -535,6 +555,30 @@ async def reclasificar_movimiento_dashboard(token: str, request: Request):
         logger.exception("No se pudo reclasificar un movimiento desde dashboard")
         return JSONResponse(
             {"ok": False, "error": "No pude guardar la clasificación. Inténtelo nuevamente."},
+            status_code=503, headers=cabeceras,
+        )
+
+
+@app.get("/dashboard/{token}/movimientos/{movimiento_clave}/estado")
+async def estado_reclasificacion_dashboard(token: str, movimiento_clave: str):
+    """Expone solo el estado de materialización del movimiento editado."""
+    cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        return JSONResponse(
+            dashboard_edicion.estado_reconstruccion(token, movimiento_clave),
+            headers=cabeceras,
+        )
+    except dashboard.EnlaceInvalido:
+        return JSONResponse(
+            {"ok": False, "error": "El enlace venció. Solicite un dashboard nuevo desde WhatsApp."},
+            status_code=410, headers=cabeceras,
+        )
+    except dashboard_edicion.ErrorReclasificacion as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400, headers=cabeceras)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo consultar el estado de una edición del dashboard")
+        return JSONResponse(
+            {"ok": False, "error": "No pude verificar la sincronización."},
             status_code=503, headers=cabeceras,
         )
 

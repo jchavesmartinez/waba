@@ -38,11 +38,34 @@
   const creation = data.creacion_manual && Array.isArray(data.creacion_manual.campos)
     ? data.creacion_manual : null;
   const mostrarAviso = (mensaje) => {
+    document.querySelectorAll(".aviso-dashboard").forEach((aviso) => aviso.remove());
     const aviso = document.createElement("div"); aviso.className = "aviso-dashboard";
     aviso.setAttribute("role", "status"); aviso.setAttribute("aria-live", "polite");
     const icono = document.createElement("span"); icono.setAttribute("aria-hidden", "true"); icono.textContent = "✓";
     const texto = document.createElement("span"); texto.textContent = mensaje;
     aviso.append(icono, texto); document.body.append(aviso);
+  };
+  const vigilarSincronizacion = (movimientoClave, intento = 0) => {
+    if (!movimientoClave || intento >= 20) return;
+    window.setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `${window.location.pathname}/movimientos/${encodeURIComponent(movimientoClave)}/estado`,
+          { headers: { Accept: "application/json" } },
+        );
+        const result = await response.json();
+        if (!response.ok || !result.ok) return;
+        if (result.estado === "listo") {
+          mostrarAviso("Cambios sincronizados correctamente.");
+        } else if (result.estado === "error") {
+          mostrarAviso("El cambio quedó guardado, pero no pudo sincronizarse todavía.");
+        } else {
+          vigilarSincronizacion(movimientoClave, intento + 1);
+        }
+      } catch (_) {
+        // La edición sigue guardada; se confirmará al recargar aunque falle un sondeo puntual.
+      }
+    }, 1500);
   };
   const iniciarChat = () => {
     const mensajes = byId("chat-mensajes");
@@ -179,9 +202,14 @@
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar la clasificación.");
+        movement.linea_id = result.linea_id;
+        movement.categoria = result.categoria;
+        movement.concepto = result.concepto;
+        movement.medio_pago = result.medio_pago;
         dialog.close();
-        mostrarAviso("Movimiento actualizado. Actualizando dashboard…");
-        window.setTimeout(() => window.location.reload(), 1200);
+        renderVista();
+        mostrarAviso("Cambios guardados. Sincronizando en segundo plano…");
+        vigilarSincronizacion(movement.movimiento_clave);
       } catch (reason) {
         error.textContent = reason.message || "No pude guardar la clasificación.";
         error.hidden = false; save.disabled = false; cancel.disabled = false;
