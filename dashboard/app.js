@@ -465,6 +465,79 @@
     return new Set([conceptKpi, categoryKpi, commerceKpi].filter(Boolean));
   };
 
+  const renderPaymentHierarchy = (target) => {
+    const movements = Array.isArray(data.movimientos) ? data.movimientos : [];
+    if (!movements.length) return false;
+    const groups = new Map();
+    movements.forEach((movement) => {
+      const methodKey = keyMatch(movement, /^medio_pago$|metodo_pago|método de pago/i);
+      const currencyKey = keyMatch(movement, /^moneda$/i);
+      const amountKey = keyMatch(movement, /^monto$|gasto.?neto|gastado/i);
+      const method = String(movement[methodKey] || "Sin método de pago").trim() || "Sin método de pago";
+      const currency = String(movement[currencyKey] || "CRC").trim() || "CRC";
+      const groupKey = `${normalized(method)}|${normalized(currency)}`;
+      const group = groups.get(groupKey) || { method, currency, spent: 0, movements: [] };
+      group.spent += number(movement[amountKey]) || 0;
+      group.movements.push(movement); groups.set(groupKey, group);
+    });
+
+    const movementName = (movement) => {
+      const nameKey = keyMatch(movement, /^descripcion$|^descripción$|^comercio$|^nombre$/i);
+      return movement[nameKey] || "Movimiento";
+    };
+    const paymentLabel = (method) => {
+      // Los datos bancarios almacenan la tarjeta enmascarada. Mostramos solo
+      // los últimos cuatro dígitos para que el encabezado sea claro sin
+      // exponer más información de la necesaria.
+      const maskedCard = String(method).match(/^\*+(\d{4})$/);
+      return maskedCard ? `Tarjeta · ****${maskedCard[1]}` : method;
+    };
+    const movementDate = (movement) => {
+      const dateKey = keyMatch(movement, /^fecha$|fecha_transaccion/i);
+      return dateKey ? String(movement[dateKey] || "") : "";
+    };
+    const panel = document.createElement("article"); panel.className = "panel panel-jerarquia";
+    const title = document.createElement("h2"); title.textContent = "Gasto mensual por método de pago"; panel.append(title);
+    const description = document.createElement("p"); description.className = "descripcion";
+    description.textContent = "Expande una tarjeta o método de pago para ver los movimientos que lo componen."; panel.append(description);
+    const tree = document.createElement("div"); tree.className = "jerarquia";
+    [...groups.values()].sort((a, b) => b.spent - a.spent).forEach((group) => {
+      const details = document.createElement("details"); details.className = "nivel nivel-categoria";
+      const summary = document.createElement("summary");
+      const heading = document.createElement("span"); heading.className = "nivel-titulo"; heading.textContent = paymentLabel(group.method);
+      const meta = document.createElement("span"); meta.className = "nivel-meta";
+      meta.textContent = `Gastado: ${format(group.spent, "monto", group.currency)} · ${group.movements.length} movimiento${group.movements.length === 1 ? "" : "s"}`;
+      summary.append(heading, meta); details.append(summary);
+      const body = document.createElement("div"); body.className = "nivel-detalle";
+      const bar = document.createElement("div"); bar.className = "bar-line";
+      const label = document.createElement("span"); label.textContent = "Gastado";
+      const track = document.createElement("span"); track.className = "bar-track";
+      const fill = document.createElement("span"); fill.className = "bar-fill bar-spent"; fill.style.width = "100%"; track.append(fill);
+      const value = document.createElement("strong"); value.textContent = format(group.spent, "monto", group.currency);
+      bar.append(label, track, value); body.append(bar);
+      const list = document.createElement("ul"); list.className = "movimientos";
+      group.movements.sort((a, b) => movementDate(b).localeCompare(movementDate(a))).forEach((movement) => {
+        const item = document.createElement("li");
+        const detail = document.createElement("span");
+        const name = document.createElement("strong"); name.textContent = movementName(movement);
+        const date = document.createElement("small"); date.textContent = movementDate(movement).slice(0, 10);
+        detail.append(name, date);
+        const amountKey = keyMatch(movement, /^monto$|gasto.?neto|gastado/i);
+        const amount = document.createElement("strong"); amount.textContent = amountKey ? format(movement[amountKey], amountKey, group.currency) : "";
+        item.append(detail, amount);
+        if (movement.movimiento_clave && lines.length) {
+          const edit = document.createElement("button"); edit.type = "button"; edit.className = "editar-movimiento";
+          edit.setAttribute("aria-label", `Reclasificar ${movementName(movement)}`); edit.title = "Reclasificar"; edit.textContent = "✎";
+          edit.addEventListener("click", () => abrirEditor(movement)); item.append(edit);
+        }
+        list.append(item);
+      });
+      body.append(list); details.append(body); tree.append(details);
+    });
+    panel.append(tree); target.append(panel);
+    return true;
+  };
+
   byId("cliente").textContent = data.cliente.nombre;
   byId("periodo").textContent = data.periodo.etiqueta;
   byId("actualizado").textContent = "Actualizado: " + new Date(data.actualizado_en).toLocaleString("es-CR");
@@ -508,19 +581,18 @@
   }
 
   const target = byId("indicadores");
-  const hierarchyKpis = renderHierarchy(target);
-  // La jerarquía es la vista financiera principal: reúne categorías,
-  // conceptos y movimientos en el mismo árbol. Cuando está disponible no
-  // repetimos los KPI auxiliares (quincena, comercio, calidad, tendencias,
-  // etc.) debajo, porque solo hacen el dashboard más largo y duplican cifras.
-  // Para clientes que todavía no poseen relaciones presupuesto-movimientos,
-  // conservamos el fallback genérico de KPI planos.
-  const visible = hierarchyKpis.size ? [] : data.kpis
-    .filter((k) => k !== summary)
-    .filter((k) => !hierarchyKpis.has(k))
-    .filter((k) => !/^(gasto_total|gasto_neto)$/i.test(String(k.kpi || "")))
-    .sort((a, b) => presentacion(a).orden - presentacion(b).orden);
-  visible.forEach((kpi) => {
+  const renderVistaCategoria = () => {
+    const hierarchyKpis = renderHierarchy(target);
+    // La jerarquía es la vista financiera principal: reúne categorías,
+    // conceptos y movimientos en el mismo árbol. Cuando está disponible no
+    // repetimos los KPI auxiliares debajo. Para clientes que todavía no poseen
+    // relaciones presupuesto-movimientos se conserva el fallback genérico.
+    const visible = hierarchyKpis.size ? [] : data.kpis
+      .filter((k) => k !== summary)
+      .filter((k) => !hierarchyKpis.has(k))
+      .filter((k) => !/^(gasto_total|gasto_neto)$/i.test(String(k.kpi || "")))
+      .sort((a, b) => presentacion(a).orden - presentacion(b).orden);
+    visible.forEach((kpi) => {
     const panel = document.createElement("article"); panel.className = "panel";
     const title = document.createElement("h2"); title.textContent = presentacion(kpi).titulo;
     panel.append(title);
@@ -576,7 +648,21 @@
     const details = document.createElement("details"); details.className = "detalle";
     const summaryDetails = document.createElement("summary"); summaryDetails.textContent = "Ver datos detallados";
     details.append(summaryDetails, wrap); panel.append(details); target.append(panel);
-  });
-  if (!data.kpis.length) target.innerHTML = '<article class="panel vacio">No hay KPIs habilitados para mostrar.</article>';
+    });
+    if (!data.kpis.length) target.innerHTML = '<article class="panel vacio">No hay KPIs habilitados para mostrar.</article>';
+  };
+  const selectorVista = byId("agrupar-gastos");
+  const renderVista = () => {
+    target.replaceChildren();
+    if (selectorVista?.value === "medio_pago") {
+      if (!renderPaymentHierarchy(target)) {
+        target.innerHTML = '<article class="panel vacio">No hay movimientos para agrupar por método de pago en este período.</article>';
+      }
+      return;
+    }
+    renderVistaCategoria();
+  };
+  if (selectorVista) selectorVista.addEventListener("change", renderVista);
+  renderVista();
   iniciarChat();
 })();

@@ -21,6 +21,9 @@ body {
 .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 30px; }
 .hero { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 28px; }
 .hero-acciones { display: grid; justify-items: end; gap: 10px; }
+.selector-vista { display: grid; gap: 4px; color: var(--muted); font-size: .72rem; font-weight: 760; text-align: left; }
+.selector-vista select { min-width: 175px; border: 1px solid var(--line); border-radius: 9px; padding: 8px 28px 8px 10px; background: white; color: var(--ink); font: inherit; font-size: .86rem; font-weight: 700; }
+.selector-vista select:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 2px; }
 .agregar-movimiento { appearance: none; border: 0; border-radius: 10px; padding: 11px 14px; background: var(--green); color: white; font: inherit; font-size: .88rem; font-weight: 800; cursor: pointer; white-space: nowrap; box-shadow: 0 8px 18px rgba(23, 107, 77, .16); }
 .agregar-movimiento:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 2px; }
 .eyebrow { margin: 0 0 7px; color: var(--green); font-size: .78rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }

@@ -175,7 +175,7 @@ def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):
         tabla_logica="movimientos", tabla_real="finanzas__movimientos", fuente_id="modelo",
         columnas_config={
             "linea_presupuesto_id": {}, "fecha": {}, "descripcion": {},
-            "moneda": {}, "monto_neto": {}, "tipo_movimiento": {},
+            "moneda": {}, "monto_neto": {}, "medio_pago": {}, "tipo_movimiento": {},
         },
     )
     manuales = catalogo.TablaPermitida(
@@ -196,9 +196,9 @@ def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):
         capturado["sql"] = sql
         capturado["limite"] = limite
         return (
-            ["linea_id", "categoria", "concepto", "fecha", "descripcion", "moneda", "monto"],
+            ["linea_id", "categoria", "concepto", "fecha", "descripcion", "moneda", "monto", "medio_pago"],
             [("gas_comedera", "Alimentacion", "Comedera", "2026-09-05",
-              "WALMART", "CRC", 23148)],
+              "WALMART", "CRC", 23148, "VISA 1234")],
         )
 
     monkeypatch.setattr(dashboard.nl2sql, "validar_sql", lambda *_: (True, ""))
@@ -215,7 +215,9 @@ def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):
         "linea_id": "gas_comedera", "categoria": "Alimentacion",
         "concepto": "Comedera", "fecha": "2026-09-05",
         "descripcion": "WALMART", "moneda": "CRC", "monto": 23148,
+        "medio_pago": "VISA 1234",
     }]
+    assert "m.medio_pago" in capturado["sql"]
 
 
 def test_jerarquia_no_oculta_movimientos_sin_linea_de_presupuesto(monkeypatch):

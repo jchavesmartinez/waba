@@ -308,6 +308,10 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
                           requeridas_canonicas.issubset(ccols))
     if usa_canonicos:
         tabla = _identificador(canonicos.tabla_real)
+        medio_pago = (
+            "COALESCE(NULLIF(TRIM(CAST(m.medio_pago AS text)),''),'Sin método de pago')"
+            if "medio_pago" in ccols else "'Sin método de pago'"
+        )
         # Estos identificadores nunca se muestran como texto de negocio. Viajan
         # al navegador solo para que la edición confirmada pueda volver a
         # validar exactamente el movimiento seleccionado en el servidor.
@@ -331,7 +335,7 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
             "SELECT CAST(m.linea_presupuesto_id AS text) AS linea_id, "
             "m.fecha AS fecha, m.descripcion AS descripcion, "
             "UPPER(COALESCE(NULLIF(CAST(m.moneda AS text),''),'CRC')) AS moneda, "
-            f"m.{_identificador(monto_canonico)} AS monto, {extras_sql} "
+            f"m.{_identificador(monto_canonico)} AS monto, {medio_pago} AS medio_pago, {extras_sql} "
             f"FROM {tabla} m WHERE m.fecha >= DATE '{inicio}' "
             f"AND m.fecha < DATE '{fin}' AND m.linea_presupuesto_id IS NOT NULL"
         )
@@ -343,12 +347,18 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
         requeridas = {"linea_presupuesto_id", "fecha_transaccion", "monto", "monto_moneda", "tipo_transaccion"}
         if requeridas.issubset(cols) and ("comercio" in cols):
             tabla = _identificador(transacciones.tabla_real)
+            medio_pago = (
+                "COALESCE(NULLIF(TRIM(CAST(t.medio_pago AS text)),''),'Sin método de pago')"
+                if "medio_pago" in cols
+                else "COALESCE(NULLIF(TRIM(CAST(t.tarjeta AS text)),''),'Sin método de pago')"
+                if "tarjeta" in cols else "'Sin método de pago'"
+            )
             partes.append(
                 f"SELECT CAST(t.linea_presupuesto_id AS text) AS linea_id, "
                 f"t.fecha_transaccion AS fecha, t.comercio AS descripcion, "
                 f"t.monto_moneda AS moneda, "
                 f"CASE WHEN UPPER(t.tipo_transaccion) IN ('REVERSO','ANULACION') "
-                f"THEN -t.monto ELSE t.monto END AS monto "
+                f"THEN -t.monto ELSE t.monto END AS monto, {medio_pago} AS medio_pago "
                 f"FROM {tabla} t WHERE t.fecha_transaccion >= DATE '{inicio}' "
                 f"AND t.fecha_transaccion < DATE '{fin}'"
             )
@@ -357,11 +367,16 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
         requeridas = {"linea_presupuesto_id", "fecha", "descripcion", "monto", "moneda", "tipo_movimiento", "activo", "incluir_en_gasto"}
         if requeridas.issubset(cols):
             tabla = _identificador(manuales.tabla_real)
+            medio_pago = (
+                "COALESCE(NULLIF(TRIM(CAST(g.medio_pago AS text)),''),'Sin método de pago')"
+                if "medio_pago" in cols else "'Sin método de pago'"
+            )
             partes.append(
                 f"SELECT CAST(g.linea_presupuesto_id AS text) AS linea_id, "
                 f"g.fecha AS fecha, g.descripcion AS descripcion, "
                 f"UPPER(COALESCE(NULLIF(g.moneda,''),'CRC')) AS moneda, "
                 f"CASE WHEN UPPER(g.tipo_movimiento)='REVERSO' THEN -g.monto ELSE g.monto END AS monto "
+                f", {medio_pago} AS medio_pago "
                 f"FROM {tabla} g WHERE LOWER(TRIM(g.activo))='si' "
                 f"AND LOWER(TRIM(g.incluir_en_gasto))='si' "
                 f"AND UPPER(g.tipo_movimiento) IN ('GASTO','REVERSO') "
@@ -386,7 +401,7 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
         f"SELECT m.linea_id, "
         "COALESCE(NULLIF(TRIM(CAST(p.categoria AS text)),''),'Sin clasificar') AS categoria, "
         "COALESCE(NULLIF(TRIM(CAST(p.concepto AS text)),''),'Gastos sin identificar') AS concepto, "
-        f"m.fecha, m.descripcion, m.moneda, m.monto{extras_final} "
+        f"m.fecha, m.descripcion, m.moneda, m.monto, m.medio_pago{extras_final} "
         f"FROM movimientos m LEFT JOIN {ptabla} p "
         "ON TRIM(CAST(p.linea_id AS text)) = TRIM(m.linea_id) "
         "WHERE m.linea_id IS NOT NULL "

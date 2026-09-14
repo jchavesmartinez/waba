@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="robots" content="noindex,nofollow,noarchive">
   <title>Dashboard financiero · Fachavi</title>
-  <link rel="stylesheet" href="/dashboard-assets/styles.css?v=chat-compartido-20260913">
+  <link rel="stylesheet" href="/dashboard-assets/styles.css?v=vista-medio-pago-20260913">
 </head>
 <body>
   <main class="shell">
@@ -16,6 +16,13 @@
         <p id="periodo" class="periodo"></p>
       </div>
       <div class="hero-acciones">
+        <label class="selector-vista" for="agrupar-gastos">
+          Ver gastos por
+          <select id="agrupar-gastos">
+            <option value="categoria">Categoría</option>
+            <option value="medio_pago">Método de pago</option>
+          </select>
+        </label>
         <button id="agregar-movimiento" class="agregar-movimiento" type="button" hidden>＋ Agregar movimiento</button>
         <div class="estado"><span></span> Datos verificados</div>
       </div>
@@ -47,6 +54,6 @@
     </footer>
   </main>
   <script id="dashboard-data" type="application/json">__DASHBOARD_DATA__</script>
-  <script src="/dashboard-assets/app.js?v=chat-compartido-20260913" defer></script>
+  <script src="/dashboard-assets/app.js?v=vista-medio-pago-20260913" defer></script>
 </body>
 </html>
