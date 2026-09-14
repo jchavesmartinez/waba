@@ -135,7 +135,7 @@
     if (!movement.movimiento_clave || !lines.length) return;
     const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento";
     const form = document.createElement("form"); form.method = "dialog";
-    const title = document.createElement("h2"); title.textContent = "Reclasificar movimiento";
+    const title = document.createElement("h2"); title.textContent = "Editar movimiento";
     const detail = document.createElement("p"); detail.className = "editor-descripcion";
     detail.textContent = `${movement.descripcion || "Movimiento"} · ${String(movement.fecha || "").slice(0, 10)}`;
     const label = document.createElement("label"); label.textContent = "Concepto presupuestario";
@@ -147,25 +147,40 @@
       select.append(option);
     });
     label.append(select);
+    const paymentLabel = document.createElement("label"); paymentLabel.textContent = "Método de pago";
+    const payment = document.createElement("input"); payment.type = "text"; payment.name = "medio_pago";
+    payment.autocomplete = "off"; payment.required = true;
+    payment.value = String(movement.medio_pago || "").trim() === "Sin método de pago" ? "" : String(movement.medio_pago || "");
+    payment.placeholder = "Ej.: Efectivo, SINPE o tarjeta";
+    const paymentList = document.createElement("datalist"); const paymentListId = `metodos-pago-${movement.movimiento_clave}`.replace(/[^a-z0-9_-]/gi, "-"); paymentList.id = paymentListId;
+    const methods = [...new Set((Array.isArray(data.movimientos) ? data.movimientos : [])
+      .map((item) => String(item.medio_pago || "").trim())
+      .filter((method) => method && method !== "Sin método de pago"))].sort((a, b) => a.localeCompare(b, "es"));
+    methods.forEach((method) => { const option = document.createElement("option"); option.value = method; paymentList.append(option); });
+    payment.setAttribute("list", paymentListId); paymentLabel.append(payment, paymentList);
     const note = document.createElement("p"); note.className = "editor-nota";
-    note.textContent = "Se aplicará solo a este movimiento y quedará guardado para futuras sincronizaciones.";
+    note.textContent = "Los cambios se aplicarán solo a este movimiento y quedarán guardados para futuras sincronizaciones.";
     const actions = document.createElement("div"); actions.className = "editor-acciones";
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
     cancel.addEventListener("click", () => dialog.close());
-    const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar clasificación";
+    const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar cambios";
     const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
-    actions.append(cancel, save); form.append(title, detail, label, note, error, actions); dialog.append(form);
+    actions.append(cancel, save); form.append(title, detail, label, paymentLabel, note, error, actions); dialog.append(form);
     form.addEventListener("submit", async (event) => {
       event.preventDefault(); save.disabled = true; cancel.disabled = true; error.hidden = true;
       try {
         const response = await fetch(`${window.location.pathname}/movimientos/reclasificar`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ movimiento_clave: movement.movimiento_clave, linea_id: select.value }),
+          body: JSON.stringify({
+            movimiento_clave: movement.movimiento_clave,
+            linea_id: select.value,
+            medio_pago: payment.value,
+          }),
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar la clasificación.");
         dialog.close();
-        mostrarAviso("Clasificación guardada. Actualizando dashboard…");
+        mostrarAviso("Movimiento actualizado. Actualizando dashboard…");
         window.setTimeout(() => window.location.reload(), 1200);
       } catch (reason) {
         error.textContent = reason.message || "No pude guardar la clasificación.";

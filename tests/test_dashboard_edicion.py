@@ -28,12 +28,12 @@ def _politica_creacion():
 
 def test_reclasificar_guarda_override_reconstruye_e_invalida(monkeypatch):
     cliente = {"cliente_id": "cliente_a", "catalogo_spreadsheet_id": "sheet"}
-    guardado = {}
+    guardado, overrides = {}, []
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
     monkeypatch.setattr(
         dashboard_edicion, "_movimiento",
         lambda _cliente, _clave: (
-            {"_modelo_id": "movimientos", "fuente": "banco", "clave_origen": "correo-1"},
+            {"_modelo_id": "movimientos", "fuente": "banco", "clave_origen": "correo-1", "medio_pago": "Tarjeta anterior"},
             object(),
         ),
     )
@@ -41,24 +41,31 @@ def test_reclasificar_guarda_override_reconstruye_e_invalida(monkeypatch):
         dashboard_edicion, "_validar_linea",
         lambda *_: {"linea_id": "gas_comedera", "categoria": "Alimentacion", "concepto": "Comedera"},
     )
-    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {"modelos": [], "movimientos_canonicos": []})
+    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {
+        "modelos": [], "movimientos_canonicos": [{
+            "modelo_id": "movimientos", "fuente": "banco", "medio_pago": "tarjeta",
+        }],
+    })
     monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("semantic", {"modelo_id": "transacciones"}))
     monkeypatch.setattr(
         dashboard_edicion, "_guardar_override",
-        lambda *args: guardado.update(modelo=args[1], clave=args[2], linea=args[3], nota=args[4]),
+        lambda *args: overrides.append(args[1:]),
     )
     monkeypatch.setattr(dashboard_edicion, "_reconstruir", lambda _: guardado.update(reconstruido=True))
     monkeypatch.setattr(dashboard_edicion.dashboard, "invalidar_cache", lambda cid: guardado.update(cache=cid))
 
-    resultado = dashboard_edicion.reclasificar("token", "bac:movimiento-1", "gas_comedera")
+    resultado = dashboard_edicion.reclasificar(
+        "token", "bac:movimiento-1", "gas_comedera", "SINPE",
+    )
 
     assert resultado == {
         "ok": True, "linea_id": "gas_comedera",
-        "categoria": "Alimentacion", "concepto": "Comedera",
+        "categoria": "Alimentacion", "concepto": "Comedera", "medio_pago": "SINPE",
     }
-    assert guardado["modelo"] == "transacciones"
-    assert guardado["clave"] == "correo-1"
-    assert guardado["linea"] == "gas_comedera"
+    assert overrides == [
+        ("transacciones", "correo-1", "linea_presupuesto_id", "gas_comedera", "Reclasificado desde dashboard: Alimentacion > Comedera"),
+        ("transacciones", "correo-1", "tarjeta", "SINPE", "Método de pago actualizado desde dashboard"),
+    ]
     assert guardado["reconstruido"] is True
     assert guardado["cache"] == "cliente_a"
 
@@ -90,15 +97,19 @@ def test_reclasificar_manual_actualiza_origen_y_luego_reconstruye(monkeypatch):
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
     monkeypatch.setattr(
         dashboard_edicion, "_movimiento",
-        lambda *_: ({"_modelo_id": "movimientos", "fuente": "manual", "clave_origen": "MAN-1"}, object()),
+        lambda *_: ({"_modelo_id": "movimientos", "fuente": "manual", "clave_origen": "MAN-1", "medio_pago": "Efectivo"}, object()),
     )
     monkeypatch.setattr(
         dashboard_edicion, "_validar_linea",
         lambda *_: {"linea_id": "gas_comedera", "categoria": "Alimentacion", "concepto": "Comedera"},
     )
-    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {})
+    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {
+        "movimientos_canonicos": [{
+            "modelo_id": "movimientos", "fuente": "manual", "medio_pago": "medio_pago",
+        }],
+    })
     monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("raw", {"tabla_origen": "gastos_manuales"}))
-    monkeypatch.setattr(dashboard_edicion, "_actualizar_movimiento_manual", lambda *args: llamadas.append(("origen", args[2], args[3])))
+    monkeypatch.setattr(dashboard_edicion, "_actualizar_movimiento_manual", lambda *args: llamadas.append(("origen", args[2], args[3], args[4])))
     monkeypatch.setattr(dashboard_edicion, "_sincronizar_fuente_manual", lambda *_: llamadas.append(("sync",)))
     monkeypatch.setattr(dashboard_edicion, "_reconstruir", lambda *_: llamadas.append(("reconstruir",)))
     monkeypatch.setattr(dashboard_edicion.dashboard, "invalidar_cache", lambda *_: llamadas.append(("cache",)))
@@ -106,8 +117,22 @@ def test_reclasificar_manual_actualiza_origen_y_luego_reconstruye(monkeypatch):
     dashboard_edicion.reclasificar("token", "manual-1", "gas_comedera")
 
     assert llamadas == [
-        ("origen", "MAN-1", "gas_comedera"), ("sync",), ("reconstruir",), ("cache",),
+        ("origen", "MAN-1", "gas_comedera", "Efectivo"), ("sync",), ("reconstruir",), ("cache",),
     ]
+
+
+def test_reclasificar_rechaza_medio_pago_vacio(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
+    monkeypatch.setattr(
+        dashboard_edicion, "_movimiento",
+        lambda *_: ({"_modelo_id": "movimientos", "fuente": "manual", "clave_origen": "MAN-1", "medio_pago": "Efectivo"}, object()),
+    )
+    monkeypatch.setattr(dashboard_edicion, "_validar_linea", lambda *_: {"linea_id": "gas", "categoria": "A", "concepto": "B"})
+    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {"movimientos_canonicos": []})
+
+    with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="indique un método"):
+        dashboard_edicion.reclasificar("token", "manual-1", "gas", "")
 
 
 def test_crear_manual_guarda_en_origen_reconstruye_e_impone_linea(monkeypatch):

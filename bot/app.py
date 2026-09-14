@@ -521,6 +521,7 @@ async def reclasificar_movimiento_dashboard(token: str, request: Request):
             raise dashboard_edicion.ErrorReclasificacion("la solicitud de edición no es válida")
         resultado = dashboard_edicion.reclasificar(
             token, datos.get("movimiento_clave"), datos.get("linea_id"),
+            datos.get("medio_pago"),
         )
         return JSONResponse(resultado, headers=cabeceras)
     except dashboard.EnlaceInvalido:

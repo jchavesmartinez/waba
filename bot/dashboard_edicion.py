@@ -26,6 +26,7 @@ class ErrorReclasificacion(ValueError):
 
 
 _VALOR_SEGURO = re.compile(r"^[\w.:-]{1,300}$", re.UNICODE)
+_MEDIO_PAGO_MAXIMO = 120
 
 
 def _identificador(valor: str) -> str:
@@ -42,9 +43,13 @@ def _movimiento(cliente: dict, clave: str) -> tuple[dict, object]:
     requeridas = {"_clave", "_modelo_id", "fuente", "clave_origen", "linea_presupuesto_id"}
     if not requeridas.issubset(columnas):
         raise ErrorReclasificacion("este origen todavía no admite reclasificación desde el dashboard")
+    columna_medio_pago = (
+        "medio_pago" if "medio_pago" in columnas else "NULL::text AS medio_pago"
+    )
     filas = warehouse_ro.leer_interno(
         cliente,
-        f"SELECT \"_clave\", \"_modelo_id\", fuente, clave_origen, linea_presupuesto_id "
+        f"SELECT \"_clave\", \"_modelo_id\", fuente, clave_origen, linea_presupuesto_id, "
+        f"{columna_medio_pago} "
         f"FROM {_identificador(tabla.tabla_real)} WHERE \"_clave\" = :clave LIMIT 1",
         {"clave": clave},
     )
@@ -103,7 +108,7 @@ def _modelo_origen(datos: dict, movimiento: dict) -> tuple[str, dict]:
 
 
 def _actualizar_movimiento_manual(cliente: dict, cfg: dict, clave: str,
-                                  linea_id: str) -> None:
+                                  linea_id: str, medio_pago: str) -> None:
     """Actualiza un gasto manual en su hoja fuente, nunca en Neon.
 
     La pestaña y sus columnas se resuelven desde `_movimientos_canonicos` y la
@@ -125,12 +130,16 @@ def _actualizar_movimiento_manual(cliente: dict, cfg: dict, clave: str,
     except Exception as exc:  # gspread no expone una excepción estable
         raise ErrorReclasificacion("no pude abrir la hoja del gasto manual") from exc
     encabezados = [str(v).strip() for v in hoja.row_values(1)]
-    if clave_columna not in encabezados or "linea_presupuesto_id" not in encabezados:
+    columna_linea = str(cfg.get("linea_presupuesto_id", "linea_presupuesto_id")).strip()
+    columna_medio_pago = str(cfg.get("medio_pago", "medio_pago")).strip()
+    requeridas = {clave_columna, columna_linea, columna_medio_pago}
+    if not clave_columna or not requeridas.issubset(encabezados):
         raise ErrorReclasificacion("la hoja manual no tiene las columnas requeridas")
     indice_clave = encabezados.index(clave_columna)
     for numero, fila in enumerate(hoja.get_all_values()[1:], start=2):
         if len(fila) > indice_clave and str(fila[indice_clave]).strip() == clave:
-            hoja.update_cell(numero, encabezados.index("linea_presupuesto_id") + 1, linea_id)
+            hoja.update_cell(numero, encabezados.index(columna_linea) + 1, linea_id)
+            hoja.update_cell(numero, encabezados.index(columna_medio_pago) + 1, medio_pago)
             return
     raise ErrorReclasificacion("no encontré el registro manual que desea reclasificar")
 
@@ -161,8 +170,8 @@ def _sincronizar_fuente_manual(cliente: dict, fuente_id: str,
         )
 
 
-def _guardar_override(cliente: dict, modelo_id: str, clave: str, linea_id: str,
-                      nota: str) -> None:
+def _guardar_override(cliente: dict, modelo_id: str, clave: str, columna: str,
+                      valor_nuevo: str, nota: str) -> None:
     spreadsheet_id = str(cliente.get("catalogo_spreadsheet_id", "")).strip()
     if not spreadsheet_id:
         raise ErrorReclasificacion("este cliente no tiene metadata editable configurada")
@@ -179,14 +188,43 @@ def _guardar_override(cliente: dict, modelo_id: str, clave: str, linea_id: str,
     for numero, fila in enumerate(filas[1:], start=2):
         valor = lambda columna: str(fila[indice[columna]]).strip() if len(fila) > indice[columna] else ""
         if (valor("modelo_id") == modelo_id and valor("clave") == clave
-                and valor("columna") == "linea_presupuesto_id"):
-            hoja.update_cell(numero, indice["valor"] + 1, linea_id)
+                and valor("columna") == columna):
+            hoja.update_cell(numero, indice["valor"] + 1, valor_nuevo)
             hoja.update_cell(numero, indice["nota"] + 1, nota)
             return
     hoja.append_row(
-        [modelo_id, clave, "linea_presupuesto_id", linea_id, nota],
+        [modelo_id, clave, columna, valor_nuevo, nota],
         value_input_option="USER_ENTERED",
     )
+
+
+def _campo_medio_pago(datos: dict, movimiento: dict) -> str:
+    """Devuelve la columna de origen que metadata expone como medio de pago.
+
+    El contrato canónico siempre se llama ``medio_pago``, pero una fuente puede
+    llamarlo ``tarjeta`` u otro nombre. Un override debe escribirse sobre ese
+    campo de origen para que sobreviva la siguiente reconstrucción.
+    """
+    modelo = str(movimiento.get("_modelo_id", "")).strip()
+    fuente = str(movimiento.get("fuente", "")).strip().casefold()
+    cfg = next((fila for fila in datos.get("movimientos_canonicos", [])
+                if str(fila.get("modelo_id", "")).strip() == modelo
+                and str(fila.get("fuente", "")).strip().casefold() == fuente), None)
+    campo = str((cfg or {}).get("medio_pago", "")).strip()
+    if not campo:
+        raise ErrorReclasificacion("este origen no tiene un método de pago editable configurado")
+    if not _VALOR_SEGURO.fullmatch(campo):
+        raise ErrorReclasificacion("el campo de método de pago configurado no es válido")
+    return campo
+
+
+def _validar_medio_pago(valor: object) -> str:
+    medio = str(valor or "").strip()
+    if not medio:
+        raise ErrorReclasificacion("indique un método de pago")
+    if len(medio) > _MEDIO_PAGO_MAXIMO or any(ord(caracter) < 32 for caracter in medio):
+        raise ErrorReclasificacion("el método de pago no es válido")
+    return medio
 
 
 def _reconstruir(cliente: dict) -> None:
@@ -203,8 +241,9 @@ def _reconstruir(cliente: dict) -> None:
         )
 
 
-def reclasificar(token: str, movimiento_clave: object, linea_id: object) -> dict:
-    """Valida, persiste y reconstruye una reclasificación puntual."""
+def reclasificar(token: str, movimiento_clave: object, linea_id: object,
+                 medio_pago: object = None) -> dict:
+    """Valida, persiste y reconstruye una edición puntual del movimiento."""
     _, cliente = dashboard.validar_enlace(token)
     clave = str(movimiento_clave or "").strip()
     linea = str(linea_id or "").strip()
@@ -212,18 +251,28 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object) -> dict
         raise ErrorReclasificacion("la solicitud de edición no es válida")
     movimiento, ctx = _movimiento(cliente, clave)
     destino = _validar_linea(cliente, ctx, linea)
+    medio = _validar_medio_pago(
+        movimiento.get("medio_pago") if medio_pago is None else medio_pago
+    )
     datos = metadata.leer(cliente)
     capa, origen = _modelo_origen(datos, movimiento)
+    columna_medio_pago = _campo_medio_pago(datos, movimiento)
     clave_origen = str(movimiento.get("clave_origen", "")).strip()
     if not _VALOR_SEGURO.fullmatch(clave_origen):
         raise ErrorReclasificacion("el movimiento no tiene una identidad estable para corregirse")
     if capa == "semantic":
         _guardar_override(
-            cliente, str(origen.get("modelo_id", "")).strip(), clave_origen, linea,
+            cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
+            "linea_presupuesto_id", linea,
             f"Reclasificado desde dashboard: {destino['categoria']} > {destino['concepto']}",
         )
+        _guardar_override(
+            cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
+            columna_medio_pago, medio,
+            "Método de pago actualizado desde dashboard",
+        )
     else:
-        _actualizar_movimiento_manual(cliente, origen, clave_origen, linea)
+        _actualizar_movimiento_manual(cliente, origen, clave_origen, linea, medio)
         _sincronizar_fuente_manual(cliente, str(movimiento.get("fuente", "")),
                                    "la clasificación")
     _reconstruir(cliente)
@@ -233,6 +282,7 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object) -> dict
         "linea_id": destino["linea_id"],
         "categoria": destino["categoria"],
         "concepto": destino["concepto"],
+        "medio_pago": medio,
     }
 
 
