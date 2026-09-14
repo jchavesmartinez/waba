@@ -44,6 +44,93 @@
     const texto = document.createElement("span"); texto.textContent = mensaje;
     aviso.append(icono, texto); document.body.append(aviso);
   };
+  const iniciarChat = () => {
+    const mensajes = byId("chat-mensajes");
+    const formulario = byId("chat-formulario");
+    const entrada = byId("chat-entrada");
+    const enviar = byId("chat-enviar");
+    const error = byId("chat-error");
+    if (!mensajes || !formulario || !entrada || !enviar || !error) return;
+
+    const desplazarAlFinal = () => { mensajes.scrollTop = mensajes.scrollHeight; };
+    const mostrarError = (texto = "") => {
+      error.textContent = texto; error.hidden = !texto;
+    };
+    const adjuntos = (lista) => {
+      if (!Array.isArray(lista) || !lista.length) return null;
+      const grupo = document.createElement("div"); grupo.className = "chat-adjuntos";
+      lista.forEach((adjunto) => {
+        if (!adjunto?.contenido_b64 || !adjunto?.nombre) return;
+        try {
+          const binario = atob(adjunto.contenido_b64);
+          const bytes = Uint8Array.from(binario, (caracter) => caracter.charCodeAt(0));
+          const enlace = document.createElement("a");
+          enlace.className = "chat-adjunto";
+          enlace.href = URL.createObjectURL(new Blob([bytes], { type: adjunto.mime || "application/octet-stream" }));
+          enlace.download = adjunto.nombre;
+          enlace.textContent = `Descargar ${adjunto.nombre}`;
+          grupo.append(enlace);
+        } catch (_) { /* Un adjunto inválido nunca impide leer la respuesta. */ }
+      });
+      return grupo.childElementCount ? grupo : null;
+    };
+    const agregarMensaje = (rol, contenido, botones = [], archivos = []) => {
+      const burbuja = document.createElement("article");
+      burbuja.className = `chat-mensaje chat-${rol === "user" ? "usuario" : "asistente"}`;
+      const texto = document.createElement("p"); texto.textContent = String(contenido || ""); burbuja.append(texto);
+      const descargas = adjuntos(archivos); if (descargas) burbuja.append(descargas);
+      if (Array.isArray(botones) && botones.length) {
+        const acciones = document.createElement("div"); acciones.className = "chat-acciones";
+        botones.forEach((boton) => {
+          const titulo = String(boton?.title || "").trim(); if (!titulo) return;
+          const accion = document.createElement("button"); accion.type = "button"; accion.textContent = titulo;
+          accion.addEventListener("click", () => enviarMensaje(titulo)); acciones.append(accion);
+        });
+        if (acciones.childElementCount) burbuja.append(acciones);
+      }
+      mensajes.append(burbuja); desplazarAlFinal();
+    };
+    const respuestaJson = async (respuesta) => {
+      try { return await respuesta.json(); } catch (_) { return { ok: false, error: "No recibí una respuesta válida." }; }
+    };
+    const enviarMensaje = async (textoOriginal) => {
+      const texto = String(textoOriginal || "").trim();
+      if (!texto || enviar.disabled) return;
+      mostrarError(""); agregarMensaje("user", texto); entrada.value = "";
+      enviar.disabled = true; entrada.disabled = true; enviar.textContent = "Pensando…";
+      try {
+        const respuesta = await fetch(`${window.location.pathname}/chat`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mensaje: texto }),
+        });
+        const resultado = await respuestaJson(respuesta);
+        if (!respuesta.ok || !resultado.ok) throw new Error(resultado.error || "No pude procesar la consulta.");
+        agregarMensaje("assistant", resultado.mensaje?.contenido, resultado.botones, resultado.adjuntos);
+      } catch (razon) {
+        agregarMensaje("assistant", "No pude procesar esa consulta en este momento.");
+        mostrarError(razon.message || "Inténtelo nuevamente.");
+      } finally {
+        enviar.disabled = false; entrada.disabled = false; enviar.textContent = "Enviar"; entrada.focus();
+      }
+    };
+    formulario.addEventListener("submit", (evento) => { evento.preventDefault(); enviarMensaje(entrada.value); });
+    entrada.addEventListener("keydown", (evento) => {
+      if (evento.key === "Enter" && !evento.shiftKey) { evento.preventDefault(); formulario.requestSubmit(); }
+    });
+    mensajes.textContent = "Cargando conversación…";
+    fetch(`${window.location.pathname}/chat`, { headers: { Accept: "application/json" } })
+      .then(respuestaJson)
+      .then((resultado) => {
+        mensajes.replaceChildren();
+        if (!resultado.ok) throw new Error(resultado.error || "No pude cargar la conversación.");
+        if (resultado.mensajes?.length) resultado.mensajes.forEach((mensaje) => agregarMensaje(mensaje.rol, mensaje.contenido));
+        else agregarMensaje("assistant", "Hola. Puedes preguntarme lo mismo que por WhatsApp.");
+      })
+      .catch((razon) => {
+        mensajes.replaceChildren(); agregarMensaje("assistant", "No pude cargar el historial todavía.");
+        mostrarError(razon.message || "Inténtelo nuevamente.");
+      });
+  };
   const abrirEditor = (movement) => {
     if (!movement.movimiento_clave || !lines.length) return;
     const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento";
@@ -485,4 +572,5 @@
     details.append(summaryDetails, wrap); panel.append(details); target.append(panel);
   });
   if (!data.kpis.length) target.innerHTML = '<article class="panel vacio">No hay KPIs habilitados para mostrar.</article>';
+  iniciarChat();
 })();

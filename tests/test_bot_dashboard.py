@@ -1,9 +1,12 @@
 import time
 
 import pytest
+from fastapi.testclient import TestClient
 
 import config
 from bot import catalogo, dashboard
+from bot import app as app_mod
+from bot.salida import Adjunto, Respuesta
 
 
 @pytest.fixture
@@ -77,6 +80,63 @@ def test_render_incrusta_snapshot_sin_llamadas_del_frontend(
     assert "__DASHBOARD_DATA__" not in html
     assert '"nombre":"Cliente A"' in html
     assert "/dashboard-assets/app.js" in html
+    assert 'id="chat-mensajes"' in html
+
+
+def test_chat_dashboard_reutiliza_numero_e_historial_de_whatsapp(monkeypatch):
+    cliente = {"cliente_id": "cliente_a", "nombre": "Cliente A"}
+    llamadas = []
+    monkeypatch.setattr(
+        app_mod.dashboard, "validar_enlace",
+        lambda _token: ({"num": "50688889999"}, cliente),
+    )
+    monkeypatch.setattr(
+        app_mod.memoria, "cargar_historial",
+        lambda c, numero: [
+            {"rol": "user", "contenido": "¿Cuánto gasté ayer?", "sql": "", "estado": {}},
+            {"rol": "assistant", "contenido": "Gastaste ₡2.000.", "sql": "SELECT", "estado": {}},
+        ],
+    )
+    monkeypatch.setattr(
+        app_mod, "responder",
+        lambda numero, pregunta: llamadas.append((numero, pregunta)) or Respuesta(
+            "En alimentación.", botones=[{"id": "edicion:confirmar", "title": "Confirmar"}],
+        ),
+    )
+
+    web = TestClient(app_mod.app)
+    historial = web.get("/dashboard/token/chat")
+    respuesta = web.post("/dashboard/token/chat", json={"mensaje": "¿Y en cuál categoría?"})
+
+    assert historial.status_code == 200
+    assert historial.json()["mensajes"][1]["contenido"] == "Gastaste ₡2.000."
+    assert respuesta.status_code == 200
+    assert llamadas == [("50688889999", "¿Y en cuál categoría?")]
+    assert respuesta.json()["mensaje"]["contenido"] == "En alimentación."
+    # El navegador solo recibe el texto controlado que debe enviar de vuelta,
+    # no el id interno de las acciones interactivas de WhatsApp.
+    assert respuesta.json()["botones"] == [{"title": "Confirmar"}]
+
+
+def test_chat_dashboard_entrega_adjunto_pequeno_como_descarga(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    monkeypatch.setattr(
+        app_mod.dashboard, "validar_enlace",
+        lambda _token: ({"num": "50688889999"}, cliente),
+    )
+    monkeypatch.setattr(
+        app_mod, "responder",
+        lambda *_: Respuesta(
+            "Listo.", adjuntos=[Adjunto("document", b"contenido", "detalle.csv", "text/csv")],
+        ),
+    )
+
+    respuesta = TestClient(app_mod.app).post("/dashboard/token/chat", json={"mensaje": "Dámelo en CSV"})
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["adjuntos"] == [{
+        "nombre": "detalle.csv", "mime": "text/csv", "contenido_b64": "Y29udGVuaWRv",
+    }]
 
 
 def test_formulario_manual_solo_expone_campos_habilitados_por_metadata():

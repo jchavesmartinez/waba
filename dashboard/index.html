@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="robots" content="noindex,nofollow,noarchive">
   <title>Dashboard financiero · Fachavi</title>
-  <link rel="stylesheet" href="/dashboard-assets/styles.css?v=crear-movimiento-20260911">
+  <link rel="stylesheet" href="/dashboard-assets/styles.css?v=chat-compartido-20260913">
 </head>
 <body>
   <main class="shell">
@@ -24,6 +24,22 @@
     <section id="resumen" class="cards" aria-label="Resumen"></section>
     <section id="presupuesto" class="panel presupuesto" hidden></section>
     <section id="indicadores" class="indicadores"></section>
+    <section class="panel chat-dashboard" aria-labelledby="chat-titulo">
+      <div class="chat-cabecera">
+        <div>
+          <h2 id="chat-titulo">Pregúntale a Fachavi</h2>
+          <p>Comparte el mismo contexto de tu conversación en WhatsApp.</p>
+        </div>
+        <span class="chat-contexto">Contexto compartido</span>
+      </div>
+      <div id="chat-mensajes" class="chat-mensajes" role="log" aria-live="polite" aria-label="Conversación"></div>
+      <form id="chat-formulario" class="chat-formulario">
+        <label class="sr-only" for="chat-entrada">Escribe tu consulta</label>
+        <textarea id="chat-entrada" rows="2" maxlength="4000" placeholder="Ej.: ¿cuánto gasté este mes?"></textarea>
+        <button id="chat-enviar" type="submit">Enviar</button>
+      </form>
+      <p id="chat-error" class="chat-error" hidden></p>
+    </section>
 
     <footer>
       <span id="actualizado"></span>
@@ -31,6 +47,6 @@
     </footer>
   </main>
   <script id="dashboard-data" type="application/json">__DASHBOARD_DATA__</script>
-  <script src="/dashboard-assets/app.js?v=crear-movimiento-20260911" defer></script>
+  <script src="/dashboard-assets/app.js?v=chat-compartido-20260913" defer></script>
 </body>
 </html>

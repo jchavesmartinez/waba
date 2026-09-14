@@ -25,6 +25,7 @@ Exponer con cloudflared/ngrok y en el panel de Meta (WhatsApp > Configuration)
 pegar la URL .../webhook y el mismo WHATSAPP_VERIFY_TOKEN.
 """
 
+import base64
 import hashlib
 import hmac
 import logging
@@ -37,10 +38,11 @@ from urllib.parse import parse_qs
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 import config
 import registry
-from bot import audio, correo, dashboard, dashboard_edicion, entregas, menu, whatsapp
+from bot import audio, correo, dashboard, dashboard_edicion, entregas, memoria, menu, whatsapp
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -84,6 +86,8 @@ _AUDIO_NO_ENTENDIDO = (
     "No logré entender esa nota de voz. Intente grabarla nuevamente, más cerca "
     "del micrófono, o escriba la consulta."
 )
+_DASHBOARD_CHAT_MAX_CARACTERES = 4_000
+_DASHBOARD_CHAT_MAX_ADJUNTO_BYTES = 2 * 1024 * 1024
 _NO_REGISTRADO = (
     "Tu número no está registrado para consultar datos. "
     "Contacte a la persona que administra este servicio."
@@ -399,6 +403,112 @@ def ver_dashboard(token: str):
             headers=cabeceras,
         )
     return HTMLResponse(html, headers=cabeceras)
+
+
+def _botones_dashboard(botones: object) -> list[dict]:
+    """Convierte acciones del canal WhatsApp a acciones visibles en web.
+
+    El dashboard nunca recibe un identificador de acción desde el navegador:
+    al pulsar, reenvía el título controlado por el backend (por ejemplo,
+    ``Confirmar``). Esto mantiene un único flujo conversacional y evita que el
+    cliente web pueda inyectar ids internos de WhatsApp.
+    """
+    salida = []
+    for boton in botones if isinstance(botones, list) else []:
+        titulo = str((boton or {}).get("title", "")).strip() if isinstance(boton, dict) else ""
+        if titulo and len(titulo) <= 80:
+            salida.append({"title": titulo})
+    return salida[:3]
+
+
+def _adjuntos_dashboard(adjuntos: object) -> list[dict]:
+    """Entrega adjuntos pequeños como descargas locales del chat autenticado."""
+    salida = []
+    for adjunto in adjuntos if isinstance(adjuntos, list) else []:
+        contenido = getattr(adjunto, "contenido", b"")
+        if not isinstance(contenido, bytes) or not contenido:
+            continue
+        if len(contenido) > _DASHBOARD_CHAT_MAX_ADJUNTO_BYTES:
+            logger.warning("Adjunto de dashboard omitido por tamaño (%d bytes)", len(contenido))
+            continue
+        nombre = str(getattr(adjunto, "nombre", "archivo")).strip() or "archivo"
+        mime = str(getattr(adjunto, "mime", "application/octet-stream")).strip()
+        salida.append({
+            "nombre": nombre[:180],
+            "mime": mime[:120] or "application/octet-stream",
+            "contenido_b64": base64.b64encode(contenido).decode("ascii"),
+        })
+    return salida
+
+
+@app.get("/dashboard/{token}/chat")
+def historial_chat_dashboard(token: str):
+    """Devuelve el mismo historial persistido que usa WhatsApp para este enlace."""
+    cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        payload, cliente = dashboard.validar_enlace(token)
+        numero = str(payload["num"])
+        historial = memoria.cargar_historial(cliente, numero)
+        mensajes = [
+            {"rol": turno["rol"], "contenido": str(turno.get("contenido", ""))}
+            for turno in historial[-40:]
+            if turno.get("rol") in {"user", "assistant"} and turno.get("contenido")
+        ]
+        return JSONResponse({"ok": True, "mensajes": mensajes}, headers=cabeceras)
+    except dashboard.EnlaceInvalido:
+        return JSONResponse(
+            {"ok": False, "error": "El enlace venció. Solicite un dashboard nuevo desde WhatsApp."},
+            status_code=410, headers=cabeceras,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo cargar el historial del chat del dashboard")
+        return JSONResponse(
+            {"ok": False, "error": "No pude cargar la conversación. Inténtelo nuevamente."},
+            status_code=503, headers=cabeceras,
+        )
+
+
+@app.post("/dashboard/{token}/chat")
+async def responder_chat_dashboard(token: str, request: Request):
+    """Responde desde web con la misma identidad, memoria y motor de WhatsApp."""
+    cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        datos = await request.json()
+        mensaje = datos.get("mensaje") if isinstance(datos, dict) else None
+        if not isinstance(mensaje, str):
+            return JSONResponse({"ok": False, "error": "Escriba una consulta válida."}, status_code=400,
+                                headers=cabeceras)
+        mensaje = mensaje.strip()
+        if not mensaje:
+            return JSONResponse({"ok": False, "error": "Escriba una consulta."}, status_code=400,
+                                headers=cabeceras)
+        if len(mensaje) > _DASHBOARD_CHAT_MAX_CARACTERES:
+            return JSONResponse(
+                {"ok": False, "error": "El mensaje es demasiado largo. Resúmalo en menos de 4.000 caracteres."},
+                status_code=400, headers=cabeceras,
+            )
+        payload, _ = dashboard.validar_enlace(token)
+        # responder() conserva la identidad por número: el turno entra a la
+        # misma memoria de Neon que un mensaje de WhatsApp, sin enviar nada por
+        # la Cloud API de Meta.
+        respuesta = await run_in_threadpool(responder, str(payload["num"]), mensaje)
+        return JSONResponse({
+            "ok": True,
+            "mensaje": {"rol": "assistant", "contenido": respuesta.texto},
+            "botones": _botones_dashboard(respuesta.botones),
+            "adjuntos": _adjuntos_dashboard(respuesta.adjuntos),
+        }, headers=cabeceras)
+    except dashboard.EnlaceInvalido:
+        return JSONResponse(
+            {"ok": False, "error": "El enlace venció. Solicite un dashboard nuevo desde WhatsApp."},
+            status_code=410, headers=cabeceras,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo responder desde el chat del dashboard")
+        return JSONResponse(
+            {"ok": False, "error": "No pude procesar la consulta. Inténtelo nuevamente."},
+            status_code=503, headers=cabeceras,
+        )
 
 
 @app.post("/dashboard/{token}/movimientos/reclasificar")
