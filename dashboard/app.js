@@ -509,7 +509,13 @@
 
   const target = byId("indicadores");
   const hierarchyKpis = renderHierarchy(target);
-  const visible = data.kpis
+  // La jerarquía es la vista financiera principal: reúne categorías,
+  // conceptos y movimientos en el mismo árbol. Cuando está disponible no
+  // repetimos los KPI auxiliares (quincena, comercio, calidad, tendencias,
+  // etc.) debajo, porque solo hacen el dashboard más largo y duplican cifras.
+  // Para clientes que todavía no poseen relaciones presupuesto-movimientos,
+  // conservamos el fallback genérico de KPI planos.
+  const visible = hierarchyKpis.size ? [] : data.kpis
     .filter((k) => k !== summary)
     .filter((k) => !hierarchyKpis.has(k))
     .filter((k) => !/^(gasto_total|gasto_neto)$/i.test(String(k.kpi || "")))
