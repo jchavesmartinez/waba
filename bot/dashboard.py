@@ -260,6 +260,20 @@ def _identificador(valor: str) -> str:
     return '"' + str(valor).replace('"', '""') + '"'
 
 
+def _filtro_vigencia_presupuesto(fecha_sql: str, columnas: set[str]) -> str:
+    """Acota una línea presupuestaria a la versión vigente en una fecha.
+
+    Es retrocompatible con hojas antiguas que todavía no declaran vigencia.
+    """
+    if not {"vigencia_desde", "vigencia_hasta"}.issubset(columnas):
+        return ""
+    fecha = f"CAST({fecha_sql} AS DATE)"
+    return (
+        f" AND p.vigencia_desde <= {fecha}"
+        f" AND (p.vigencia_hasta IS NULL OR p.vigencia_hasta >= {fecha})"
+    )
+
+
 def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
     """Obtiene movimientos con su linea presupuestaria para el árbol del dashboard.
 
@@ -404,7 +418,8 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
         f"m.fecha, m.descripcion, m.moneda, m.monto, m.medio_pago{extras_final} "
         f"FROM movimientos m LEFT JOIN {ptabla} p "
         "ON TRIM(CAST(p.linea_id AS text)) = TRIM(m.linea_id) "
-        "WHERE m.linea_id IS NOT NULL "
+        + _filtro_vigencia_presupuesto("m.fecha", pcols)
+        + "WHERE m.linea_id IS NOT NULL "
         "ORDER BY p.categoria, p.concepto, m.fecha"
     )
     ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
@@ -513,6 +528,13 @@ def _lineas_presupuesto(cliente: dict, ctx) -> list[dict]:
     condicion = ""
     if "tipo" in columnas:
         condicion = " WHERE LOWER(COALESCE(CAST(tipo AS text), 'gasto')) = 'gasto'"
+    if {"vigencia_desde", "vigencia_hasta"}.issubset(columnas):
+        fecha_hoy = fecha_local().isoformat()
+        condicion += (
+            (" AND " if condicion else " WHERE ")
+            + f"vigencia_desde <= DATE '{fecha_hoy}' "
+            + f"AND (vigencia_hasta IS NULL OR vigencia_hasta >= DATE '{fecha_hoy}')"
+        )
     sql = (
         f"SELECT CAST(linea_id AS text) AS linea_id, CAST(categoria AS text) AS categoria, "
         f"CAST(concepto AS text) AS concepto FROM {_identificador(presupuesto.tabla_real)}"

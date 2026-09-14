@@ -143,7 +143,9 @@ def _proyectar(cruda: dict, cfg: dict, modelo_id: str,
     linea = _texto(valor("linea_presupuesto_id"))
     llave_referencia = str(cfg.get("llave_referencia_origen", "")).strip()
     clave_referencia = _texto(cruda.get(llave_referencia)) if llave_referencia else linea
-    referencia = referencias.get(clave_referencia, {}) if clave_referencia else {}
+    referencia = _referencia_vigente(
+        referencias.get(clave_referencia, {}) if clave_referencia else {}, fecha
+    )
     categoria = _texto(valor("categoria")) or _texto(referencia.get("categoria"))
     concepto = _texto(valor("concepto")) or _texto(referencia.get("concepto"))
     tipo = _texto(valor("tipo_movimiento"))
@@ -220,11 +222,43 @@ def _referencias(destino, cfg: dict, esquema_raw: str, esquema_sem: str) -> dict
     for fila in filas:
         clave = _texto(fila.get(llave))
         if clave:
-            salida[clave] = {
+            salida.setdefault(clave, []).append({
                 "categoria": fila.get(categoria) if categoria else None,
                 "concepto": fila.get(concepto) if concepto else None,
-            }
+                "vigencia_desde": fila.get("vigencia_desde"),
+                "vigencia_hasta": fila.get("vigencia_hasta"),
+            })
     return salida
+
+
+def _referencia_vigente(valor, fecha):
+    """Selecciona la versión de una referencia válida para ``fecha``.
+
+    La forma antigua (un diccionario) sigue siendo aceptada. Para hojas
+    versionadas, las filas se guardan como una lista y se elige por intervalo,
+    evitando que una nueva versión de presupuesto reclasifique movimientos
+    históricos.
+    """
+    if isinstance(valor, dict):
+        return valor
+    if not isinstance(valor, list):
+        return {}
+    objetivo = _fecha(fecha)
+    candidatas = []
+    for fila in valor:
+        desde = fila.get("vigencia_desde")
+        hasta = fila.get("vigencia_hasta")
+        try:
+            desde = _fecha(desde) if desde not in (None, "") else None
+            hasta = _fecha(hasta) if hasta not in (None, "") else None
+        except (TypeError, ValueError):
+            continue
+        if desde is not None and objetivo < desde:
+            continue
+        if hasta is not None and objetivo > hasta:
+            continue
+        candidatas.append(fila)
+    return candidatas[-1] if candidatas else {}
 
 
 def _rechazo(cruda: dict, cfg: dict, modelo_id: str, motivo: str) -> dict:
