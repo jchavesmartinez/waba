@@ -44,6 +44,11 @@ def _movimiento(cliente: dict, clave: str) -> tuple[dict, object]:
     ctx = catalogo.construir_contexto(cliente)
     tabla = next((t for t in ctx.permitidas
                   if str(t.tabla_logica).strip().lower() == "movimientos"), None)
+    # El modelo canónico es una tabla derivada y puede no aparecer en
+    # ``_catalogo`` junto con las fuentes ingestadas. Resuélvelo desde la
+    # metadata del modelo para que la edición no dependa de duplicar esa fila.
+    if not tabla:
+        tabla = dashboard.tabla_movimientos_canonicos(cliente, ctx)
     if not tabla:
         raise ErrorReclasificacion("este dashboard no tiene movimientos canónicos editables")
     columnas = {str(c).lower() for c in tabla.columnas_config}

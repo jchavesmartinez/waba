@@ -15,6 +15,19 @@
     }
     return String(value);
   };
+  const gastoExcedePresupuesto = (presupuesto, gastado) => {
+    const presupuestoNumero = number(presupuesto);
+    const gastadoNumero = number(gastado);
+    return Number.isFinite(presupuestoNumero) && Number.isFinite(gastadoNumero) && gastadoNumero > presupuestoNumero;
+  };
+  const agregarMeta = (contenedor, texto, clase = "") => {
+    if (!texto) return;
+    if (contenedor.childElementCount || contenedor.childNodes.length) contenedor.append(" · ");
+    const parte = document.createElement("span");
+    if (clase) parte.className = clase;
+    parte.textContent = texto;
+    contenedor.append(parte);
+  };
   const findKpi = (name) => data.kpis.find((k) => k.kpi === name);
   // El dashboard presenta siempre las tres dimensiones mensuales en un orden
   // estable, independientemente del orden en que lleguen desde metadata.
@@ -446,12 +459,17 @@
       const categoryMeta = document.createElement("span"); categoryMeta.className = "nivel-meta";
       const categoryKeys = metricKeys(bucket.totals);
       const multipleCurrencies = bucket.monedas && bucket.monedas.size > 1;
-      categoryMeta.textContent = multipleCurrencies
-        ? "Gastos en varias monedas"
-        : [
-          categoryKeys.budget && `Presupuesto: ${format(bucket.totals[categoryKeys.budget], categoryKeys.budget, bucket.monedas ? [...bucket.monedas][0] : "")}`,
-          categoryKeys.spent && `Gastado: ${format(bucket.totals[categoryKeys.spent], categoryKeys.spent, bucket.monedas ? [...bucket.monedas][0] : "")}`,
-        ].filter(Boolean).join(" · ");
+      if (multipleCurrencies) {
+        categoryMeta.textContent = "Gastos en varias monedas";
+      } else {
+        const currency = bucket.monedas ? [...bucket.monedas][0] : "";
+        agregarMeta(categoryMeta, categoryKeys.budget && `Presupuesto: ${format(bucket.totals[categoryKeys.budget], categoryKeys.budget, currency)}`);
+        agregarMeta(
+          categoryMeta,
+          categoryKeys.spent && `Gastado: ${format(bucket.totals[categoryKeys.spent], categoryKeys.spent, currency)}`,
+          gastoExcedePresupuesto(bucket.totals[categoryKeys.budget], bucket.totals[categoryKeys.spent]) ? "meta-gastado-excedido" : "",
+        );
+      }
       categorySummary.append(categoryHeading, categoryMeta); categoryDetails.append(categorySummary);
       const conceptsWrap = document.createElement("div"); conceptsWrap.className = "nivel-hijos";
       const rows = bucket.rows.filter((row) => keyMatch(row, /^concepto$|rubro/i));
@@ -462,10 +480,12 @@
         const conceptSummary = document.createElement("summary");
         const conceptHeading = document.createElement("span"); conceptHeading.className = "nivel-titulo"; conceptHeading.textContent = row[conceptKey];
         const conceptKeys = metricKeys(row); const conceptMeta = document.createElement("span"); conceptMeta.className = "nivel-meta";
-        conceptMeta.textContent = [
-          conceptKeys.budget && `Presupuesto: ${format(row[conceptKeys.budget], conceptKeys.budget, row.moneda)}`,
+        agregarMeta(conceptMeta, conceptKeys.budget && `Presupuesto: ${format(row[conceptKeys.budget], conceptKeys.budget, row.moneda)}`);
+        agregarMeta(
+          conceptMeta,
           conceptKeys.spent && `Gastado: ${format(row[conceptKeys.spent], conceptKeys.spent, row.moneda)}`,
-        ].filter(Boolean).join(" · ");
+          gastoExcedePresupuesto(row[conceptKeys.budget], row[conceptKeys.spent]) ? "meta-gastado-excedido" : "",
+        );
         conceptSummary.append(conceptHeading, conceptMeta); conceptDetails.append(conceptSummary);
         const conceptBody = document.createElement("div"); conceptBody.className = "nivel-detalle"; appendMetricBars(conceptBody, row);
         const matches = movements.filter((movement, index) => {
@@ -674,6 +694,7 @@
           const track = document.createElement("span"); track.className = "bar-track";
           const fill = document.createElement("span"); fill.className = `bar-fill ${cls}`; fill.style.width = `${Math.min(100, Math.abs(number(row[key])) / rowMax * 100)}%`; track.append(fill);
           const value = document.createElement("strong"); value.textContent = format(row[key], key, kpi.unidad);
+          if (key === spentKey && gastoExcedePresupuesto(row[budgetKey], row[spentKey])) value.className = "valor-gastado-excedido";
           line.append(labelEl, track, value); item.append(line);
         });
         chart.append(item);

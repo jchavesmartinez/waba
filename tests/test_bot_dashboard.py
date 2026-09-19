@@ -220,6 +220,57 @@ def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):
     assert "m.medio_pago" in capturado["sql"]
 
 
+def test_jerarquia_resuelve_canonica_desde_metadata_si_no_esta_en_catalogo(monkeypatch):
+    """Los modelos derivados no necesitan duplicarse en ``_catalogo``."""
+    presupuesto = catalogo.TablaPermitida(
+        tabla_logica="presupuesto", tabla_real="presupuesto", fuente_id="sheet",
+        columnas_config={"linea_id": {}, "categoria": {}, "concepto": {},
+                         "vigencia_desde": {}, "vigencia_hasta": {}},
+    )
+    ctx = catalogo.Contexto(
+        schema_text="", tablas_reales={"presupuesto"}, permitidas=[presupuesto],
+    )
+    monkeypatch.setattr(dashboard.metadata_modelos, "leer", lambda _cliente: {
+        "modelos": [{"extractor": "movimientos_canonicos",
+                     "tabla_destino": "finanzas__movimientos", "activo": "si"}],
+    })
+    monkeypatch.setattr(dashboard.warehouse_ro, "listar_tablas",
+                        lambda _cliente: ["presupuesto", "finanzas__movimientos"])
+    monkeypatch.setattr(
+        dashboard.warehouse_ro, "listar_columnas",
+        lambda _cliente, _tablas: {"finanzas__movimientos": [
+            ("linea_presupuesto_id", "text"), ("fecha", "date"),
+            ("descripcion", "text"), ("moneda", "text"),
+            ("monto_neto", "numeric"), ("_clave", "text"),
+            ("_modelo_id", "text"), ("fuente", "text"),
+            ("clave_origen", "text"), ("medio_pago", "text"),
+        ]},
+    )
+    capturado = {}
+
+    def ejecutar(_cliente, sql, limite):
+        capturado["sql"] = sql
+        return (
+            ["linea_id", "categoria", "concepto", "fecha", "descripcion",
+             "moneda", "monto", "medio_pago", "movimiento_clave", "fuente",
+             "clave_origen", "modelo_canonico"],
+            [("gas_comedera", "Alimentacion", "Comedera", "2026-09-05",
+              "WALMART", "CRC", 23148, "VISA 1234", "bac:1", "bac", "1",
+              "movimientos_consolidados")],
+        )
+
+    monkeypatch.setattr(dashboard.nl2sql, "validar_sql", lambda *_: (True, ""))
+    monkeypatch.setattr(dashboard.warehouse_ro, "ejecutar", ejecutar)
+
+    filas = dashboard._movimientos_jerarquia(
+        {"cliente_id": "cliente_a"}, ctx,
+        {"inicio": "2026-09-01", "fin_exclusivo": "2026-10-01"},
+    )
+
+    assert 'FROM "finanzas__movimientos" m' in capturado["sql"]
+    assert filas[0]["movimiento_clave"] == "bac:1"
+
+
 def test_jerarquia_no_oculta_movimientos_sin_linea_de_presupuesto(monkeypatch):
     """Una línea no mapeada aparece explícitamente como sin clasificar."""
     presupuesto = catalogo.TablaPermitida(

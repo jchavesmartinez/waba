@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import config
 import registry
 from bot import catalogo, edicion, kpis, nl2sql, seguimiento, warehouse_ro
+from modelo import metadata as metadata_modelos
 from bot.tiempo import fecha_local
 
 logger = logging.getLogger("fachavi.bot.dashboard")
@@ -260,6 +261,45 @@ def _identificador(valor: str) -> str:
     return '"' + str(valor).replace('"', '""') + '"'
 
 
+def tabla_movimientos_canonicos(cliente: dict, ctx=None):
+    """Resuelve la tabla canónica desde metadata, aunque no esté en ``_catalogo``.
+
+    La tabla consolidada es un modelo derivado, no una fuente ingestada; por
+    eso puede no tener una fila propia en el catálogo de tablas habilitadas.
+    Aun así, el dashboard necesita conocer sus columnas técnicas para exponer
+    la clave que permite editar un movimiento de forma segura.
+    """
+    existente = _tabla_por_nombre(ctx, (
+        "movimientos", "movimientos_canonicos", "movimientos canonicos",
+        "finanzas__movimientos",
+    )) if ctx else None
+    if existente:
+        return existente
+    try:
+        datos = metadata_modelos.leer(cliente)
+        modelos = datos.get("modelos", [])
+        tablas_reales = set(warehouse_ro.listar_tablas(cliente))
+        modelo = next((fila for fila in modelos
+                       if str(fila.get("extractor", "")).strip().lower()
+                       == "movimientos_canonicos"
+                       and str(fila.get("activo", "si")).strip().lower()
+                       not in {"no", "false", "0"}), None)
+        tabla_real = str((modelo or {}).get("tabla_destino", "")).strip()
+        if not modelo or not tabla_real or tabla_real not in tablas_reales:
+            return None
+        columnas = warehouse_ro.listar_columnas(cliente, {tabla_real}).get(tabla_real, [])
+        return catalogo.TablaPermitida(
+            tabla_logica="movimientos",
+            tabla_real=tabla_real,
+            fuente_id="modelo",
+            columnas_config={str(columna).strip().lower(): {}
+                             for columna, _tipo in columnas},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("no se pudo resolver la tabla canónica del dashboard: %s", exc)
+        return None
+
+
 def _filtro_vigencia_presupuesto(fecha_sql: str, columnas: set[str]) -> str:
     """Acota una línea presupuestaria a la versión vigente en una fecha.
 
@@ -287,11 +327,7 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
     # Antes esta vista leía solo las fuentes crudas. Eso dejaba vacíos los
     # detalles de conceptos cuyos cargos vinieran del banco (por ejemplo,
     # Comedera), aunque el KPI agregado sí los sumara desde la canónica.
-    canonicos = _tabla_por_nombre(
-        ctx,
-        ("movimientos", "movimientos_canonicos", "movimientos canonicos",
-         "finanzas__movimientos"),
-    )
+    canonicos = tabla_movimientos_canonicos(cliente, ctx)
     transacciones = _tabla_por_nombre(ctx, ("transacciones", "finanzas__transacciones"))
     manuales = _tabla_por_nombre(ctx, ("gastos_manuales", "gastos manuales"))
     if not presupuesto or not (canonicos or transacciones or manuales):
@@ -422,7 +458,10 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
         + "WHERE m.linea_id IS NOT NULL "
         "ORDER BY p.categoria, p.concepto, m.fecha"
     )
-    ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)
+    tablas_validas = set(ctx.tablas_reales)
+    if canonicos:
+        tablas_validas.add(canonicos.tabla_real)
+    ok, motivo = nl2sql.validar_sql(sql, tablas_validas)
     if not ok:
         logger.warning("consulta de movimientos del dashboard rechazada: %s", motivo)
         return []

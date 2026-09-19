@@ -70,6 +70,7 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .nivel[open] > summary::before { content: "−"; }
 .nivel-titulo { flex: 1 1 auto; min-width: 0; font-weight: 760; white-space: nowrap; overflow-x: auto; overflow-y: hidden; text-overflow: clip; scrollbar-width: thin; }
 .nivel-meta { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+.meta-gastado-excedido, .valor-gastado-excedido { color: var(--red) !important; font-weight: 800; }
 .nivel-categoria > summary { background: #f1f8e9; border-radius: 12px; font-size: 1rem; }
 .nivel-hijos { display: grid; gap: 8px; padding: 0 10px 10px 28px; }
 .nivel-concepto { background: #fff; }
