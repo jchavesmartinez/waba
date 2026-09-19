@@ -1,8 +1,9 @@
 """Reclasificación confirmada desde el dashboard.
 
-El dashboard nunca altera la tabla canónica: para un movimiento derivado crea
-un override en la metadata del cliente y reconstruye las tablas semánticas.
-Así la decisión sobrevive nuevas ingestas y queda auditable en Google Sheets.
+Una corrección puntual se guarda como un override en la metadata del cliente.
+Una decisión reutilizable se guarda como regla en ``_clasificacion``: comercio
+exacto hacia línea presupuestaria. Ambas sobreviven nuevas ingestas y quedan
+auditables en Google Sheets; la tabla canónica nunca se edita directamente.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from bot import catalogo, dashboard, edicion, escritura_google_sheets, warehouse
 from gclient import abrir_libro_escritura
 from modelo import metadata
 from modelo.construir import construir_cliente
-from modelo.reclasificaciones import clave_grupo, grupo_desde_clave, normalizar
+from modelo.motor import Modelo
 from warehouse import crear_destino
 from sqlalchemy import text
 import sync
@@ -247,24 +248,93 @@ def _fuente_canonica(datos: dict, movimiento: dict) -> dict:
                  and str(fila.get("fuente", "")).strip().casefold() == fuente), {})
 
 
-def _valor_reclasificacion_grupal(movimiento: dict, ctx, cliente: dict,
-                                  agrupar_por: str) -> tuple[str, str]:
-    """Obtiene el valor canónico usado por una regla de concepto o comercio."""
-    campo = str(agrupar_por or "").strip().lower()
-    if campo == "comercio":
-        valor = str(movimiento.get("descripcion") or "").strip()
-        return "descripcion", valor
-    if campo == "concepto":
-        valor = str(movimiento.get("concepto") or "").strip()
-        if not valor and movimiento.get("linea_presupuesto_id"):
-            try:
-                valor = str(_validar_linea(
-                    cliente, ctx, str(movimiento["linea_presupuesto_id"])
-                ).get("concepto") or "").strip()
-            except ErrorReclasificacion:
-                valor = ""
-        return "concepto", valor
-    raise ErrorReclasificacion("seleccione si aplica por concepto o comercio")
+def _regla_por_comercio(cliente: dict, ctx, datos: dict, movimiento: dict,
+                        origen: dict) -> tuple[str, str, str]:
+    """Resuelve una regla semántica ``comercio -> línea presupuestaria``.
+
+    El comercio es la condición estable; la línea elegida por el usuario es
+    el concepto presupuestario de destino. No se infiere por nombres: el
+    campo que clasifica en ``linea_presupuesto_id`` viene de ``_campos`` y el
+    valor exacto se lee de la fila semántica que originó el movimiento.
+    """
+    try:
+        modelo = Modelo(origen, datos)
+    except Exception as exc:
+        raise ErrorReclasificacion(
+            "no pude resolver la metadata de clasificación de este origen"
+        ) from exc
+    campos = [campo for campo in modelo.campos
+              if str(campo.get("clasifica_en", "")).strip() == "linea_presupuesto_id"]
+    if len(campos) != 1:
+        raise ErrorReclasificacion(
+            "este origen no declara una clasificación única por comercio"
+        )
+    campo = str(campos[0].get("columna", "")).strip()
+    fuente = _fuente_canonica(datos, movimiento)
+    clave_fuente = str(fuente.get("clave", "")).strip()
+    tabla_origen = str(origen.get("tabla_destino", "")).strip().casefold()
+    tabla = next((candidata for candidata in ctx.permitidas
+                  if str(candidata.tabla_real).strip().casefold() == tabla_origen), None)
+    columnas = {str(columna).lower() for columna in (tabla.columnas_config if tabla else [])}
+    if (not tabla or not _VALOR_SEGURO.fullmatch(campo)
+            or not _VALOR_SEGURO.fullmatch(clave_fuente)
+            or campo.lower() not in columnas or clave_fuente.lower() not in columnas):
+        raise ErrorReclasificacion(
+            "este origen no expone un comercio editable para crear una regla"
+        )
+    filas = warehouse_ro.leer_interno(
+        cliente,
+        f"SELECT CAST({_identificador(campo)} AS text) AS comercio "
+        f"FROM {_identificador(tabla.tabla_real)} "
+        f"WHERE CAST({_identificador(clave_fuente)} AS text) = :clave LIMIT 1",
+        {"clave": str(movimiento.get("clave_origen", "")).strip()},
+    )
+    comercio = str((filas[0] if filas else {}).get("comercio") or "").strip()
+    if not comercio:
+        raise ErrorReclasificacion(
+            "no encontré el comercio de este movimiento para crear la regla"
+        )
+    return modelo.modelo_id, campo, comercio
+
+
+def _guardar_regla_clasificacion(cliente: dict, modelo_id: str, campo: str,
+                                 comercio: str, linea_id: str) -> None:
+    """Crea o actualiza una regla general en la metadata existente.
+
+    ``_clasificacion`` es la fuente de verdad para decisiones reutilizables.
+    La regla exacta se evalúa antes del mapeo de IA y al reconstruir corrige
+    tanto el historial como compras futuras del mismo comercio.
+    """
+    spreadsheet_id = str(cliente.get("catalogo_spreadsheet_id", "")).strip()
+    if not spreadsheet_id:
+        raise ErrorReclasificacion("este cliente no tiene metadata editable configurada")
+    try:
+        hoja = abrir_libro_escritura(spreadsheet_id).worksheet(metadata.CLASIFICACION_SHEET)
+    except Exception as exc:
+        raise ErrorReclasificacion("no pude abrir la metadata de clasificación") from exc
+    encabezados = [str(valor).strip() for valor in hoja.row_values(1)]
+    requeridas = ["modelo_id", "columnas", "patron", "valor", "prioridad", "clasifica_en"]
+    if any(columna not in encabezados for columna in requeridas):
+        raise ErrorReclasificacion("la hoja de clasificación no tiene el formato requerido")
+    indice = {columna: encabezados.index(columna) for columna in requeridas}
+    for numero, fila in enumerate(hoja.get_all_values()[1:], start=2):
+        obtener = lambda columna: str(fila[indice[columna]]).strip() if len(fila) > indice[columna] else ""
+        if (obtener("modelo_id") == modelo_id and obtener("columnas") == campo
+                and obtener("patron") == comercio
+                and obtener("clasifica_en") == "linea_presupuesto_id"):
+            hoja.update_cell(numero, indice["valor"] + 1, linea_id)
+            return
+    nueva = [""] * len(encabezados)
+    nueva[indice["modelo_id"]] = modelo_id
+    nueva[indice["columnas"]] = campo
+    nueva[indice["patron"]] = comercio
+    nueva[indice["valor"]] = linea_id
+    # Es una coincidencia exacta elegida explícitamente por la persona. Debe
+    # prevalecer sobre reglas generales como ``%SUPERMERCADO%`` (que suelen
+    # usar prioridades mayores), sin desplazar un override puntual.
+    nueva[indice["prioridad"]] = "0"
+    nueva[indice["clasifica_en"]] = "linea_presupuesto_id"
+    hoja.append_row(nueva, value_input_option="USER_ENTERED")
 
 
 def _validar_medio_pago(valor: object) -> str:
@@ -498,8 +568,8 @@ def estado_reconstruccion(token: str, movimiento_clave: object) -> dict:
 
 def reclasificar(token: str, movimiento_clave: object, linea_id: object,
                  medio_pago: object = None, alcance: object = "individual",
-                 agrupar_por: object = None) -> dict:
-    """Valida una reclasificación puntual o una regla histórica/futura."""
+                 ) -> dict:
+    """Aplica un override puntual o una regla general de metadata."""
     _, cliente = dashboard.validar_enlace(token)
     clave = str(movimiento_clave or "").strip()
     linea = str(linea_id or "").strip()
@@ -508,7 +578,10 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
     movimiento, ctx = _movimiento(cliente, clave)
     destino = _validar_linea(cliente, ctx, linea)
     alcance = str(alcance or "individual").strip().lower()
-    if alcance not in {"individual", "grupo"}:
+    # ``grupo`` se conserva como alias durante el despliegue de la nueva UI.
+    if alcance == "grupo":
+        alcance = "regla"
+    if alcance not in {"individual", "regla"}:
         raise ErrorReclasificacion("el alcance de la reclasificación no es válido")
     medio = _validar_medio_pago(
         movimiento.get("medio_pago") if medio_pago is None else medio_pago
@@ -516,58 +589,36 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
     datos = metadata.leer(cliente)
     capa, origen = _modelo_origen(datos, movimiento)
     columna_medio_pago = _campo_medio_pago(datos, movimiento)
-    modelo_canonico = str(movimiento.get("_modelo_id", "")).strip()
-    if not modelo_canonico:
-        raise ErrorReclasificacion("el movimiento no tiene modelo canónico")
     clave_origen = str(movimiento.get("clave_origen", "")).strip()
     if not _VALOR_SEGURO.fullmatch(clave_origen):
         raise ErrorReclasificacion("el movimiento no tiene una identidad estable para corregirse")
-    grupo = None
-    if alcance == "grupo":
-        campo_grupo, valor_grupo = _valor_reclasificacion_grupal(
-            movimiento, ctx, cliente, agrupar_por,
-        )
-        if not normalizar(valor_grupo):
+    regla = None
+    if alcance == "regla":
+        if capa != "semantic":
             raise ErrorReclasificacion(
-                "ese movimiento no tiene un valor válido para agrupar"
+                "este origen no admite reglas generales; reclasifíquelo solo de forma puntual"
             )
-        grupo = clave_grupo(campo_grupo, valor_grupo)
-        if not str(cliente.get("catalogo_spreadsheet_id", "")).strip():
-            raise ErrorReclasificacion(
-                "la reclasificación masiva requiere metadata editable configurada"
-            )
+        regla = _regla_por_comercio(cliente, ctx, datos, movimiento, origen)
     fuente_id = ""
     if capa == "semantic":
-        _guardar_override(
-            cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
-            "linea_presupuesto_id", linea,
-            f"Reclasificado desde dashboard: {destino['categoria']} > {destino['concepto']}",
-        )
-        _guardar_override(
-            cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
-            columna_medio_pago, medio,
-            "Método de pago actualizado desde dashboard",
-        )
+        if alcance == "individual":
+            _guardar_override(
+                cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
+                "linea_presupuesto_id", linea,
+                f"Reclasificado desde dashboard: {destino['categoria']} > {destino['concepto']}",
+            )
+        if medio != str(movimiento.get("medio_pago") or "").strip():
+            _guardar_override(
+                cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
+                columna_medio_pago, medio,
+                "Método de pago actualizado desde dashboard",
+            )
     else:
         fuente_id = _actualizar_movimiento_manual(cliente, origen, clave_origen, linea, medio)
-    # Si ya existe una regla grupal, la corrección puntual canónica gana sobre
-    # ella. Sin una regla grupal no hace falta duplicar el override: la fuente
-    # semántica/manual ya conserva la edición puntual por sí sola.
-    hay_regla_grupal = any(
-        str(o.get("modelo_id", "")).strip() == modelo_canonico
-        and grupo_desde_clave(o.get("clave"))
-        for o in datos.get("overrides", [])
-    )
-    if alcance == "grupo" or hay_regla_grupal:
-        _guardar_override(
-            cliente, modelo_canonico, clave, "linea_presupuesto_id", linea,
-            f"Reclasificado desde dashboard: {destino['categoria']} > {destino['concepto']}",
-        )
-    if grupo:
-        _guardar_override(
-            cliente, modelo_canonico, grupo,
-            "linea_presupuesto_id", linea,
-            f"Regla desde dashboard: {campo_grupo} = {valor_grupo}",
+    if regla:
+        modelo_regla, campo_regla, comercio = regla
+        _guardar_regla_clasificacion(
+            cliente, modelo_regla, campo_regla, comercio, linea,
         )
     version = _encolar_reconstruccion(
         cliente, clave, fuente_id,
@@ -581,9 +632,9 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
         "estado": "pendiente",
         "version": version,
     }
-    if alcance == "grupo":
+    if alcance == "regla":
         resultado["alcance"] = alcance
-        resultado["agrupar_por"] = str(agrupar_por or "").strip().lower()
+        resultado["comercio"] = regla[2]
     return resultado
 
 

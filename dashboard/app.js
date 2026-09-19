@@ -203,21 +203,12 @@
     scopeIndividual.append(individualRadio, document.createTextNode("Solo este gasto"));
     const scopeGroup = document.createElement("label");
     const groupRadio = document.createElement("input"); groupRadio.type = "radio";
-    groupRadio.name = `alcance-${movement.movimiento_clave}`; groupRadio.value = "grupo";
-    scopeGroup.append(groupRadio, document.createTextNode("Todos los gastos pasados y futuros que coincidan"));
+    groupRadio.name = `alcance-${movement.movimiento_clave}`; groupRadio.value = "regla";
+    scopeGroup.append(groupRadio, document.createTextNode("Crear una regla para este comercio, pasada y futura"));
     scopeOptions.append(scopeIndividual, scopeGroup);
-    const groupByLabel = document.createElement("label"); groupByLabel.className = "editor-grupo-por";
-    groupByLabel.textContent = "Coincidencia por";
-    const groupBy = document.createElement("select"); groupBy.required = true;
-    [["concepto", "Mismo concepto"], ["comercio", "Mismo comercio"]].forEach(([value, text]) => {
-      const option = document.createElement("option"); option.value = value; option.textContent = text; groupBy.append(option);
-    });
-    groupByLabel.append(groupBy); groupByLabel.hidden = true;
-    scopeFieldset.append(scopeLegend, scopeOptions, groupByLabel);
-    const actualizarAlcance = () => { groupByLabel.hidden = !groupRadio.checked; };
-    individualRadio.addEventListener("change", actualizarAlcance); groupRadio.addEventListener("change", actualizarAlcance);
+    scopeFieldset.append(scopeLegend, scopeOptions);
     const note = document.createElement("p"); note.className = "editor-nota";
-    note.textContent = "La reclasificación masiva se guardará como una regla para históricos y futuras sincronizaciones. El método de pago se aplica a este movimiento.";
+    note.textContent = "Solo este gasto usa un override. La regla usa el comercio exacto y clasifica sus movimientos pasados y futuros en el concepto elegido.";
     const actions = document.createElement("div"); actions.className = "editor-acciones";
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
     cancel.addEventListener("click", () => dialog.close());
@@ -233,8 +224,7 @@
             movimiento_clave: movement.movimiento_clave,
             linea_id: select.value,
             medio_pago: payment.value,
-            alcance: groupRadio.checked ? "grupo" : "individual",
-            agrupar_por: groupRadio.checked ? groupBy.value : null,
+            alcance: groupRadio.checked ? "regla" : "individual",
           }),
         });
         const result = await response.json();
@@ -245,8 +235,8 @@
         movement.medio_pago = result.medio_pago;
         dialog.close();
         renderVista();
-        mostrarAviso(result.alcance === "grupo"
-          ? "Regla guardada para gastos pasados y futuros. Sincronizando…"
+        mostrarAviso(result.alcance === "regla"
+          ? `Regla guardada para ${result.comercio || "este comercio"}. Sincronizando…`
           : "Cambios guardados. Sincronizando en segundo plano…");
         vigilarSincronizacion(movement.movimiento_clave);
       } catch (reason) {

@@ -98,7 +98,6 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .editor-alcance-opciones { display: grid; gap: 9px; }
 .editor-alcance-opciones label { display: flex; grid-template-columns: none; align-items: center; gap: 8px; font-weight: 600; }
 .editor-alcance-opciones input { width: auto; margin: 0; }
-.editor-grupo-por { margin-top: 2px; }
 .editor-acciones { display: flex; justify-content: flex-end; gap: 9px; }
 .editor-acciones button { border: 0; border-radius: 9px; padding: 10px 13px; font: inherit; font-weight: 750; cursor: pointer; background: var(--green); color: white; }
 .editor-acciones button:first-child { background: #edf1ed; color: var(--ink); }

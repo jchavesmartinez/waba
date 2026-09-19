@@ -121,9 +121,9 @@ def test_reclasificar_manual_actualiza_origen_y_encola_sincronizacion(monkeypatc
     ]
 
 
-def test_reclasificar_grupo_guarda_regla_por_comercio(monkeypatch):
+def test_reclasificar_regla_guarda_metadata_por_comercio(monkeypatch):
     cliente = {"cliente_id": "cliente_a", "catalogo_spreadsheet_id": "sheet"}
-    guardado, overrides = {}, []
+    guardado, overrides, reglas = {}, [], []
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
     monkeypatch.setattr(
         dashboard_edicion, "_movimiento",
@@ -143,21 +143,64 @@ def test_reclasificar_grupo_guarda_regla_por_comercio(monkeypatch):
         }],
     })
     monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("semantic", {"modelo_id": "transacciones"}))
+    monkeypatch.setattr(
+        dashboard_edicion, "_regla_por_comercio",
+        lambda *_: ("transacciones", "comercio_concepto", "MXM SAN FRANCISCO"),
+    )
     monkeypatch.setattr(dashboard_edicion, "_guardar_override", lambda *args: overrides.append(args[1:]))
+    monkeypatch.setattr(dashboard_edicion, "_guardar_regla_clasificacion", lambda *args: reglas.append(args[1:]))
     monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *args: guardado.update(version=3) or 3)
 
     resultado = dashboard_edicion.reclasificar(
-        "token", "bac:movimiento-1", "gas_comedera", "SINPE", "grupo", "comercio",
+        "token", "bac:movimiento-1", "gas_comedera", "SINPE", "regla",
     )
 
-    assert resultado["alcance"] == "grupo"
-    assert resultado["agrupar_por"] == "comercio"
-    assert len(overrides) == 4
-    assert overrides[0][0:3] == ("transacciones", "correo-1", "linea_presupuesto_id")
-    assert overrides[1][0:3] == ("transacciones", "correo-1", "tarjeta")
-    assert overrides[2][0:3] == ("movimientos", "bac:movimiento-1", "linea_presupuesto_id")
-    assert overrides[3][0] == "movimientos"
-    assert overrides[3][1].startswith("__grupo__:descripcion:")
+    assert resultado["alcance"] == "regla"
+    assert resultado["comercio"] == "MXM SAN FRANCISCO"
+    assert overrides == [
+        ("transacciones", "correo-1", "tarjeta", "SINPE", "Método de pago actualizado desde dashboard"),
+    ]
+    assert reglas == [
+        ("transacciones", "comercio_concepto", "MXM SAN FRANCISCO", "gas_comedera"),
+    ]
+
+
+def test_guardar_regla_clasificacion_agrega_fila_exacta_en_metadata(monkeypatch):
+    class Hoja:
+        encabezados = ["modelo_id", "columnas", "patron", "valor", "prioridad", "clasifica_en"]
+
+        def __init__(self):
+            self.agregadas = []
+
+        def row_values(self, _):
+            return self.encabezados
+
+        def get_all_values(self):
+            return [self.encabezados]
+
+        def append_row(self, valores, **_):
+            self.agregadas.append(valores)
+
+    class Libro:
+        def __init__(self, hoja):
+            self.hoja = hoja
+
+        def worksheet(self, nombre):
+            assert nombre == "_clasificacion"
+            return self.hoja
+
+    hoja = Hoja()
+    monkeypatch.setattr(dashboard_edicion, "abrir_libro_escritura", lambda _: Libro(hoja))
+
+    dashboard_edicion._guardar_regla_clasificacion(
+        {"catalogo_spreadsheet_id": "sheet"}, "transacciones_bac",
+        "comercio_concepto", "MXM SAN FRANCISCO", "gas_comedera",
+    )
+
+    assert hoja.agregadas == [[
+        "transacciones_bac", "comercio_concepto", "MXM SAN FRANCISCO",
+        "gas_comedera", "0", "linea_presupuesto_id",
+    ]]
 
 
 def test_reclasificar_rechaza_medio_pago_vacio(monkeypatch):

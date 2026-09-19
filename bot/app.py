@@ -525,7 +525,7 @@ async def responder_chat_dashboard(token: str, request: Request):
 @app.post("/dashboard/{token}/movimientos/reclasificar")
 async def reclasificar_movimiento_dashboard(token: str, request: Request,
                                             tareas: BackgroundTasks):
-    """Aplica una clasificación puntual, validada por el enlace del dashboard."""
+    """Aplica una corrección puntual o regla por comercio del dashboard."""
     cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
     try:
         datos = await request.json()
@@ -534,7 +534,6 @@ async def reclasificar_movimiento_dashboard(token: str, request: Request,
         resultado = dashboard_edicion.reclasificar(
             token, datos.get("movimiento_clave"), datos.get("linea_id"),
             datos.get("medio_pago"), datos.get("alcance", "individual"),
-            datos.get("agrupar_por"),
         )
         # La escritura fuente ya fue confirmada. La sincronización pesada va
         # después de responder para que el navegador pueda actualizar su vista
