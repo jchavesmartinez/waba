@@ -533,7 +533,8 @@ async def reclasificar_movimiento_dashboard(token: str, request: Request,
             raise dashboard_edicion.ErrorReclasificacion("la solicitud de edición no es válida")
         resultado = dashboard_edicion.reclasificar(
             token, datos.get("movimiento_clave"), datos.get("linea_id"),
-            datos.get("medio_pago"),
+            datos.get("medio_pago"), datos.get("alcance", "individual"),
+            datos.get("agrupar_por"),
         )
         # La escritura fuente ya fue confirmada. La sincronización pesada va
         # después de responder para que el navegador pueda actualizar su vista

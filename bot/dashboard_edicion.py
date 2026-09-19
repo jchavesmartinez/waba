@@ -17,6 +17,7 @@ from bot import catalogo, dashboard, edicion, escritura_google_sheets, warehouse
 from gclient import abrir_libro_escritura
 from modelo import metadata
 from modelo.construir import construir_cliente
+from modelo.reclasificaciones import clave_grupo, grupo_desde_clave, normalizar
 from warehouse import crear_destino
 from sqlalchemy import text
 import sync
@@ -58,10 +59,17 @@ def _movimiento(cliente: dict, clave: str) -> tuple[dict, object]:
     columna_medio_pago = (
         "medio_pago" if "medio_pago" in columnas else "NULL::text AS medio_pago"
     )
+    extras = []
+    for columna in ("descripcion", "concepto", "categoria"):
+        if columna in columnas:
+            extras.append(f'CAST("{columna}" AS text) AS "{columna}"')
+        else:
+            extras.append(f"NULL::text AS \"{columna}\"")
+    extras_sql = ", " + ", ".join(extras)
     filas = warehouse_ro.leer_interno(
         cliente,
         f"SELECT \"_clave\", \"_modelo_id\", fuente, clave_origen, linea_presupuesto_id, "
-        f"{columna_medio_pago} "
+        f"{columna_medio_pago}{extras_sql} "
         f"FROM {_identificador(tabla.tabla_real)} WHERE \"_clave\" = :clave LIMIT 1",
         {"clave": clave},
     )
@@ -228,6 +236,35 @@ def _campo_medio_pago(datos: dict, movimiento: dict) -> str:
     if not _VALOR_SEGURO.fullmatch(campo):
         raise ErrorReclasificacion("el campo de método de pago configurado no es válido")
     return campo
+
+
+def _fuente_canonica(datos: dict, movimiento: dict) -> dict:
+    """Resuelve la fila de ``_movimientos_canonicos`` para una fuente."""
+    modelo = str(movimiento.get("_modelo_id", "")).strip()
+    fuente = str(movimiento.get("fuente", "")).strip().casefold()
+    return next((fila for fila in datos.get("movimientos_canonicos", [])
+                 if str(fila.get("modelo_id", "")).strip() == modelo
+                 and str(fila.get("fuente", "")).strip().casefold() == fuente), {})
+
+
+def _valor_reclasificacion_grupal(movimiento: dict, ctx, cliente: dict,
+                                  agrupar_por: str) -> tuple[str, str]:
+    """Obtiene el valor canónico usado por una regla de concepto o comercio."""
+    campo = str(agrupar_por or "").strip().lower()
+    if campo == "comercio":
+        valor = str(movimiento.get("descripcion") or "").strip()
+        return "descripcion", valor
+    if campo == "concepto":
+        valor = str(movimiento.get("concepto") or "").strip()
+        if not valor and movimiento.get("linea_presupuesto_id"):
+            try:
+                valor = str(_validar_linea(
+                    cliente, ctx, str(movimiento["linea_presupuesto_id"])
+                ).get("concepto") or "").strip()
+            except ErrorReclasificacion:
+                valor = ""
+        return "concepto", valor
+    raise ErrorReclasificacion("seleccione si aplica por concepto o comercio")
 
 
 def _validar_medio_pago(valor: object) -> str:
@@ -460,8 +497,9 @@ def estado_reconstruccion(token: str, movimiento_clave: object) -> dict:
 
 
 def reclasificar(token: str, movimiento_clave: object, linea_id: object,
-                 medio_pago: object = None) -> dict:
-    """Valida, persiste y reconstruye una edición puntual del movimiento."""
+                 medio_pago: object = None, alcance: object = "individual",
+                 agrupar_por: object = None) -> dict:
+    """Valida una reclasificación puntual o una regla histórica/futura."""
     _, cliente = dashboard.validar_enlace(token)
     clave = str(movimiento_clave or "").strip()
     linea = str(linea_id or "").strip()
@@ -469,15 +507,35 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
         raise ErrorReclasificacion("la solicitud de edición no es válida")
     movimiento, ctx = _movimiento(cliente, clave)
     destino = _validar_linea(cliente, ctx, linea)
+    alcance = str(alcance or "individual").strip().lower()
+    if alcance not in {"individual", "grupo"}:
+        raise ErrorReclasificacion("el alcance de la reclasificación no es válido")
     medio = _validar_medio_pago(
         movimiento.get("medio_pago") if medio_pago is None else medio_pago
     )
     datos = metadata.leer(cliente)
     capa, origen = _modelo_origen(datos, movimiento)
     columna_medio_pago = _campo_medio_pago(datos, movimiento)
+    modelo_canonico = str(movimiento.get("_modelo_id", "")).strip()
+    if not modelo_canonico:
+        raise ErrorReclasificacion("el movimiento no tiene modelo canónico")
     clave_origen = str(movimiento.get("clave_origen", "")).strip()
     if not _VALOR_SEGURO.fullmatch(clave_origen):
         raise ErrorReclasificacion("el movimiento no tiene una identidad estable para corregirse")
+    grupo = None
+    if alcance == "grupo":
+        campo_grupo, valor_grupo = _valor_reclasificacion_grupal(
+            movimiento, ctx, cliente, agrupar_por,
+        )
+        if not normalizar(valor_grupo):
+            raise ErrorReclasificacion(
+                "ese movimiento no tiene un valor válido para agrupar"
+            )
+        grupo = clave_grupo(campo_grupo, valor_grupo)
+        if not str(cliente.get("catalogo_spreadsheet_id", "")).strip():
+            raise ErrorReclasificacion(
+                "la reclasificación masiva requiere metadata editable configurada"
+            )
     fuente_id = ""
     if capa == "semantic":
         _guardar_override(
@@ -492,10 +550,29 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
         )
     else:
         fuente_id = _actualizar_movimiento_manual(cliente, origen, clave_origen, linea, medio)
+    # Si ya existe una regla grupal, la corrección puntual canónica gana sobre
+    # ella. Sin una regla grupal no hace falta duplicar el override: la fuente
+    # semántica/manual ya conserva la edición puntual por sí sola.
+    hay_regla_grupal = any(
+        str(o.get("modelo_id", "")).strip() == modelo_canonico
+        and grupo_desde_clave(o.get("clave"))
+        for o in datos.get("overrides", [])
+    )
+    if alcance == "grupo" or hay_regla_grupal:
+        _guardar_override(
+            cliente, modelo_canonico, clave, "linea_presupuesto_id", linea,
+            f"Reclasificado desde dashboard: {destino['categoria']} > {destino['concepto']}",
+        )
+    if grupo:
+        _guardar_override(
+            cliente, modelo_canonico, grupo,
+            "linea_presupuesto_id", linea,
+            f"Regla desde dashboard: {campo_grupo} = {valor_grupo}",
+        )
     version = _encolar_reconstruccion(
         cliente, clave, fuente_id,
     )
-    return {
+    resultado = {
         "ok": True,
         "linea_id": destino["linea_id"],
         "categoria": destino["categoria"],
@@ -504,6 +581,10 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
         "estado": "pendiente",
         "version": version,
     }
+    if alcance == "grupo":
+        resultado["alcance"] = alcance
+        resultado["agrupar_por"] = str(agrupar_por or "").strip().lower()
+    return resultado
 
 
 def _politica_creacion_manual(cliente: dict) -> edicion.PoliticaEdicion:

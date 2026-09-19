@@ -194,14 +194,36 @@
       .filter((method) => method && method !== "Sin método de pago"))].sort((a, b) => a.localeCompare(b, "es"));
     methods.forEach((method) => { const option = document.createElement("option"); option.value = method; paymentList.append(option); });
     payment.setAttribute("list", paymentListId); paymentLabel.append(payment, paymentList);
+    const scopeFieldset = document.createElement("fieldset"); scopeFieldset.className = "editor-alcance";
+    const scopeLegend = document.createElement("legend"); scopeLegend.textContent = "Alcance de la reclasificación";
+    const scopeOptions = document.createElement("div"); scopeOptions.className = "editor-alcance-opciones";
+    const scopeIndividual = document.createElement("label");
+    const individualRadio = document.createElement("input"); individualRadio.type = "radio";
+    individualRadio.name = `alcance-${movement.movimiento_clave}`; individualRadio.value = "individual"; individualRadio.checked = true;
+    scopeIndividual.append(individualRadio, document.createTextNode("Solo este gasto"));
+    const scopeGroup = document.createElement("label");
+    const groupRadio = document.createElement("input"); groupRadio.type = "radio";
+    groupRadio.name = `alcance-${movement.movimiento_clave}`; groupRadio.value = "grupo";
+    scopeGroup.append(groupRadio, document.createTextNode("Todos los gastos pasados y futuros que coincidan"));
+    scopeOptions.append(scopeIndividual, scopeGroup);
+    const groupByLabel = document.createElement("label"); groupByLabel.className = "editor-grupo-por";
+    groupByLabel.textContent = "Coincidencia por";
+    const groupBy = document.createElement("select"); groupBy.required = true;
+    [["concepto", "Mismo concepto"], ["comercio", "Mismo comercio"]].forEach(([value, text]) => {
+      const option = document.createElement("option"); option.value = value; option.textContent = text; groupBy.append(option);
+    });
+    groupByLabel.append(groupBy); groupByLabel.hidden = true;
+    scopeFieldset.append(scopeLegend, scopeOptions, groupByLabel);
+    const actualizarAlcance = () => { groupByLabel.hidden = !groupRadio.checked; };
+    individualRadio.addEventListener("change", actualizarAlcance); groupRadio.addEventListener("change", actualizarAlcance);
     const note = document.createElement("p"); note.className = "editor-nota";
-    note.textContent = "Los cambios se aplicarán solo a este movimiento y quedarán guardados para futuras sincronizaciones.";
+    note.textContent = "La reclasificación masiva se guardará como una regla para históricos y futuras sincronizaciones. El método de pago se aplica a este movimiento.";
     const actions = document.createElement("div"); actions.className = "editor-acciones";
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
     cancel.addEventListener("click", () => dialog.close());
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar cambios";
     const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
-    actions.append(cancel, save); form.append(title, detail, label, paymentLabel, note, error, actions); dialog.append(form);
+    actions.append(cancel, save); form.append(title, detail, label, paymentLabel, scopeFieldset, note, error, actions); dialog.append(form);
     form.addEventListener("submit", async (event) => {
       event.preventDefault(); save.disabled = true; cancel.disabled = true; error.hidden = true;
       try {
@@ -211,6 +233,8 @@
             movimiento_clave: movement.movimiento_clave,
             linea_id: select.value,
             medio_pago: payment.value,
+            alcance: groupRadio.checked ? "grupo" : "individual",
+            agrupar_por: groupRadio.checked ? groupBy.value : null,
           }),
         });
         const result = await response.json();
@@ -221,7 +245,9 @@
         movement.medio_pago = result.medio_pago;
         dialog.close();
         renderVista();
-        mostrarAviso("Cambios guardados. Sincronizando en segundo plano…");
+        mostrarAviso(result.alcance === "grupo"
+          ? "Regla guardada para gastos pasados y futuros. Sincronizando…"
+          : "Cambios guardados. Sincronizando en segundo plano…");
         vigilarSincronizacion(movement.movimiento_clave);
       } catch (reason) {
         error.textContent = reason.message || "No pude guardar la clasificación.";

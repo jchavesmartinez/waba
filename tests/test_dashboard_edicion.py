@@ -121,6 +121,45 @@ def test_reclasificar_manual_actualiza_origen_y_encola_sincronizacion(monkeypatc
     ]
 
 
+def test_reclasificar_grupo_guarda_regla_por_comercio(monkeypatch):
+    cliente = {"cliente_id": "cliente_a", "catalogo_spreadsheet_id": "sheet"}
+    guardado, overrides = {}, []
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
+    monkeypatch.setattr(
+        dashboard_edicion, "_movimiento",
+        lambda *_: ({
+            "_modelo_id": "movimientos", "fuente": "banco", "clave_origen": "correo-1",
+            "medio_pago": "Tarjeta anterior", "descripcion": "Walmart Heredia",
+            "concepto": "Comedera", "linea_presupuesto_id": "gas_viejo",
+        }, object()),
+    )
+    monkeypatch.setattr(
+        dashboard_edicion, "_validar_linea",
+        lambda *_: {"linea_id": "gas_comedera", "categoria": "Alimentacion", "concepto": "Comedera"},
+    )
+    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {
+        "modelos": [], "overrides": [], "movimientos_canonicos": [{
+            "modelo_id": "movimientos", "fuente": "banco", "medio_pago": "tarjeta",
+        }],
+    })
+    monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("semantic", {"modelo_id": "transacciones"}))
+    monkeypatch.setattr(dashboard_edicion, "_guardar_override", lambda *args: overrides.append(args[1:]))
+    monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *args: guardado.update(version=3) or 3)
+
+    resultado = dashboard_edicion.reclasificar(
+        "token", "bac:movimiento-1", "gas_comedera", "SINPE", "grupo", "comercio",
+    )
+
+    assert resultado["alcance"] == "grupo"
+    assert resultado["agrupar_por"] == "comercio"
+    assert len(overrides) == 4
+    assert overrides[0][0:3] == ("transacciones", "correo-1", "linea_presupuesto_id")
+    assert overrides[1][0:3] == ("transacciones", "correo-1", "tarjeta")
+    assert overrides[2][0:3] == ("movimientos", "bac:movimiento-1", "linea_presupuesto_id")
+    assert overrides[3][0] == "movimientos"
+    assert overrides[3][1].startswith("__grupo__:descripcion:")
+
+
 def test_reclasificar_rechaza_medio_pago_vacio(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))

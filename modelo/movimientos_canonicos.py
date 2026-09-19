@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import re
 
-from .metadata import movimientos_canonicos_de, monedas_de
+from .metadata import movimientos_canonicos_de, monedas_de, overrides_de
 from .moneda_funcional import ConversorMoneda, ErrorTipoCambio
+from .reclasificaciones import grupo_desde_clave, normalizar
 from .tipos import convertir
 
 
@@ -77,6 +78,8 @@ def construir(destino, cliente_id: str, esquema_raw: str, esquema_sem: str,
         raise RuntimeError(f"moneda_funcional inválida: {exc}") from exc
 
     filas, rechazos = [], []
+    overrides = overrides_de(metadata, modelo_id)
+    exactos, grupos = _indexar_reclasificaciones(overrides)
     for config in fuentes:
         _validar_fuente(config, modelo_id)
         esquema = _esquema_de(config.get("capa_origen"), esquema_raw, esquema_sem)
@@ -90,6 +93,7 @@ def construir(destino, cliente_id: str, esquema_raw: str, esquema_sem: str,
                 rechazo = _rechazo(cruda, config, modelo_id, motivo)
                 rechazos.append(rechazo)
             elif resultado:
+                _aplicar_reclasificaciones(resultado, exactos, grupos)
                 filas.append(resultado)
 
     # Una clave es estable dentro de su fuente. El prefijo evita que dos
@@ -118,6 +122,44 @@ def construir(destino, cliente_id: str, esquema_raw: str, esquema_sem: str,
             f"revisa {destino_tabla}__rechazos."
         )
     return {"filas": len(filas), "rechazos": len(rechazos), "alertas": alertas}
+
+
+def _indexar_reclasificaciones(overrides: list[dict]) -> tuple[dict, list[dict]]:
+    """Separa overrides puntuales de reglas que aplican a un grupo.
+
+    La precedencia es puntual > grupo: una corrección posterior de un único
+    movimiento nunca queda tapada por una regla masiva anterior.
+    """
+    exactos: dict[str, dict[str, str]] = {}
+    grupos: list[dict] = []
+    for override in overrides or []:
+        clave = str(override.get("clave", "")).strip()
+        columna = str(override.get("columna", "")).strip()
+        valor = str(override.get("valor", ""))
+        if not clave or not columna:
+            continue
+        grupo = grupo_desde_clave(clave)
+        if grupo:
+            grupos.append({"campo": grupo[0], "valor": grupo[1],
+                           "columna": columna, "nuevo": valor})
+        else:
+            exactos.setdefault(clave, {})[columna] = valor
+    return exactos, grupos
+
+
+def _aplicar_reclasificaciones(fila: dict, exactos: dict,
+                               grupos: list[dict]) -> None:
+    """Aplica reglas persistentes al movimiento canónico proyectado."""
+    exacto = exactos.get(str(fila.get("_clave", "")), {})
+    for columna, valor in exacto.items():
+        if columna in fila:
+            fila[columna] = valor
+    for regla in grupos:
+        if regla["columna"] in exacto:
+            continue
+        if normalizar(fila.get(regla["campo"], "")) == regla["valor"]:
+            if regla["columna"] in fila:
+                fila[regla["columna"]] = regla["nuevo"]
 
 
 def _proyectar(cruda: dict, cfg: dict, modelo_id: str,
