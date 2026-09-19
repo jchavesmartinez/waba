@@ -332,8 +332,8 @@
   };
 
   const metricKeys = (row) => ({
-    budget: keyMatch(row, /^presupuesto$|monto_presupuestado|presupuesto_mensual/i),
-    spent: keyMatch(row, /^gastado$|gasto_neto|gasto|monto|total/i),
+    budget: keyMatch(row, /^presupuesto$|monto_presupuestado|presupuesto_mensual|^mensual$/i),
+    spent: keyMatch(row, /^gastado$|^gasto$|gasto_neto|^monto$|total_gastado/i),
     available: keyMatch(row, /^disponible$|saldo/i),
     pct: keyMatch(row, /pct|porcentaje/i),
   });
@@ -359,8 +359,12 @@
 
   const renderHierarchy = (target) => {
     const byIdInsensitive = (ids) => data.kpis.find((k) => ids.includes(String(k.kpi || "").toLowerCase()));
-    const conceptKpi = byIdInsensitive(["ejecucion_presupuesto_concepto", "gasto_por_concepto"]);
-    const categoryKpi = byIdInsensitive(["gasto_por_categoria", "ejecucion_presupuesto_mes"]);
+    const conceptKpi = byIdInsensitive([
+      "ejecucion_presupuesto_concepto", "gasto_por_concepto", "plan_presupuesto_concepto",
+    ]);
+    const categoryKpi = byIdInsensitive([
+      "gasto_por_categoria", "ejecucion_presupuesto_mes", "plan_presupuesto",
+    ]);
     const commerceKpi = byIdInsensitive(["gasto_por_comercio"]);
     if (!conceptKpi && !categoryKpi) return new Set();
 
@@ -443,6 +447,47 @@
       bucket.totals.presupuesto = (number(bucket.totals.presupuesto) || 0) + row.presupuesto;
       bucket.totals.gastado = (number(bucket.totals.gastado) || 0) + row.gastado;
       categories.set(categoryId, bucket);
+    });
+
+    // Algunas metadata solo publica el plan (``mensual``) y no un KPI de
+    // ejecución. En ese contrato el gasto real se obtiene de los movimientos
+    // canónicos, agrupados por línea presupuestaria, sin usar subtotales como
+    // si fueran gastos.
+    const gastoPorLinea = new Map();
+    const gastoPorConcepto = new Map();
+    movements.forEach((movement) => {
+      const linea = movementLine(movement);
+      const amountKey = keyMatch(movement, /^monto$|gasto.?neto|^gastado$|total_gastado/i);
+      if (!linea || !amountKey) return;
+      gastoPorLinea.set(linea, (gastoPorLinea.get(linea) || 0) + (number(movement[amountKey]) || 0));
+      const categoriaKey = keyMatch(movement, /^categoria$|categoría/i);
+      const conceptoKey = keyMatch(movement, /^concepto$|rubro/i);
+      const claveConcepto = `${normalized(movement[categoriaKey])}|${normalized(movement[conceptoKey])}`;
+      if (conceptoKey && movement[conceptoKey]) {
+        gastoPorConcepto.set(claveConcepto, (gastoPorConcepto.get(claveConcepto) || 0) + (number(movement[amountKey]) || 0));
+      }
+    });
+    categories.forEach((bucket) => {
+      bucket.rows.forEach((row) => {
+        const keys = metricKeys(row);
+        if (keys.spent) return;
+        const lineKey = keyMatch(row, /^linea_id$|linea_presupuesto_id/i);
+        if (lineKey && row[lineKey]) {
+          row.gastado = gastoPorLinea.get(normalized(row[lineKey])) || 0;
+        } else {
+          const conceptKey = keyMatch(row, /^concepto$|rubro/i);
+          const categoriaKey = keyMatch(row, /^categoria$|categoría/i);
+          const claveConcepto = `${normalized(row[categoriaKey])}|${normalized(row[conceptKey])}`;
+          row.gastado = gastoPorConcepto.get(claveConcepto) || 0;
+        }
+      });
+      const sample = bucket.rows[0];
+      const keys = metricKeys(sample);
+      bucket.totals = { ...sample };
+      if (keys.budget) bucket.totals[keys.budget] = bucket.rows.reduce((sum, row) => sum + (number(row[keys.budget]) || 0), 0);
+      if (keys.spent) bucket.totals[keys.spent] = bucket.rows.reduce((sum, row) => sum + (number(row[keys.spent]) || 0), 0);
+      else bucket.totals.gastado = bucket.rows.reduce((sum, row) => sum + (number(row.gastado) || 0), 0);
+      if (keys.available) bucket.totals[keys.available] = (number(bucket.totals[keys.budget]) || 0) - (number(bucket.totals[keys.spent]) || 0);
     });
     const usedMovements = new Set();
 
