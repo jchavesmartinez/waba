@@ -248,7 +248,7 @@ def _fuente_canonica(datos: dict, movimiento: dict) -> dict:
                  and str(fila.get("fuente", "")).strip().casefold() == fuente), {})
 
 
-def _regla_por_comercio(cliente: dict, ctx, datos: dict, movimiento: dict,
+def _regla_por_comercio(cliente: dict, datos: dict, movimiento: dict,
                         origen: dict) -> tuple[str, str, str]:
     """Resuelve una regla semántica ``comercio -> línea presupuestaria``.
 
@@ -272,11 +272,15 @@ def _regla_por_comercio(cliente: dict, ctx, datos: dict, movimiento: dict,
     campo = str(campos[0].get("columna", "")).strip()
     fuente = _fuente_canonica(datos, movimiento)
     clave_fuente = str(fuente.get("clave", "")).strip()
-    tabla_origen = str(origen.get("tabla_destino", "")).strip().casefold()
-    tabla = next((candidata for candidata in ctx.permitidas
-                  if str(candidata.tabla_real).strip().casefold() == tabla_origen), None)
-    columnas = {str(columna).lower() for columna in (tabla.columnas_config if tabla else [])}
-    if (not tabla or not _VALOR_SEGURO.fullmatch(campo)
+    tabla_origen = str(origen.get("tabla_destino", "")).strip()
+    # La fuente semántica puede no estar publicada en ``_catalogo`` para el
+    # chat: es una entrada interna del modelo canónico, no una tabla que el
+    # LLM deba poder consultar. Aquí se autoriza por la relación declarada en
+    # ``_movimientos_canonicos`` + ``_modelos`` y por las columnas que Modelo
+    # ya validó, no por el catálogo público.
+    columnas = {str(nombre).lower() for nombre, _ in modelo.columnas()}
+    if (not _VALOR_SEGURO.fullmatch(tabla_origen)
+            or not _VALOR_SEGURO.fullmatch(campo)
             or not _VALOR_SEGURO.fullmatch(clave_fuente)
             or campo.lower() not in columnas or clave_fuente.lower() not in columnas):
         raise ErrorReclasificacion(
@@ -285,7 +289,7 @@ def _regla_por_comercio(cliente: dict, ctx, datos: dict, movimiento: dict,
     filas = warehouse_ro.leer_interno(
         cliente,
         f"SELECT CAST({_identificador(campo)} AS text) AS comercio "
-        f"FROM {_identificador(tabla.tabla_real)} "
+        f"FROM {_identificador(tabla_origen)} "
         f"WHERE CAST({_identificador(clave_fuente)} AS text) = :clave LIMIT 1",
         {"clave": str(movimiento.get("clave_origen", "")).strip()},
     )
@@ -598,7 +602,7 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
             raise ErrorReclasificacion(
                 "este origen no admite reglas generales; reclasifíquelo solo de forma puntual"
             )
-        regla = _regla_por_comercio(cliente, ctx, datos, movimiento, origen)
+        regla = _regla_por_comercio(cliente, datos, movimiento, origen)
     fuente_id = ""
     if capa == "semantic":
         if alcance == "individual":

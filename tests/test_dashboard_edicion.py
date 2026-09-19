@@ -203,6 +203,38 @@ def test_guardar_regla_clasificacion_agrega_fila_exacta_en_metadata(monkeypatch)
     ]]
 
 
+def test_regla_por_comercio_usa_modelo_semantico_no_catalogo_publico(monkeypatch):
+    class ModeloFalso:
+        modelo_id = "transacciones_bac"
+        campos = [{"columna": "comercio_concepto", "clasifica_en": "linea_presupuesto_id"}]
+
+        def __init__(self, *_):
+            pass
+
+        def columnas(self):
+            return [("_clave", "texto"), ("comercio_concepto", "texto")]
+
+    llamadas = []
+    monkeypatch.setattr(dashboard_edicion, "Modelo", ModeloFalso)
+    monkeypatch.setattr(
+        dashboard_edicion.warehouse_ro, "leer_interno",
+        lambda *args: llamadas.append(args[1:]) or [{"comercio": "MXM PASEO D LAS FLORES"}],
+    )
+    datos = {
+        "movimientos_canonicos": [{
+            "modelo_id": "movimientos", "fuente": "bac", "clave": "_clave",
+        }],
+    }
+    movimiento = {"_modelo_id": "movimientos", "fuente": "bac", "clave_origen": "correo-1"}
+
+    assert dashboard_edicion._regla_por_comercio(
+        {"cliente_id": "cliente_a"}, datos, movimiento,
+        {"modelo_id": "transacciones_bac", "tabla_destino": "finanzas__transacciones"},
+    ) == ("transacciones_bac", "comercio_concepto", "MXM PASEO D LAS FLORES")
+    assert 'FROM "finanzas__transacciones"' in llamadas[0][0]
+    assert llamadas[0][1] == {"clave": "correo-1"}
+
+
 def test_reclasificar_rechaza_medio_pago_vacio(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
