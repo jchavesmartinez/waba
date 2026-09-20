@@ -625,7 +625,15 @@ def renderizar(token: str) -> str:
     datos = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
     # Evita cerrar el elemento script si un valor de negocio contiene </script>.
     datos = datos.replace("</", "<\\/")
-    return plantilla.replace("__DASHBOARD_DATA__", datos)
+    # Los enlaces firmados se pueden reabrir durante varios minutos. Un hash de
+    # los assets evita que Chrome reutilice un bundle anterior de JavaScript o
+    # CSS después de un despliegue, aun cuando el HTML se haya recargado.
+    huella_assets = hashlib.sha256(
+        _PLANTILLA.read_bytes() + (ASSETS_DIR / "app.js").read_bytes()
+        + (ASSETS_DIR / "styles.css").read_bytes()
+    ).hexdigest()[:16]
+    return (plantilla.replace("__DASHBOARD_DATA__", datos)
+            .replace("__DASHBOARD_ASSET_VERSION__", huella_assets))
 
 
 def mensaje_enlace(cliente: dict, numero: str, pregunta: str = "") -> str:

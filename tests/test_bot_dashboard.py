@@ -78,6 +78,7 @@ def test_render_incrusta_snapshot_sin_llamadas_del_frontend(
     html = dashboard.renderizar(url.rsplit("/", 1)[-1])
 
     assert "__DASHBOARD_DATA__" not in html
+    assert "__DASHBOARD_ASSET_VERSION__" not in html
     assert '"nombre":"Cliente A"' in html
     assert "/dashboard-assets/app.js" in html
     assert 'id="chat-mensajes"' in html
