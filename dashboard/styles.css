@@ -75,6 +75,13 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .nivel-hijos { display: grid; gap: 8px; padding: 0 10px 10px 28px; }
 .nivel-concepto { background: #fff; }
 .nivel-concepto > summary { padding: 12px 14px; font-size: .92rem; }
+.pago-acciones { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; }
+.pago-estado { color: #1b6b40; background: #e6f5e9; border-radius: 999px; padding: 4px 7px; font-size: .68rem; font-weight: 800; white-space: nowrap; }
+.boton-pagar { min-height: 34px; border: 0; border-radius: 8px; padding: 7px 9px; background: var(--green); color: white; font: inherit; font-size: .75rem; font-weight: 800; cursor: pointer; white-space: nowrap; }
+.boton-pagar:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 2px; }
+.resumen-pago { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px; margin: 0; padding: 12px; border-radius: 10px; background: #f4f7f2; color: var(--muted); font-size: .85rem; }
+.resumen-pago dt, .resumen-pago dd { margin: 0; }
+.resumen-pago dd { color: var(--ink); font-weight: 800; text-align: right; }
 .nivel-detalle { padding: 0 14px 14px 42px; }
 .nivel-detalle .bar-line { margin-top: 8px; }
 .movimientos { display: grid; gap: 6px; margin: 14px 0 0; padding: 0; list-style: none; }
@@ -153,6 +160,10 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: var(--
   .nivel-hijos { padding-left: 14px; }
   .nivel-detalle { padding-left: 30px; }
   .nivel-meta { font-size: .7rem; }
+  .nivel-concepto > summary { flex-wrap: wrap; gap: 8px; }
+  .nivel-concepto > summary .nivel-meta { flex-basis: calc(100% - 26px); margin-left: 26px; white-space: normal; }
+  .pago-acciones { margin-left: auto; }
+  .pago-estado { font-size: .62rem; padding: 4px 6px; }
   .chat-cabecera { display: grid; }
   .chat-contexto { width: fit-content; }
   .chat-mensaje { width: 94%; }

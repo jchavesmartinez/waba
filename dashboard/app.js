@@ -48,6 +48,10 @@
   const keyMatch = (obj, pattern) => Object.keys(obj).find((key) => pattern.test(key));
   const normalized = (value) => String(value ?? "").trim().toLocaleLowerCase("es").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const lines = Array.isArray(data.lineas_presupuesto) ? data.lineas_presupuesto : [];
+  const linesById = new Map(lines.map((line) => [String(line.linea_id || ""), line]));
+  const esPagable = (valor) => [true, "true", "1", "si", "sí", "yes"].includes(
+    typeof valor === "string" ? valor.trim().toLocaleLowerCase("es") : valor,
+  );
   const creation = data.creacion_manual && Array.isArray(data.creacion_manual.campos)
     ? data.creacion_manual : null;
   const mostrarAviso = (mensaje) => {
@@ -323,6 +327,83 @@
     });
     document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove()); dialog.showModal();
   };
+  const fechaPredeterminadaPago = () => {
+    const inicio = String(data.periodo?.inicio || "").slice(0, 10);
+    const fin = String(data.periodo?.fin_exclusivo || "").slice(0, 10);
+    const ahora = new Date();
+    const hoy = [ahora.getFullYear(), String(ahora.getMonth() + 1).padStart(2, "0"), String(ahora.getDate()).padStart(2, "0")].join("-");
+    return inicio && fin && hoy >= inicio && hoy < fin ? hoy : inicio;
+  };
+  const estadoPago = (presupuesto, gastado) => {
+    const budget = number(presupuesto);
+    const spent = number(gastado);
+    const monto = Number.isFinite(budget) ? budget : 0;
+    const pagado = Number.isFinite(spent) ? spent : 0;
+    if (pagado <= 0) return { etiqueta: "Pendiente", accion: "Pagar", sugerido: monto > 0 ? monto : "" };
+    if (pagado < monto) return { etiqueta: "Pago parcial", accion: "Completar pago", sugerido: monto - pagado };
+    if (pagado === monto) return { etiqueta: "Pagado ✓", accion: "Registrar pago adicional", sugerido: monto > 0 ? monto : "" };
+    return { etiqueta: `Pagado · excedido ${format(pagado - monto, "monto", "CRC")}`, accion: "Registrar pago adicional", sugerido: monto > 0 ? monto : "" };
+  };
+  const abrirPago = (line, row, budgetKey, spentKey) => {
+    if (!line?.linea_id || !esPagable(line.pagable)) return;
+    const presupuesto = number(row[budgetKey]);
+    const gastado = number(row[spentKey]);
+    const estado = estadoPago(presupuesto, gastado);
+    const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento editor-pago";
+    const form = document.createElement("form");
+    const title = document.createElement("h2"); title.textContent = "Pagar";
+    const detail = document.createElement("p"); detail.className = "editor-descripcion";
+    detail.textContent = `${line.categoria} · ${line.concepto}`;
+    const resumen = document.createElement("dl"); resumen.className = "resumen-pago";
+    [["Monto presupuestado", presupuesto], ["Monto ya gastado", gastado], ["Saldo presupuestario", Math.max((presupuesto || 0) - (gastado || 0), 0)]]
+      .forEach(([etiqueta, valor]) => {
+        const term = document.createElement("dt"); term.textContent = etiqueta;
+        const definition = document.createElement("dd"); definition.textContent = format(valor, "monto", row.moneda || "CRC");
+        resumen.append(term, definition);
+      });
+    const montoLabel = document.createElement("label"); montoLabel.textContent = "Monto a pagar";
+    const monto = document.createElement("input"); monto.type = "number"; monto.name = "monto";
+    monto.min = "0.01"; monto.step = "0.01"; monto.inputMode = "decimal"; monto.required = true;
+    monto.value = estado.sugerido === "" ? "" : String(estado.sugerido);
+    montoLabel.append(monto);
+    const fechaLabel = document.createElement("label"); fechaLabel.textContent = "Fecha del pago";
+    const fecha = document.createElement("input"); fecha.type = "date"; fecha.name = "fecha"; fecha.required = true;
+    fecha.value = fechaPredeterminadaPago();
+    fecha.min = String(data.periodo?.inicio || "").slice(0, 10);
+    const fin = String(data.periodo?.fin_exclusivo || "").slice(0, 10);
+    if (fin) {
+      const ultimo = new Date(`${fin}T12:00:00`); ultimo.setDate(ultimo.getDate() - 1);
+      fecha.max = [ultimo.getFullYear(), String(ultimo.getMonth() + 1).padStart(2, "0"), String(ultimo.getDate()).padStart(2, "0")].join("-");
+    }
+    fechaLabel.append(fecha);
+    const note = document.createElement("p"); note.className = "editor-nota";
+    note.textContent = "Se guardará como un gasto manual normal asociado a este concepto.";
+    const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
+    const actions = document.createElement("div"); actions.className = "editor-acciones";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
+    cancel.addEventListener("click", () => dialog.close());
+    const save = document.createElement("button"); save.type = "submit"; save.textContent = "Confirmar pago";
+    actions.append(cancel, save); form.append(title, detail, resumen, montoLabel, fechaLabel, note, error, actions); dialog.append(form);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!form.reportValidity()) return;
+      save.disabled = true; cancel.disabled = true; error.hidden = true;
+      try {
+        const response = await fetch(`${window.location.pathname}/conceptos/${encodeURIComponent(line.linea_id)}/pagar`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ monto: monto.value, fecha: fecha.value }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el pago.");
+        dialog.close(); mostrarAviso("Pago guardado. Actualizando dashboard…");
+        window.setTimeout(() => window.location.reload(), 1200);
+      } catch (reason) {
+        error.textContent = reason.message || "No pude guardar el pago.";
+        error.hidden = false; save.disabled = false; cancel.disabled = false;
+      }
+    });
+    document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove()); dialog.showModal();
+  };
   const dimensionFor = (kpi, row) => {
     const texto = `${kpi.kpi || ""} ${kpi.nombre || ""} ${kpi.descripcion || ""}`.toLowerCase();
     // Prefer the exact dimension named by the KPI. A concept KPI can also
@@ -537,6 +618,7 @@
       rows.forEach((row) => {
         const conceptKey = keyMatch(row, /^concepto$|rubro/i);
         const conceptLineKey = keyMatch(row, /^linea_id$|linea_presupuesto_id/i);
+        const linea = conceptLineKey ? linesById.get(String(row[conceptLineKey] || "")) : null;
         const conceptDetails = document.createElement("details"); conceptDetails.className = "nivel nivel-concepto";
         const conceptSummary = document.createElement("summary");
         const conceptHeading = document.createElement("span"); conceptHeading.className = "nivel-titulo"; conceptHeading.textContent = row[conceptKey];
@@ -547,7 +629,19 @@
           conceptKeys.spent && `Gastado: ${format(row[conceptKeys.spent], conceptKeys.spent, row.moneda)}`,
           gastoExcedePresupuesto(row[conceptKeys.budget], row[conceptKeys.spent]) ? "meta-gastado-excedido" : "",
         );
-        conceptSummary.append(conceptHeading, conceptMeta); conceptDetails.append(conceptSummary);
+        conceptSummary.append(conceptHeading, conceptMeta);
+        if (linea && esPagable(linea.pagable) && conceptKeys.budget && conceptKeys.spent) {
+          const pago = estadoPago(row[conceptKeys.budget], row[conceptKeys.spent]);
+          const accionesPago = document.createElement("span"); accionesPago.className = "pago-acciones";
+          const estado = document.createElement("span"); estado.className = "pago-estado"; estado.textContent = pago.etiqueta;
+          const boton = document.createElement("button"); boton.type = "button"; boton.className = "boton-pagar"; boton.textContent = pago.accion;
+          boton.addEventListener("click", (event) => {
+            event.preventDefault(); event.stopPropagation();
+            abrirPago(linea, row, conceptKeys.budget, conceptKeys.spent);
+          });
+          accionesPago.append(estado, boton); conceptSummary.append(accionesPago);
+        }
+        conceptDetails.append(conceptSummary);
         const conceptBody = document.createElement("div"); conceptBody.className = "nivel-detalle"; appendMetricBars(conceptBody, row);
         const matches = movements.filter((movement, index) => {
           const originalConcept = row.origen_concepto || row[conceptKey];
