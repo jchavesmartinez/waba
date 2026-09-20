@@ -608,6 +608,33 @@ async def crear_movimiento_dashboard(token: str, request: Request):
         )
 
 
+@app.post("/dashboard/{token}/conceptos/{linea_id}/pagar")
+async def pagar_concepto_dashboard(token: str, linea_id: str, request: Request):
+    """Crea un gasto manual normal para liquidar una línea pagable."""
+    cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        datos = await request.json()
+        if not isinstance(datos, dict):
+            raise dashboard_edicion.ErrorReclasificacion("la solicitud de pago no es válida")
+        resultado = dashboard_edicion.registrar_pago(
+            token, linea_id, datos.get("monto"), datos.get("fecha"),
+        )
+        return JSONResponse(resultado, headers=cabeceras)
+    except dashboard.EnlaceInvalido:
+        return JSONResponse(
+            {"ok": False, "error": "El enlace venció. Solicite un dashboard nuevo desde WhatsApp."},
+            status_code=410, headers=cabeceras,
+        )
+    except dashboard_edicion.ErrorReclasificacion as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400, headers=cabeceras)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo registrar el pago desde dashboard")
+        return JSONResponse(
+            {"ok": False, "error": "No pude guardar el pago. Inténtelo nuevamente."},
+            status_code=503, headers=cabeceras,
+        )
+
+
 @app.get("/webhook")
 def verificar(request: Request):
     """Handshake de verificacion del webhook (Meta lo llama una sola vez)."""

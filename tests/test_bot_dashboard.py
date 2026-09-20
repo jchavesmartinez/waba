@@ -139,6 +139,28 @@ def test_chat_dashboard_entrega_adjunto_pequeno_como_descarga(monkeypatch):
     }]
 
 
+def test_endpoint_pago_delega_en_movimiento_manual_normal(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    recibido = {}
+    monkeypatch.setattr(
+        app_mod.dashboard_edicion, "registrar_pago",
+        lambda token, linea, monto, fecha: recibido.update(
+            token=token, linea=linea, monto=monto, fecha=fecha,
+        ) or {"ok": True, "movimiento_id": "MAN-77"},
+    )
+
+    respuesta = TestClient(app_mod.app).post(
+        "/dashboard/token/conceptos/gas_hipoteca/pagar",
+        json={"monto": "75000", "fecha": "2026-09-15"},
+    )
+
+    assert respuesta.status_code == 200
+    assert respuesta.json() == {"ok": True, "movimiento_id": "MAN-77"}
+    assert recibido == {
+        "token": "token", "linea": "gas_hipoteca", "monto": "75000", "fecha": "2026-09-15",
+    }
+
+
 def test_formulario_manual_solo_expone_campos_habilitados_por_metadata():
     manuales = catalogo.TablaPermitida(
         tabla_logica="gastos_manuales", tabla_real="gastos_manuales", fuente_id="finanzas",
@@ -163,6 +185,55 @@ def test_formulario_manual_solo_expone_campos_habilitados_por_metadata():
     assert "movimiento_id" not in campos
     assert campos["linea_presupuesto_id"]["seleccion_linea"] is True
     assert campos["categoria"]["derivado_de_linea"] is True
+
+
+def test_lineas_presupuesto_respetan_periodo_y_pagable_desde_metadata(monkeypatch):
+    presupuesto = catalogo.TablaPermitida(
+        tabla_logica="presupuesto", tabla_real="presupuesto", fuente_id="finanzas",
+        columnas_config={
+            "linea_id": {}, "categoria": {}, "concepto": {}, "tipo": {},
+            "pagable": {}, "vigencia_desde": {}, "vigencia_hasta": {},
+        },
+    )
+    ctx = catalogo.Contexto(schema_text="", tablas_reales={"presupuesto"}, permitidas=[presupuesto])
+    capturado = {}
+
+    def ejecutar(_cliente, sql, limite):
+        capturado.update(sql=sql, limite=limite)
+        return (["linea_id", "categoria", "concepto", "pagable"], [
+            ("gas_hipoteca", "Vivienda", "Hipoteca", True),
+        ])
+
+    monkeypatch.setattr(dashboard.nl2sql, "validar_sql", lambda *_: (True, ""))
+    monkeypatch.setattr(dashboard.warehouse_ro, "ejecutar", ejecutar)
+    lineas = dashboard._lineas_presupuesto(
+        {"cliente_id": "cliente_a"}, ctx,
+        {"inicio": "2026-08-01", "fin_exclusivo": "2026-09-01"},
+    )
+
+    assert "DATE '2026-08-01'" in capturado["sql"]
+    assert "AS pagable" in capturado["sql"]
+    assert lineas == [{"linea_id": "gas_hipoteca", "categoria": "Vivienda", "concepto": "Hipoteca", "pagable": True}]
+
+
+def test_lineas_presupuesto_sin_pagable_sigue_siendo_compatible(monkeypatch):
+    presupuesto = catalogo.TablaPermitida(
+        tabla_logica="presupuesto", tabla_real="presupuesto", fuente_id="finanzas",
+        columnas_config={"linea_id": {}, "categoria": {}, "concepto": {}},
+    )
+    ctx = catalogo.Contexto(schema_text="", tablas_reales={"presupuesto"}, permitidas=[presupuesto])
+    capturado = {}
+    monkeypatch.setattr(dashboard.nl2sql, "validar_sql", lambda *_: (True, ""))
+    monkeypatch.setattr(
+        dashboard.warehouse_ro, "ejecutar",
+        lambda _cliente, sql, limite: capturado.update(sql=sql) or (
+            ["linea_id", "categoria", "concepto", "pagable"], [("gas", "Otros", "No pagable", False)]),
+    )
+
+    assert dashboard._lineas_presupuesto({"cliente_id": "cliente_a"}, ctx) == [{
+        "linea_id": "gas", "categoria": "Otros", "concepto": "No pagable", "pagable": False,
+    }]
+    assert "FALSE AS pagable" in capturado["sql"]
 
 
 def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):

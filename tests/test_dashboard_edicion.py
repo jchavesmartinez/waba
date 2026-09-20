@@ -303,6 +303,55 @@ def test_crear_manual_guarda_en_origen_reconstruye_e_impone_linea(monkeypatch):
     assert llamadas == ["sync", "reconstruir", "cache"]
 
 
+def test_registrar_pago_reutiliza_creacion_manual_con_linea_fecha_y_monto(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    recibido = {}
+    monkeypatch.setattr(
+        dashboard_edicion.dashboard, "validar_enlace",
+        lambda _: ({"inicio": "2026-09-01", "fin": "2026-10-01"}, cliente),
+    )
+    monkeypatch.setattr(dashboard_edicion.catalogo, "construir_contexto", lambda _: object())
+    monkeypatch.setattr(
+        dashboard_edicion, "_validar_linea",
+        lambda *_: {"linea_id": "gas_cuota", "categoria": "Vivienda", "concepto": "Cuota condominal", "pagable": True},
+    )
+    monkeypatch.setattr(dashboard_edicion.edicion, "politica_para", lambda *_: _politica_creacion())
+    monkeypatch.setattr(
+        dashboard_edicion, "crear_movimiento",
+        lambda token, valores, **kwargs: recibido.update(token=token, valores=valores, periodo=kwargs.get("periodo")) or {"ok": True, "movimiento_id": "MAN-1"},
+    )
+
+    resultado = dashboard_edicion.registrar_pago("token", "gas_cuota", "80917", "2026-09-15")
+
+    assert resultado == {"ok": True, "movimiento_id": "MAN-1"}
+    assert recibido == {
+        "token": "token",
+        "valores": {
+            "linea_presupuesto_id": "gas_cuota", "fecha": "2026-09-15", "monto": "80917",
+            "descripcion": "Pago - Cuota condominal",
+        },
+        "periodo": {"inicio": "2026-09-01", "fin_exclusivo": "2026-10-01"},
+    }
+
+
+def test_registrar_pago_rechaza_linea_no_pagable_y_fecha_fuera_del_mes(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    monkeypatch.setattr(
+        dashboard_edicion.dashboard, "validar_enlace",
+        lambda _: ({"inicio": "2026-09-01", "fin": "2026-10-01"}, cliente),
+    )
+    with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="dentro del período"):
+        dashboard_edicion.registrar_pago("token", "gas_cuota", "100", "2026-10-01")
+
+    monkeypatch.setattr(dashboard_edicion.catalogo, "construir_contexto", lambda _: object())
+    monkeypatch.setattr(
+        dashboard_edicion, "_validar_linea",
+        lambda *_: {"linea_id": "gas_variable", "categoria": "Otros", "concepto": "Variable", "pagable": False},
+    )
+    with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="no está habilitado"):
+        dashboard_edicion.registrar_pago("token", "gas_variable", "100", "2026-09-15")
+
+
 def test_sincronizacion_manual_ignora_error_de_otra_fuente(monkeypatch):
     monkeypatch.setattr(
         dashboard_edicion.sync, "sincronizar_todo",

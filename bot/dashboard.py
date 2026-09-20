@@ -506,7 +506,7 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
         ).isoformat(timespec="minutes"),
         "kpis": _ejecutar_kpis(cliente, periodo),
         "movimientos": _movimientos_jerarquia(cliente, ctx, periodo) if not ctx.error_lectura else [],
-        "lineas_presupuesto": _lineas_presupuesto(cliente, ctx) if not ctx.error_lectura else [],
+        "lineas_presupuesto": _lineas_presupuesto(cliente, ctx, periodo) if not ctx.error_lectura else [],
         "creacion_manual": _formulario_creacion_manual(ctx) if not ctx.error_lectura else None,
     }
     with _CACHE_LOCK:
@@ -552,7 +552,7 @@ def _formulario_creacion_manual(ctx) -> dict | None:
     return {"tabla": politica.tabla, "campos": campos}
 
 
-def _lineas_presupuesto(cliente: dict, ctx) -> list[dict]:
+def _lineas_presupuesto(cliente: dict, ctx, periodo: dict | None = None) -> list[dict]:
     """Expone únicamente las líneas de gasto válidas para reclasificar.
 
     El selector del dashboard se llena desde el presupuesto real del cliente;
@@ -568,15 +568,24 @@ def _lineas_presupuesto(cliente: dict, ctx) -> list[dict]:
     if "tipo" in columnas:
         condicion = " WHERE LOWER(COALESCE(CAST(tipo AS text), 'gasto')) = 'gasto'"
     if {"vigencia_desde", "vigencia_hasta"}.issubset(columnas):
-        fecha_hoy = fecha_local().isoformat()
+        # La línea debe pertenecer al mismo mes que el enlace. Usar ``hoy``
+        # hacía que un dashboard histórico ofreciera conceptos de otro
+        # presupuesto y podía registrar el pago contra una versión incorrecta.
+        fecha_periodo = str((periodo or {}).get("inicio") or fecha_local().isoformat())
         condicion += (
             (" AND " if condicion else " WHERE ")
-            + f"vigencia_desde <= DATE '{fecha_hoy}' "
-            + f"AND (vigencia_hasta IS NULL OR vigencia_hasta >= DATE '{fecha_hoy}')"
+            + f"vigencia_desde <= DATE '{fecha_periodo}' "
+            + f"AND (vigencia_hasta IS NULL OR vigencia_hasta >= DATE '{fecha_periodo}')"
         )
+    pagable = (
+        "CASE WHEN LOWER(TRIM(COALESCE(CAST(pagable AS text), ''))) "
+        "IN ('true', '1', 'si', 'sí', 'yes') THEN TRUE ELSE FALSE END AS pagable"
+        if "pagable" in columnas else "FALSE AS pagable"
+    )
     sql = (
         f"SELECT CAST(linea_id AS text) AS linea_id, CAST(categoria AS text) AS categoria, "
-        f"CAST(concepto AS text) AS concepto FROM {_identificador(presupuesto.tabla_real)}"
+        f"CAST(concepto AS text) AS concepto, {pagable} "
+        f"FROM {_identificador(presupuesto.tabla_real)}"
         + condicion + " ORDER BY categoria, concepto"
     )
     ok, motivo = nl2sql.validar_sql(sql, ctx.tablas_reales)

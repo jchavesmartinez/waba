@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from datetime import date
 
 import config
 import registry
@@ -79,7 +80,34 @@ def _movimiento(cliente: dict, clave: str) -> tuple[dict, object]:
     return filas[0], ctx
 
 
-def _validar_linea(cliente: dict, ctx, linea_id: str) -> dict:
+def _valor_si(valor: object) -> bool:
+    """Interpreta flags de metadata sin obligar a migrar hojas antiguas."""
+    return str(valor or "").strip().casefold() in {"1", "true", "si", "sí", "yes"}
+
+
+def _periodo_token(payload: dict) -> dict:
+    """Normaliza el período firmado para validar pagos manuales."""
+    return {
+        "inicio": str(payload.get("inicio") or ""),
+        "fin_exclusivo": str(payload.get("fin") or payload.get("fin_exclusivo") or ""),
+    }
+
+
+def _fecha_en_periodo(valor: object, periodo: dict) -> str:
+    """Exige que un pago pertenezca al período que el usuario está viendo."""
+    try:
+        fecha = date.fromisoformat(str(valor or "").strip())
+        inicio = date.fromisoformat(str(periodo.get("inicio") or ""))
+        fin = date.fromisoformat(str(periodo.get("fin_exclusivo") or ""))
+    except ValueError as exc:
+        raise ErrorReclasificacion("indique una fecha de pago válida") from exc
+    if not inicio <= fecha < fin:
+        raise ErrorReclasificacion("la fecha de pago debe estar dentro del período de este dashboard")
+    return fecha.isoformat()
+
+
+def _validar_linea(cliente: dict, ctx, linea_id: str,
+                   periodo: dict | None = None) -> dict:
     presupuesto = next((t for t in ctx.permitidas
                         if str(t.tabla_logica).strip().lower() == "presupuesto"), None)
     if not presupuesto:
@@ -90,16 +118,29 @@ def _validar_linea(cliente: dict, ctx, linea_id: str) -> dict:
     tipo = ""
     if "tipo" in columnas:
         tipo = " AND LOWER(COALESCE(CAST(tipo AS text), 'gasto')) = 'gasto'"
+    vigencia = ""
+    if periodo and {"vigencia_desde", "vigencia_hasta"}.issubset(columnas):
+        try:
+            date.fromisoformat(str(periodo.get("inicio") or ""))
+        except ValueError as exc:
+            raise ErrorReclasificacion("el período del dashboard no es válido") from exc
+        vigencia = (
+            " AND vigencia_desde <= CAST(:fecha_periodo AS DATE)"
+            " AND (vigencia_hasta IS NULL OR vigencia_hasta >= CAST(:fecha_periodo AS DATE))"
+        )
+    pagable = "CAST(pagable AS text) AS pagable" if "pagable" in columnas else "'' AS pagable"
     filas = warehouse_ro.leer_interno(
         cliente,
         f"SELECT CAST(linea_id AS text) AS linea_id, CAST(categoria AS text) AS categoria, "
-        f"CAST(concepto AS text) AS concepto FROM {_identificador(presupuesto.tabla_real)} "
-        "WHERE CAST(linea_id AS text) = :linea" + tipo + " LIMIT 1",
-        {"linea": linea_id},
+        f"CAST(concepto AS text) AS concepto, {pagable} FROM {_identificador(presupuesto.tabla_real)} "
+        "WHERE CAST(linea_id AS text) = :linea" + tipo + vigencia + " LIMIT 1",
+        {"linea": linea_id, "fecha_periodo": str((periodo or {}).get("inicio") or "")},
     )
     if not filas:
         raise ErrorReclasificacion("esa línea presupuestaria no es válida")
-    return filas[0]
+    salida = dict(filas[0])
+    salida["pagable"] = _valor_si(salida.get("pagable"))
+    return salida
 
 
 def _modelo_origen(datos: dict, movimiento: dict) -> tuple[str, dict]:
@@ -651,7 +692,7 @@ def _politica_creacion_manual(cliente: dict) -> edicion.PoliticaEdicion:
     return politica
 
 
-def crear_movimiento(token: str, valores: object) -> dict:
+def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None) -> dict:
     """Crea un gasto manual desde el dashboard, en su fuente y no en Neon."""
     _, cliente = dashboard.validar_enlace(token)
     if not isinstance(valores, dict):
@@ -670,7 +711,7 @@ def crear_movimiento(token: str, valores: object) -> dict:
         if not _VALOR_SEGURO.fullmatch(linea):
             raise ErrorReclasificacion("seleccione un concepto presupuestario válido")
         ctx = catalogo.construir_contexto(cliente)
-        destino = _validar_linea(cliente, ctx, linea)
+        destino = _validar_linea(cliente, ctx, linea, periodo)
         entrada[campo_linea.nombre] = destino["linea_id"]
         if "categoria" in politica.campos:
             entrada["categoria"] = destino["categoria"]
@@ -694,3 +735,47 @@ def crear_movimiento(token: str, valores: object) -> dict:
         "categoria": destino.get("categoria", "") if destino else "",
         "concepto": destino.get("concepto", "") if destino else "",
     }
+
+
+def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: object) -> dict:
+    """Registra un pago como movimiento manual ordinario.
+
+    No existe tabla ni estado de pagos: el gasto y el saldo continúan siendo la
+    suma de movimientos asociados a la línea del presupuesto. Esta función solo
+    prepara los valores seguros y delega la escritura al flujo normal de
+    ``crear_movimiento``.
+    """
+    payload, cliente = dashboard.validar_enlace(token)
+    periodo = _periodo_token(payload)
+    fecha = _fecha_en_periodo(fecha_pago, periodo)
+    linea = str(linea_id or "").strip()
+    if not _VALOR_SEGURO.fullmatch(linea):
+        raise ErrorReclasificacion("seleccione un concepto presupuestario válido")
+    ctx = catalogo.construir_contexto(cliente)
+    destino = _validar_linea(cliente, ctx, linea, periodo)
+    if not destino.get("pagable"):
+        raise ErrorReclasificacion("este concepto no está habilitado para registrar pagos")
+
+    politica = _politica_creacion_manual(cliente)
+    campo_linea = next((campo for campo in politica.campos.values()
+                         if campo.generador == "concepto_a_linea_id"), None)
+    campo_fecha = next((campo for campo in politica.campos.values()
+                        if campo.tipo == "fecha_iso"), None)
+    campo_monto = next((campo for campo in politica.campos.values()
+                        if campo.tipo == "monto_positivo"), None)
+    if not campo_linea or not campo_fecha or not campo_monto:
+        raise ErrorReclasificacion("la creación manual no define fecha, monto y concepto")
+
+    valores = {
+        campo_linea.nombre: destino["linea_id"],
+        campo_fecha.nombre: fecha,
+        campo_monto.nombre: monto,
+    }
+    descripcion = next((campo for campo in politica.campos.values()
+                        if campo.nombre.casefold() in {"descripcion", "descripción"}
+                        and not campo.calculado), None)
+    if descripcion:
+        valores[descripcion.nombre] = f"Pago - {destino['concepto']}"
+    # ``crear_movimiento`` conserva todas las validaciones, defaults de moneda,
+    # escritura en Google Sheets, sincronización y reconstrucción existentes.
+    return crear_movimiento(token, valores, periodo=periodo)
