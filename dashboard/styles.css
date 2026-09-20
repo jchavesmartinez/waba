@@ -172,6 +172,12 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: var(--
   footer { display: grid; }
 }
 @media (max-width: 600px) {
+  /* Una acción de pago no puede quedar fuera del viewport por los montos.
+     En móvil conserva título y montos, y coloca el estado/botón en una fila
+     táctil completa debajo. */
+  .nivel-concepto > summary { flex-wrap: wrap; gap: 8px; }
+  .nivel-concepto > summary .nivel-meta { flex-basis: calc(100% - 26px); margin-left: 26px; white-space: normal; }
+  .nivel-concepto > summary .pago-acciones { width: 100%; justify-content: flex-end; padding-left: 26px; }
   .tabla-wrap { max-height: none; overflow: visible; border: 0; }
   table, tbody, tr, td { display: block; }
   thead { display: none; }
