@@ -110,7 +110,7 @@ def test_reclasificar_monto_guarda_override_en_campo_declarado_por_metadata(monk
     ]
 
 
-@pytest.mark.parametrize("monto", ["", "0", "-1", "NaN", "infinito"])
+@pytest.mark.parametrize("monto", ["", "-1", "NaN", "infinito"])
 def test_reclasificar_rechaza_monto_invalido(monkeypatch, monto):
     cliente = {"cliente_id": "cliente_a"}
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
@@ -122,6 +122,33 @@ def test_reclasificar_rechaza_monto_invalido(monkeypatch, monto):
 
     with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="monto no es válido"):
         dashboard_edicion.reclasificar("token", "manual-1", "gas", monto=monto)
+
+
+def test_reclasificar_permite_monto_cero_para_conservar_movimiento(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    guardado = []
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
+    monkeypatch.setattr(
+        dashboard_edicion, "_movimiento",
+        lambda *_: ({
+            "_modelo_id": "movimientos", "fuente": "manual", "clave_origen": "MAN-1",
+            "medio_pago": "Efectivo", "monto": 100, "moneda": "CRC",
+        }, object()),
+    )
+    monkeypatch.setattr(dashboard_edicion, "_validar_linea", lambda *_: {"linea_id": "gas", "categoria": "A", "concepto": "B"})
+    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {
+        "movimientos_canonicos": [{
+            "modelo_id": "movimientos", "fuente": "manual", "medio_pago": "medio_pago", "monto": "monto",
+        }],
+    })
+    monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("raw", {"tabla_origen": "gastos_manuales"}))
+    monkeypatch.setattr(dashboard_edicion, "_actualizar_movimiento_manual", lambda *args: guardado.append(args[5]) or "finanzas")
+    monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *_: 1)
+
+    resultado = dashboard_edicion.reclasificar("token", "manual-1", "gas", monto="0")
+
+    assert guardado == ["0"]
+    assert resultado["monto_original"] == "0"
 
 
 def test_reclasificar_rechaza_identificador_no_seguro(monkeypatch):

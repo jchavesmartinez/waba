@@ -72,8 +72,8 @@ def _decimal_local(valor: object) -> Decimal:
     return Decimal(texto)
 
 
-def normalizar_monto_positivo(valor: object) -> str:
-    """Normaliza un importe monetario editable y exige que sea positivo.
+def normalizar_monto(valor: object, *, permitir_cero: bool = False) -> str:
+    """Normaliza un importe monetario y valida su límite inferior.
 
     La creación manual, los pagos rápidos y la corrección de un movimiento
     deben aceptar exactamente la misma representación local de dinero.  Dejar
@@ -81,9 +81,14 @@ def normalizar_monto_positivo(valor: object) -> str:
     aceptar ``NaN`` en una pantalla y rechazarlo en otra).
     """
     numero = _decimal_local(valor)
-    if not numero.is_finite() or numero <= 0:
-        raise ValueError("debe ser mayor que cero")
+    if not numero.is_finite() or numero < 0 or (numero == 0 and not permitir_cero):
+        raise ValueError("debe ser cero o mayor" if permitir_cero else "debe ser mayor que cero")
     return str(numero)
+
+
+def normalizar_monto_positivo(valor: object) -> str:
+    """Compatibilidad explícita para formularios que crean gastos nuevos."""
+    return normalizar_monto(valor)
 
 
 @dataclass(frozen=True)

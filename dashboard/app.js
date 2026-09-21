@@ -202,7 +202,7 @@
     const amountCurrency = String(movement.moneda_original || movement.moneda || "CRC").trim().toUpperCase() || "CRC";
     amountLabel.textContent = `Monto (${amountCurrency})`;
     const amount = document.createElement("input"); amount.type = "number"; amount.name = "monto";
-    amount.min = "0.01"; amount.step = "0.01"; amount.inputMode = "decimal"; amount.required = true;
+    amount.min = "0"; amount.step = "0.01"; amount.inputMode = "decimal"; amount.required = true;
     amount.value = String(movement.monto_original ?? movement.monto ?? "");
     amountLabel.append(amount);
     const scopeFieldset = document.createElement("fieldset"); scopeFieldset.className = "editor-alcance";

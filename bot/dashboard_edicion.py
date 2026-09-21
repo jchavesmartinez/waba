@@ -317,7 +317,9 @@ def _campo_monto(datos: dict, movimiento: dict) -> str:
 
 def _monto_editable(valor: object) -> str:
     try:
-        return edicion.normalizar_monto_positivo(valor)
+        # Corregir a cero conserva el movimiento y su auditoría, pero lo
+        # excluye del gasto. Es útil cuando un tercero reembolsa una compra.
+        return edicion.normalizar_monto(valor, permitir_cero=True)
     except (ArithmeticError, ValueError) as exc:
         raise ErrorReclasificacion(f"el monto no es válido: {exc}") from exc
 
