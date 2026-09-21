@@ -198,6 +198,13 @@
       .filter((method) => method && method !== "Sin método de pago"))].sort((a, b) => a.localeCompare(b, "es"));
     methods.forEach((method) => { const option = document.createElement("option"); option.value = method; paymentList.append(option); });
     payment.setAttribute("list", paymentListId); paymentLabel.append(payment, paymentList);
+    const amountLabel = document.createElement("label");
+    const amountCurrency = String(movement.moneda_original || movement.moneda || "CRC").trim().toUpperCase() || "CRC";
+    amountLabel.textContent = `Monto (${amountCurrency})`;
+    const amount = document.createElement("input"); amount.type = "number"; amount.name = "monto";
+    amount.min = "0.01"; amount.step = "0.01"; amount.inputMode = "decimal"; amount.required = true;
+    amount.value = String(movement.monto_original ?? movement.monto ?? "");
+    amountLabel.append(amount);
     const scopeFieldset = document.createElement("fieldset"); scopeFieldset.className = "editor-alcance";
     const scopeLegend = document.createElement("legend"); scopeLegend.textContent = "Alcance de la reclasificación";
     const scopeOptions = document.createElement("div"); scopeOptions.className = "editor-alcance-opciones";
@@ -212,13 +219,13 @@
     scopeOptions.append(scopeIndividual, scopeGroup);
     scopeFieldset.append(scopeLegend, scopeOptions);
     const note = document.createElement("p"); note.className = "editor-nota";
-    note.textContent = "Solo este gasto usa un override. La regla usa el comercio exacto y clasifica sus movimientos pasados y futuros en el concepto elegido.";
+    note.textContent = "El monto y el método de pago solo cambian este gasto. La regla usa el comercio exacto y clasifica sus movimientos pasados y futuros en el concepto elegido.";
     const actions = document.createElement("div"); actions.className = "editor-acciones";
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
     cancel.addEventListener("click", () => dialog.close());
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar cambios";
     const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
-    actions.append(cancel, save); form.append(title, detail, label, paymentLabel, scopeFieldset, note, error, actions); dialog.append(form);
+    actions.append(cancel, save); form.append(title, detail, label, paymentLabel, amountLabel, scopeFieldset, note, error, actions); dialog.append(form);
     form.addEventListener("submit", async (event) => {
       event.preventDefault(); save.disabled = true; cancel.disabled = true; error.hidden = true;
       try {
@@ -229,6 +236,7 @@
             linea_id: select.value,
             medio_pago: payment.value,
             alcance: groupRadio.checked ? "regla" : "individual",
+            monto: amount.value,
           }),
         });
         const result = await response.json();
@@ -237,6 +245,8 @@
         movement.categoria = result.categoria;
         movement.concepto = result.concepto;
         movement.medio_pago = result.medio_pago;
+        movement.monto_original = result.monto_original;
+        movement.moneda_original = result.moneda_original;
         dialog.close();
         renderVista();
         mostrarAviso(result.alcance === "regla"

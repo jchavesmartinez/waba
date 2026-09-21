@@ -377,6 +377,14 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
             else:
                 extras.append(f"NULL::text AS {alias}")
         extras_sql = ", ".join(extras)
+        monto_original = (
+            "m.monto_original" if "monto_original" in ccols
+            else f"m.{_identificador(monto_canonico)}"
+        )
+        moneda_original = (
+            "m.moneda_original" if "moneda_original" in ccols
+            else "m.moneda"
+        )
         # No filtramos por etiquetas de tipo: entre conectores la misma compra
         # puede llamarse COMPRA, GASTO o CARGO. La canónica normaliza el signo
         # en monto_neto y la línea presupuestaria ya limita este árbol a líneas
@@ -385,7 +393,8 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
             "SELECT CAST(m.linea_presupuesto_id AS text) AS linea_id, "
             "m.fecha AS fecha, m.descripcion AS descripcion, "
             "UPPER(COALESCE(NULLIF(CAST(m.moneda AS text),''),'CRC')) AS moneda, "
-            f"m.{_identificador(monto_canonico)} AS monto, {medio_pago} AS medio_pago, {extras_sql} "
+            f"m.{_identificador(monto_canonico)} AS monto, {medio_pago} AS medio_pago, "
+            f"{monto_original} AS monto_original, {moneda_original} AS moneda_original, {extras_sql} "
             f"FROM {tabla} m WHERE m.fecha >= DATE '{inicio}' "
             f"AND m.fecha < DATE '{fin}' AND m.linea_presupuesto_id IS NOT NULL"
         )
@@ -438,7 +447,7 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
     # Las columnas técnicas existen únicamente cuando usamos el contrato
     # canónico; el fallback histórico conserva su forma de siete columnas.
     extras_final = (
-        ", m.movimiento_clave, m.fuente, m.clave_origen, m.modelo_canonico"
+        ", m.monto_original, m.moneda_original, m.movimiento_clave, m.fuente, m.clave_origen, m.modelo_canonico"
         if usa_canonicos else ""
     )
     ptabla = _identificador(presupuesto.tabla_real)

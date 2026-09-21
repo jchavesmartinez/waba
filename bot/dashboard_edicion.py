@@ -61,6 +61,16 @@ def _movimiento(cliente: dict, clave: str) -> tuple[dict, object]:
     columna_medio_pago = (
         "medio_pago" if "medio_pago" in columnas else "NULL::text AS medio_pago"
     )
+    columna_monto = "monto" if "monto" in columnas else "NULL::numeric"
+    columna_moneda = "moneda" if "moneda" in columnas else "NULL::text"
+    columna_monto_original = (
+        "monto_original" if "monto_original" in columnas
+        else f"{columna_monto}"
+    )
+    columna_moneda_original = (
+        "moneda_original" if "moneda_original" in columnas
+        else f"{columna_moneda}"
+    )
     extras = []
     for columna in ("descripcion", "concepto", "categoria"):
         if columna in columnas:
@@ -71,7 +81,9 @@ def _movimiento(cliente: dict, clave: str) -> tuple[dict, object]:
     filas = warehouse_ro.leer_interno(
         cliente,
         f"SELECT \"_clave\", \"_modelo_id\", fuente, clave_origen, linea_presupuesto_id, "
-        f"{columna_medio_pago}{extras_sql} "
+        f"{columna_medio_pago}, {columna_monto} AS monto, {columna_moneda} AS moneda, "
+        f"{columna_monto_original} AS monto_original, {columna_moneda_original} AS moneda_original"
+        f"{extras_sql} "
         f"FROM {_identificador(tabla.tabla_real)} WHERE \"_clave\" = :clave LIMIT 1",
         {"clave": clave},
     )
@@ -170,7 +182,8 @@ def _modelo_origen(datos: dict, movimiento: dict) -> tuple[str, dict]:
 
 
 def _actualizar_movimiento_manual(cliente: dict, cfg: dict, clave: str,
-                                  linea_id: str, medio_pago: str) -> str:
+                                  linea_id: str, medio_pago: str,
+                                  monto: str | None = None) -> str:
     """Actualiza un gasto manual en su hoja fuente, nunca en Neon.
 
     La pestaña y sus columnas se resuelven desde `_movimientos_canonicos` y la
@@ -194,7 +207,10 @@ def _actualizar_movimiento_manual(cliente: dict, cfg: dict, clave: str,
     encabezados = [str(v).strip() for v in hoja.row_values(1)]
     columna_linea = str(cfg.get("linea_presupuesto_id", "linea_presupuesto_id")).strip()
     columna_medio_pago = str(cfg.get("medio_pago", "medio_pago")).strip()
+    columna_monto = str(cfg.get("monto", "monto")).strip()
     requeridas = {clave_columna, columna_linea, columna_medio_pago}
+    if monto is not None:
+        requeridas.add(columna_monto)
     if not clave_columna or not requeridas.issubset(encabezados):
         raise ErrorReclasificacion("la hoja manual no tiene las columnas requeridas")
     indice_clave = encabezados.index(clave_columna)
@@ -202,6 +218,8 @@ def _actualizar_movimiento_manual(cliente: dict, cfg: dict, clave: str,
         if len(fila) > indice_clave and str(fila[indice_clave]).strip() == clave:
             hoja.update_cell(numero, encabezados.index(columna_linea) + 1, linea_id)
             hoja.update_cell(numero, encabezados.index(columna_medio_pago) + 1, medio_pago)
+            if monto is not None:
+                hoja.update_cell(numero, encabezados.index(columna_monto) + 1, monto)
             return str(fuente.get("fuente_id", "")).strip()
     raise ErrorReclasificacion("no encontré el registro manual que desea reclasificar")
 
@@ -278,6 +296,30 @@ def _campo_medio_pago(datos: dict, movimiento: dict) -> str:
     if not _VALOR_SEGURO.fullmatch(campo):
         raise ErrorReclasificacion("el campo de método de pago configurado no es válido")
     return campo
+
+
+def _campo_monto(datos: dict, movimiento: dict) -> str:
+    """Devuelve el campo origen de importe declarado por la metadata.
+
+    El dashboard muestra el contrato canónico, pero un override debe modificar
+    el campo de la fuente que ``_movimientos_canonicos`` proyecta como monto.
+    Así la corrección sigue vigente al reconstruir y no depende de nombres de
+    columnas de un banco o cliente específico.
+    """
+    cfg = _fuente_canonica(datos, movimiento)
+    campo = str(cfg.get("monto", "")).strip()
+    if not campo:
+        raise ErrorReclasificacion("este origen no tiene un monto editable configurado")
+    if not _VALOR_SEGURO.fullmatch(campo):
+        raise ErrorReclasificacion("el campo de monto configurado no es válido")
+    return campo
+
+
+def _monto_editable(valor: object) -> str:
+    try:
+        return edicion.normalizar_monto_positivo(valor)
+    except (ArithmeticError, ValueError) as exc:
+        raise ErrorReclasificacion(f"el monto no es válido: {exc}") from exc
 
 
 def _fuente_canonica(datos: dict, movimiento: dict) -> dict:
@@ -613,6 +655,7 @@ def estado_reconstruccion(token: str, movimiento_clave: object) -> dict:
 
 def reclasificar(token: str, movimiento_clave: object, linea_id: object,
                  medio_pago: object = None, alcance: object = "individual",
+                 monto: object = None,
                  ) -> dict:
     """Aplica un override puntual o una regla general de metadata."""
     _, cliente = dashboard.validar_enlace(token)
@@ -631,9 +674,11 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
     medio = _validar_medio_pago(
         movimiento.get("medio_pago") if medio_pago is None else medio_pago
     )
+    monto_normalizado = _monto_editable(monto) if monto is not None else None
     datos = metadata.leer(cliente)
     capa, origen = _modelo_origen(datos, movimiento)
     columna_medio_pago = _campo_medio_pago(datos, movimiento)
+    columna_monto = _campo_monto(datos, movimiento) if monto_normalizado is not None else ""
     clave_origen = str(movimiento.get("clave_origen", "")).strip()
     if not _VALOR_SEGURO.fullmatch(clave_origen):
         raise ErrorReclasificacion("el movimiento no tiene una identidad estable para corregirse")
@@ -646,7 +691,8 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
         regla = _regla_por_comercio(cliente, datos, movimiento, origen)
     fuente_id = ""
     if capa == "semantic":
-        if alcance == "individual":
+        if (alcance == "individual"
+                and linea != str(movimiento.get("linea_presupuesto_id") or "").strip()):
             _guardar_override(
                 cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
                 "linea_presupuesto_id", linea,
@@ -658,8 +704,16 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
                 columna_medio_pago, medio,
                 "Método de pago actualizado desde dashboard",
             )
+        if monto_normalizado is not None:
+            _guardar_override(
+                cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
+                columna_monto, monto_normalizado,
+                "Monto actualizado desde dashboard",
+            )
     else:
-        fuente_id = _actualizar_movimiento_manual(cliente, origen, clave_origen, linea, medio)
+        fuente_id = _actualizar_movimiento_manual(
+            cliente, origen, clave_origen, linea, medio, monto_normalizado,
+        )
     if regla:
         modelo_regla, campo_regla, comercio = regla
         _guardar_regla_clasificacion(
@@ -677,6 +731,11 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
         "estado": "pendiente",
         "version": version,
     }
+    if monto_normalizado is not None:
+        resultado["monto_original"] = monto_normalizado
+        resultado["moneda_original"] = str(
+            movimiento.get("moneda_original") or movimiento.get("moneda") or ""
+        ).upper()
     if alcance == "regla":
         resultado["alcance"] = alcance
         resultado["comercio"] = regla[2]

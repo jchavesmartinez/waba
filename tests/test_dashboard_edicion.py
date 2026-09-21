@@ -72,6 +72,58 @@ def test_reclasificar_guarda_override_y_encola_materializacion(monkeypatch):
     assert guardado["cola"] == ("bac:movimiento-1", "")
 
 
+def test_reclasificar_monto_guarda_override_en_campo_declarado_por_metadata(monkeypatch):
+    """Un importe bancario se corrige en la fuente semántica, no en Neon."""
+    cliente = {"cliente_id": "cliente_a", "catalogo_spreadsheet_id": "sheet"}
+    overrides = []
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
+    monkeypatch.setattr(
+        dashboard_edicion, "_movimiento",
+        lambda *_: ({
+            "_modelo_id": "movimientos", "fuente": "banco", "clave_origen": "correo-1",
+            "medio_pago": "Tarjeta", "monto": 100, "monto_original": 100,
+            "moneda": "CRC", "moneda_original": "CRC", "linea_presupuesto_id": "gas_comedera",
+        }, object()),
+    )
+    monkeypatch.setattr(
+        dashboard_edicion, "_validar_linea",
+        lambda *_: {"linea_id": "gas_comedera", "categoria": "Alimentacion", "concepto": "Comedera"},
+    )
+    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {
+        "modelos": [], "movimientos_canonicos": [{
+            "modelo_id": "movimientos", "fuente": "banco", "medio_pago": "tarjeta",
+            "monto": "importe_capturado",
+        }],
+    })
+    monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("semantic", {"modelo_id": "transacciones"}))
+    monkeypatch.setattr(dashboard_edicion, "_guardar_override", lambda *args: overrides.append(args[1:]))
+    monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *_: 5)
+
+    resultado = dashboard_edicion.reclasificar(
+        "token", "banco:1", "gas_comedera", monto="1,250.50",
+    )
+
+    assert resultado["monto_original"] == "1250.50"
+    assert resultado["moneda_original"] == "CRC"
+    assert overrides == [
+        ("transacciones", "correo-1", "importe_capturado", "1250.50", "Monto actualizado desde dashboard"),
+    ]
+
+
+@pytest.mark.parametrize("monto", ["", "0", "-1", "NaN", "infinito"])
+def test_reclasificar_rechaza_monto_invalido(monkeypatch, monto):
+    cliente = {"cliente_id": "cliente_a"}
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
+    monkeypatch.setattr(
+        dashboard_edicion, "_movimiento",
+        lambda *_: ({"_modelo_id": "movimientos", "fuente": "manual", "clave_origen": "MAN-1", "medio_pago": "Efectivo"}, object()),
+    )
+    monkeypatch.setattr(dashboard_edicion, "_validar_linea", lambda *_: {"linea_id": "gas", "categoria": "A", "concepto": "B"})
+
+    with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="monto no es válido"):
+        dashboard_edicion.reclasificar("token", "manual-1", "gas", monto=monto)
+
+
 def test_reclasificar_rechaza_identificador_no_seguro(monkeypatch):
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, {"cliente_id": "cliente_a"}))
     with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="no es válida"):
@@ -119,6 +171,36 @@ def test_reclasificar_manual_actualiza_origen_y_encola_sincronizacion(monkeypatc
     assert llamadas == [
         ("origen", "MAN-1", "gas_comedera", "Efectivo"), ("cola", "manual-1", "googledrive_db"),
     ]
+
+
+def test_reclasificar_manual_actualiza_monto_en_misma_fila(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    llamadas = []
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
+    monkeypatch.setattr(
+        dashboard_edicion, "_movimiento",
+        lambda *_: ({
+            "_modelo_id": "movimientos", "fuente": "manual", "clave_origen": "MAN-1",
+            "medio_pago": "Efectivo", "monto": 100, "moneda": "CRC",
+        }, object()),
+    )
+    monkeypatch.setattr(dashboard_edicion, "_validar_linea", lambda *_: {"linea_id": "gas", "categoria": "A", "concepto": "B"})
+    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {
+        "movimientos_canonicos": [{
+            "modelo_id": "movimientos", "fuente": "manual", "medio_pago": "medio_pago", "monto": "monto",
+        }],
+    })
+    monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("raw", {"tabla_origen": "gastos_manuales"}))
+    monkeypatch.setattr(
+        dashboard_edicion, "_actualizar_movimiento_manual",
+        lambda *args: llamadas.append((args[2], args[3], args[4], args[5])) or "finanzas",
+    )
+    monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *args: llamadas.append(("cola", args[1], args[2])) or 2)
+
+    resultado = dashboard_edicion.reclasificar("token", "manual-1", "gas", monto="2500")
+
+    assert llamadas == [("MAN-1", "gas", "Efectivo", "2500"), ("cola", "manual-1", "finanzas")]
+    assert resultado["monto_original"] == "2500"
 
 
 def test_reclasificar_regla_guarda_metadata_por_comercio(monkeypatch):

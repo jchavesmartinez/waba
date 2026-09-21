@@ -72,6 +72,20 @@ def _decimal_local(valor: object) -> Decimal:
     return Decimal(texto)
 
 
+def normalizar_monto_positivo(valor: object) -> str:
+    """Normaliza un importe monetario editable y exige que sea positivo.
+
+    La creación manual, los pagos rápidos y la corrección de un movimiento
+    deben aceptar exactamente la misma representación local de dinero.  Dejar
+    este chequeo en cada interfaz llevaba a diferencias sutiles (por ejemplo,
+    aceptar ``NaN`` en una pantalla y rechazarlo en otra).
+    """
+    numero = _decimal_local(valor)
+    if not numero.is_finite() or numero <= 0:
+        raise ValueError("debe ser mayor que cero")
+    return str(numero)
+
+
 @dataclass(frozen=True)
 class CampoEdicion:
     nombre: str
@@ -186,10 +200,7 @@ def validar_borrador(politica: PoliticaEdicion, accion: str,
             if campo.tipo == "fecha_iso":
                 valor = _normalizar_fecha(valor)
             elif campo.tipo == "monto_positivo":
-                numero = _decimal_local(valor)
-                if numero <= 0:
-                    raise ValueError("debe ser mayor que cero")
-                valor = str(numero)
+                valor = normalizar_monto_positivo(valor)
             elif campo.tipo == "moneda_iso":
                 valor = str(valor).strip().upper()
                 if not re.fullmatch(r"[A-Z]{3}", valor):

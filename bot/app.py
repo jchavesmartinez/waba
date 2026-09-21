@@ -534,6 +534,7 @@ async def reclasificar_movimiento_dashboard(token: str, request: Request,
         resultado = dashboard_edicion.reclasificar(
             token, datos.get("movimiento_clave"), datos.get("linea_id"),
             datos.get("medio_pago"), datos.get("alcance", "individual"),
+            datos.get("monto"),
         )
         # La escritura fuente ya fue confirmada. La sincronización pesada va
         # después de responder para que el navegador pueda actualizar su vista

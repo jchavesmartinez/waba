@@ -162,6 +162,35 @@ def test_endpoint_pago_delega_en_movimiento_manual_normal(monkeypatch):
     }
 
 
+def test_endpoint_editar_movimiento_pasa_monto_al_mismo_flujo(monkeypatch):
+    recibido = {}
+    monkeypatch.setattr(
+        app_mod.dashboard_edicion, "reclasificar",
+        lambda token, clave, linea, medio, alcance, monto: recibido.update(
+            token=token, clave=clave, linea=linea, medio=medio, alcance=alcance, monto=monto,
+        ) or {"ok": True, "estado": "pendiente", "version": 1},
+    )
+    monkeypatch.setattr(
+        app_mod.dashboard, "validar_enlace",
+        lambda _token: ({"cid": "cliente_a"}, {"cliente_id": "cliente_a"}),
+    )
+    monkeypatch.setattr(app_mod.dashboard_edicion, "procesar_reconstrucciones_cliente", lambda *_: None)
+
+    respuesta = TestClient(app_mod.app).post(
+        "/dashboard/token/movimientos/reclasificar",
+        json={
+            "movimiento_clave": "bac:1", "linea_id": "gas_comedera",
+            "medio_pago": "VISA 1234", "alcance": "individual", "monto": "23000",
+        },
+    )
+
+    assert respuesta.status_code == 200
+    assert recibido == {
+        "token": "token", "clave": "bac:1", "linea": "gas_comedera",
+        "medio": "VISA 1234", "alcance": "individual", "monto": "23000",
+    }
+
+
 def test_formulario_manual_solo_expone_campos_habilitados_por_metadata():
     manuales = catalogo.TablaPermitida(
         tabla_logica="gastos_manuales", tabla_real="gastos_manuales", fuente_id="finanzas",
