@@ -344,3 +344,29 @@ services:
         value: "no"
       - key: GRAPH_API_VERSION
         value: v21.0
+
+  # Materializa la cola durable de ediciones. El web confirma de inmediato la
+  # intención y responde; este worker agrupa varios cambios, sincroniza una
+  # vez y reconstruye una vez. Render entrega SIGTERM y el proceso deja de
+  # tomar trabajos nuevos sin perder los que permanecen en Neon.
+  - type: worker
+    name: fachavi-dashboard-worker
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements-bot.txt
+    startCommand: python -m bot.trabajador_dashboard
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: MASTER_SPREADSHEET_ID
+        sync: false
+      - key: WAREHOUSE_TIPO
+        value: postgres
+      - key: WAREHOUSE_DSN
+        sync: false
+      - key: DASHBOARD_EDICION_DEBOUNCE_SEGUNDOS
+        value: "3"
+      - key: DASHBOARD_EDICION_WORKER_SEGUNDOS
+        value: "3"
