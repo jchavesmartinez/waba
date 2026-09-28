@@ -391,7 +391,7 @@ def test_reclasificar_rechaza_medio_pago_vacio(monkeypatch):
         dashboard_edicion.reclasificar("token", "manual-1", "gas", "")
 
 
-def test_procesar_reconstrucciones_solo_invalida_version_vigente(monkeypatch):
+def test_procesar_reconstrucciones_agrupa_lote_e_invalida_version_vigente(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     trabajos = iter([
         {"movimiento_clave": "manual-1", "version": 3, "fuente_id": "googledrive_db"},
@@ -400,7 +400,7 @@ def test_procesar_reconstrucciones_solo_invalida_version_vigente(monkeypatch):
     ])
     llamadas = []
     monkeypatch.setattr(dashboard_edicion, "_tomar_reconstruccion", lambda _: next(trabajos))
-    monkeypatch.setattr(dashboard_edicion, "_sincronizar_fuente_manual", lambda _c, fuente, _: llamadas.append(("sync", fuente)))
+    monkeypatch.setattr(dashboard_edicion, "_sincronizar_fuentes_manuales", lambda _c, fuentes: llamadas.append(("sync", fuentes)))
     monkeypatch.setattr(dashboard_edicion, "_reconstruir", lambda _: llamadas.append(("reconstruir",)))
     # La primera terminó después de una edición más nueva y no puede invalidar
     # el snapshot; la segunda sí corresponde a la última versión.
@@ -408,13 +408,13 @@ def test_procesar_reconstrucciones_solo_invalida_version_vigente(monkeypatch):
     monkeypatch.setattr(dashboard_edicion, "_terminar_reconstruccion", lambda *_: next(vigentes))
     monkeypatch.setattr(dashboard_edicion.dashboard, "invalidar_cache", lambda cid: llamadas.append(("cache", cid)))
 
-    assert dashboard_edicion.procesar_reconstrucciones(cliente) == 2
+    assert dashboard_edicion.procesar_reconstrucciones(cliente, agrupar=False) == 2
     assert llamadas == [
-        ("sync", "googledrive_db"), ("reconstruir",), ("reconstruir",), ("cache", "cliente_a"),
+        ("sync", {"googledrive_db"}), ("reconstruir",), ("cache", "cliente_a"),
     ]
 
 
-def test_crear_manual_guarda_en_origen_reconstruye_e_impone_linea(monkeypatch):
+def test_crear_manual_guarda_en_origen_encola_e_impone_linea(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     llamadas, recibido = [], {}
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
@@ -428,21 +428,41 @@ def test_crear_manual_guarda_en_origen_reconstruye_e_impone_linea(monkeypatch):
         dashboard_edicion.escritura_google_sheets, "aplicar_confirmado",
         lambda _cliente, _politica, accion, valores: recibido.update(accion=accion, valores=valores) or {"clave": "MAN-1"},
     )
-    monkeypatch.setattr(dashboard_edicion, "_sincronizar_fuente_manual", lambda *_: llamadas.append("sync"))
-    monkeypatch.setattr(dashboard_edicion, "_reconstruir", lambda *_: llamadas.append("reconstruir"))
-    monkeypatch.setattr(dashboard_edicion.dashboard, "invalidar_cache", lambda *_: llamadas.append("cache"))
+    monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *args: llamadas.append(args[1:]) or 4)
 
     resultado = dashboard_edicion.crear_movimiento("token", {
         "fecha": "2026-09-05", "descripcion": "Compra manual", "monto": "25.5",
         "moneda": "usd", "linea_presupuesto_id": "gas_comedera", "categoria": "Otra",
     })
 
-    assert resultado == {"ok": True, "movimiento_id": "MAN-1", "categoria": "Alimentacion", "concepto": "Comedera"}
+    assert resultado["ok"] is True
+    assert resultado["movimiento_id"] == "MAN-1"
+    assert resultado["estado"] == "pendiente"
+    assert resultado["movimiento_clave"] == "manual:MAN-1"
+    assert resultado["movimiento"]["monto"] == "25.5"
+    assert resultado["movimiento"]["moneda"] == "USD"
     assert recibido["accion"] == "crear"
     assert recibido["valores"]["linea_presupuesto_id"] == "gas_comedera"
     assert recibido["valores"]["categoria"] == "Alimentacion"
     assert recibido["valores"]["moneda"] == "USD"
-    assert llamadas == ["sync", "reconstruir", "cache"]
+    assert llamadas == [("manual:MAN-1", "finanzas")]
+
+
+def test_lote_verifica_todas_las_fuentes_con_una_sincronizacion(monkeypatch):
+    capturado = {}
+    monkeypatch.setattr(
+        dashboard_edicion.sync, "sincronizar_todo",
+        lambda **kwargs: capturado.update(kwargs) or {"fuentes": [
+            {"fuente_id": "manuales", "estado": "ok"},
+            {"fuente_id": "tarjetas", "estado": "ok"},
+        ]},
+    )
+
+    dashboard_edicion._sincronizar_fuentes_manuales(
+        {"cliente_id": "cliente_a"}, {"manuales", "tarjetas"},
+    )
+
+    assert capturado == {"cliente_filtro": "cliente_a", "forzar": True}
 
 
 def test_registrar_pago_reutiliza_creacion_manual_con_linea_fecha_y_monto(monkeypatch):

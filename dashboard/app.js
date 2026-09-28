@@ -84,6 +84,30 @@
       }
     }, 1500);
   };
+  const aplicarMovimientoPendiente = (movimiento) => {
+    if (!movimiento || !movimiento.linea_id || !Number.isFinite(number(movimiento.monto))) return;
+    // La proyección local es sólo UX: la fuente de verdad ya se confirmó en
+    // Sheets y la cola durable la materializa en Neon. Así el usuario no
+    // espera la reconstrucción para ver su gasto.
+    data.movimientos = Array.isArray(data.movimientos) ? data.movimientos : [];
+    data.movimientos.push(movimiento);
+    const monto = number(movimiento.monto);
+    (data.kpis || []).forEach((kpi) => {
+      if (!Array.isArray(kpi.columnas) || !Array.isArray(kpi.filas)) return;
+      kpi.filas.forEach((fila) => {
+        const row = rowObject(kpi, fila);
+        const lineaKey = keyMatch(row, /^linea_id$|linea_presupuesto_id/i);
+        const categoriaKey = keyMatch(row, /^categoria$|categoría/i);
+        const coincide = (lineaKey && String(row[lineaKey]) === String(movimiento.linea_id)) ||
+          (!lineaKey && categoriaKey && normalized(row[categoriaKey]) === normalized(movimiento.categoria));
+        if (!coincide) return;
+        const spentKey = metricKeys(row).spent;
+        const indice = spentKey ? kpi.columnas.indexOf(spentKey) : -1;
+        if (indice >= 0) fila[indice] = (number(fila[indice]) || 0) + monto;
+      });
+    });
+    renderVista();
+  };
   const iniciarChat = () => {
     const mensajes = byId("chat-mensajes");
     const formulario = byId("chat-formulario");
@@ -331,8 +355,9 @@
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el movimiento.");
-        dialog.close(); mostrarAviso("Movimiento guardado. Actualizando dashboard…");
-        window.setTimeout(() => window.location.reload(), 1200);
+        dialog.close(); aplicarMovimientoPendiente(result.movimiento);
+        mostrarAviso("Movimiento guardado. Sincronizando en segundo plano…");
+        vigilarSincronizacion(result.movimiento_clave);
       } catch (reason) {
         error.textContent = reason.message || "No pude guardar el movimiento.";
         error.hidden = false; save.disabled = false; cancel.disabled = false;
@@ -408,8 +433,9 @@
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el pago.");
-        dialog.close(); mostrarAviso("Pago guardado. Actualizando dashboard…");
-        window.setTimeout(() => window.location.reload(), 1200);
+        dialog.close(); aplicarMovimientoPendiente(result.movimiento);
+        mostrarAviso("Pago guardado. Sincronizando en segundo plano…");
+        vigilarSincronizacion(result.movimiento_clave);
       } catch (reason) {
         error.textContent = reason.message || "No pude guardar el pago.";
         error.hidden = false; save.disabled = false; cancel.disabled = false;

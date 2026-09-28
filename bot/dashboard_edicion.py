@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
@@ -610,8 +611,49 @@ def _fallar_reconstruccion(cliente: dict, trabajo: dict, error: Exception) -> No
         destino.cerrar()
 
 
-def procesar_reconstrucciones(cliente: dict, maximo: int = 20) -> int:
-    """Materializa trabajos durables; es seguro invocarlo varias veces."""
+def _sincronizar_fuentes_manuales(cliente: dict, fuentes: set[str]) -> None:
+    """Sincroniza una vez y verifica todas las fuentes afectadas del lote."""
+    fuentes = {str(f).strip() for f in fuentes if str(f).strip()}
+    if not fuentes:
+        return
+    try:
+        resultado = sync.sincronizar_todo(cliente_filtro=cliente["cliente_id"], forzar=True)
+    except Exception as exc:
+        raise ErrorReclasificacion(
+            "guardé el cambio, pero no pude sincronizarlo todavía"
+        ) from exc
+    estados = {
+        str(fila.get("fuente_id", "")): fila
+        for fila in resultado.get("fuentes", [])
+    }
+    fallidas = [fuente for fuente in fuentes
+                if (fuente not in estados or
+                    str(estados[fuente].get("estado", "")).startswith("error") or
+                    str(estados[fuente].get("estado", "")) == "ok_con_bloqueo")]
+    if fallidas:
+        raise ErrorReclasificacion(
+            "guardé el cambio, pero no pude sincronizarlo todavía"
+        )
+
+
+def _tomar_lote_reconstruccion(cliente: dict, maximo: int) -> list[dict]:
+    trabajos: list[dict] = []
+    while len(trabajos) < maximo:
+        trabajo = _tomar_reconstruccion(cliente)
+        if not trabajo:
+            break
+        trabajos.append(trabajo)
+    return trabajos
+
+
+def procesar_reconstrucciones(cliente: dict, maximo: int = 20,
+                              *, agrupar: bool = True) -> int:
+    """Materializa un lote durable con una sola sincronización y reconstrucción.
+
+    Cada cambio conserva su propia versión (última escritura gana), pero los
+    cambios consecutivos del mismo cliente comparten el trabajo costoso de
+    sincronizar las fuentes y reconstruir la canónica.
+    """
     cliente_id = str(cliente.get("cliente_id", ""))
     with _LOCKS_PROCESAMIENTO_GUARDIA:
         candado = _LOCKS_PROCESAMIENTO.setdefault(cliente_id, threading.Lock())
@@ -620,24 +662,32 @@ def procesar_reconstrucciones(cliente: dict, maximo: int = 20) -> int:
     # al terminar su versión actual, conservando el orden de versiones.
     if not candado.acquire(blocking=False):
         return 0
-    procesadas = 0
     try:
-        while procesadas < maximo:
-            trabajo = _tomar_reconstruccion(cliente)
-            if not trabajo:
-                return procesadas
-            try:
-                if str(trabajo.get("fuente_id", "")).strip():
-                    _sincronizar_fuente_manual(cliente, str(trabajo["fuente_id"]), "el movimiento")
-                _reconstruir(cliente)
-            except Exception as exc:  # el cambio ya quedó guardado; el estado queda visible y reintentable
-                logger.exception("[%s] no se pudo materializar edición %s", cliente.get("cliente_id"), trabajo.get("movimiento_clave"))
+        # El endpoint ya respondió: esperar unos segundos aquí no bloquea al
+        # usuario y reduce drásticamente llamadas a Sheets/Neon cuando edita
+        # varios movimientos seguidos.
+        if agrupar and config.DASHBOARD_EDICION_DEBOUNCE_SEGUNDOS:
+            time.sleep(config.DASHBOARD_EDICION_DEBOUNCE_SEGUNDOS)
+        trabajos = _tomar_lote_reconstruccion(cliente, maximo)
+        if not trabajos:
+            return 0
+        try:
+            fuentes = {str(t.get("fuente_id", "")).strip() for t in trabajos
+                       if str(t.get("fuente_id", "")).strip()}
+            _sincronizar_fuentes_manuales(cliente, fuentes)
+            _reconstruir(cliente)
+        except Exception as exc:  # los cambios siguen durables y reintentables
+            logger.exception("[%s] no se pudo materializar lote de %s ediciones", cliente.get("cliente_id"), len(trabajos))
+            for trabajo in trabajos:
                 _fallar_reconstruccion(cliente, trabajo, exc)
-                return procesadas
+            return 0
+        actualizo_cache = False
+        for trabajo in trabajos:
             if _terminar_reconstruccion(cliente, trabajo):
-                dashboard.invalidar_cache(cliente_id)
-            procesadas += 1
-        return procesadas
+                actualizo_cache = True
+        if actualizo_cache:
+            dashboard.invalidar_cache(cliente_id)
+        return len(trabajos)
     finally:
         candado.release()
 
@@ -657,7 +707,7 @@ def recuperar_reconstrucciones_pendientes() -> None:
         return
     for cliente in clientes:
         try:
-            procesar_reconstrucciones(cliente)
+            procesar_reconstrucciones(cliente, agrupar=False)
         except Exception:  # un cliente no debe bloquear la recuperación de los demás
             logger.exception("[%s] no se pudo recuperar ediciones pendientes", cliente.get("cliente_id"))
 
@@ -785,7 +835,11 @@ def _politica_creacion_manual(cliente: dict) -> edicion.PoliticaEdicion:
 
 
 def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None) -> dict:
-    """Crea un gasto manual desde el dashboard, en su fuente y no en Neon."""
+    """Crea un gasto manual y difiere sólo la materialización pesada.
+
+    La fila se confirma primero en su Google Sheet normal; nunca se usa un
+    segundo registro de pagos. El sync/rebuild va a la cola durable de Neon.
+    """
     _, cliente = dashboard.validar_enlace(token)
     if not isinstance(valores, dict):
         raise ErrorReclasificacion("la solicitud de creación no es válida")
@@ -818,14 +872,45 @@ def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None
             cliente, politica, "crear", borrador.valores)
     except escritura_google_sheets.ErrorEscritura as exc:
         raise ErrorReclasificacion(str(exc)) from exc
-    _sincronizar_fuente_manual(cliente, politica.origen_fuente_id, "el movimiento")
-    _reconstruir(cliente)
-    dashboard.invalidar_cache(str(cliente.get("cliente_id", "")))
+    clave = str(guardado.get("clave", "")).strip()
+    # La clave de la hoja es estable y segura; el prefijo evita chocar con una
+    # clave canónica de otra fuente mientras todavía no existe en la canónica.
+    if not clave or not _VALOR_SEGURO.fullmatch(clave):
+        raise ErrorReclasificacion("el origen no devolvió un identificador estable para el movimiento")
+    trabajo = f"manual:{clave}"
+    version = _encolar_reconstruccion(cliente, trabajo, politica.origen_fuente_id)
+    campo_monto = next((campo for campo in politica.campos.values()
+                         if campo.tipo == "monto_positivo"), None)
+    campo_fecha = next((campo for campo in politica.campos.values()
+                         if campo.tipo == "fecha_iso"), None)
+    campo_descripcion = next((campo for campo in politica.campos.values()
+                              if campo.nombre.casefold() in {"descripcion", "descripción"}), None)
+    campo_moneda = next((campo for campo in politica.campos.values()
+                          if campo.tipo == "moneda_iso"), None)
+    campo_medio = next((campo for campo in politica.campos.values()
+                         if campo.nombre.casefold() in {"medio_pago", "metodo_pago", "método_pago"}), None)
+    movimiento = {
+        "linea_id": destino.get("linea_id", "") if destino else "",
+        "categoria": destino.get("categoria", "") if destino else "Sin clasificar",
+        "concepto": destino.get("concepto", "") if destino else "Gastos sin identificar",
+        "fecha": str(borrador.valores.get(campo_fecha.nombre, "")) if campo_fecha else "",
+        "descripcion": str(borrador.valores.get(campo_descripcion.nombre, "Movimiento manual")) if campo_descripcion else "Movimiento manual",
+        "monto": str(borrador.valores.get(campo_monto.nombre, "0")) if campo_monto else "0",
+        "moneda": str(borrador.valores.get(campo_moneda.nombre, "CRC")) if campo_moneda else "CRC",
+        "medio_pago": str(borrador.valores.get(campo_medio.nombre, "Sin método de pago")) if campo_medio else "Sin método de pago",
+        "movimiento_clave": trabajo,
+        "pendiente_sincronizacion": True,
+    }
     return {
         "ok": True,
-        "movimiento_id": guardado.get("clave", ""),
+        "movimiento_id": clave,
         "categoria": destino.get("categoria", "") if destino else "",
         "concepto": destino.get("concepto", "") if destino else "",
+        "linea_id": destino.get("linea_id", "") if destino else "",
+        "estado": "pendiente",
+        "version": version,
+        "movimiento_clave": trabajo,
+        "movimiento": movimiento,
     }
 
 

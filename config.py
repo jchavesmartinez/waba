@@ -433,6 +433,15 @@ DASHBOARD_TOKEN_TTL_MINUTOS = int(os.environ.get(
     "DASHBOARD_TOKEN_TTL_MINUTOS", "30",
 ))
 DASHBOARD_CACHE_MINUTOS = int(os.environ.get("DASHBOARD_CACHE_MINUTOS", "15"))
+# Las correcciones del dashboard se confirman primero en la fuente editable y
+# quedan en una cola durable de Neon. Una ventana breve permite reunir varios
+# toques del usuario y evita reconstruir el modelo una vez por cada uno.
+DASHBOARD_EDICION_DEBOUNCE_SEGUNDOS = max(0, min(15, int(os.environ.get(
+    "DASHBOARD_EDICION_DEBOUNCE_SEGUNDOS", "3",
+))))
+DASHBOARD_EDICION_WORKER_SEGUNDOS = max(1, min(60, int(os.environ.get(
+    "DASHBOARD_EDICION_WORKER_SEGUNDOS", "3",
+))))
 DASHBOARD_MAX_KPIS = int(os.environ.get("DASHBOARD_MAX_KPIS", "12"))
 DASHBOARD_MAX_FILAS_POR_KPI = int(os.environ.get(
     "DASHBOARD_MAX_FILAS_POR_KPI", "50",

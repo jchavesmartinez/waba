@@ -144,6 +144,11 @@ def test_endpoint_pago_delega_en_movimiento_manual_normal(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     recibido = {}
     monkeypatch.setattr(
+        app_mod.dashboard, "validar_enlace",
+        lambda _token: ({"cid": "cliente_a"}, cliente),
+    )
+    monkeypatch.setattr(app_mod.dashboard_edicion, "procesar_reconstrucciones_cliente", lambda *_: None)
+    monkeypatch.setattr(
         app_mod.dashboard_edicion, "registrar_pago",
         lambda token, linea, monto, fecha: recibido.update(
             token=token, linea=linea, monto=monto, fecha=fecha,

@@ -585,7 +585,7 @@ async def estado_reclasificacion_dashboard(token: str, movimiento_clave: str):
 
 
 @app.post("/dashboard/{token}/movimientos/crear")
-async def crear_movimiento_dashboard(token: str, request: Request):
+async def crear_movimiento_dashboard(token: str, request: Request, tareas: BackgroundTasks):
     """Crea un gasto manual en la fuente editable declarada por metadata."""
     cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
     try:
@@ -593,6 +593,8 @@ async def crear_movimiento_dashboard(token: str, request: Request):
         if not isinstance(datos, dict):
             raise dashboard_edicion.ErrorReclasificacion("la solicitud de creación no es válida")
         resultado = dashboard_edicion.crear_movimiento(token, datos.get("valores"))
+        payload, _ = dashboard.validar_enlace(token)
+        tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(payload["cid"]))
         return JSONResponse(resultado, headers=cabeceras)
     except dashboard.EnlaceInvalido:
         return JSONResponse(
@@ -610,7 +612,8 @@ async def crear_movimiento_dashboard(token: str, request: Request):
 
 
 @app.post("/dashboard/{token}/conceptos/{linea_id}/pagar")
-async def pagar_concepto_dashboard(token: str, linea_id: str, request: Request):
+async def pagar_concepto_dashboard(token: str, linea_id: str, request: Request,
+                                   tareas: BackgroundTasks):
     """Crea un gasto manual normal para liquidar una línea pagable."""
     cabeceras = {"Cache-Control": "no-store", "Pragma": "no-cache"}
     try:
@@ -620,6 +623,8 @@ async def pagar_concepto_dashboard(token: str, linea_id: str, request: Request):
         resultado = dashboard_edicion.registrar_pago(
             token, linea_id, datos.get("monto"), datos.get("fecha"),
         )
+        payload, _ = dashboard.validar_enlace(token)
+        tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(payload["cid"]))
         return JSONResponse(resultado, headers=cabeceras)
     except dashboard.EnlaceInvalido:
         return JSONResponse(
