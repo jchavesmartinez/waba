@@ -35,7 +35,9 @@ def ejecutar() -> None:
                 if _DETENER.is_set():
                     break
                 procesadas += dashboard_edicion.procesar_reconstrucciones(
-                    cliente, maximo=100, agrupar=False,
+                    # Respeta la misma ventana de agrupación que usa el web:
+                    # varios toques consecutivos se materializan juntos.
+                    cliente, maximo=100, agrupar=True,
                 )
         except Exception:  # el siguiente ciclo vuelve a intentar la cola durable
             logger.exception("fallo al buscar ediciones pendientes del dashboard")
