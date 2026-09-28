@@ -1,4 +1,5 @@
 import pytest
+from decimal import Decimal
 
 from bot import dashboard_edicion
 from bot.edicion import CampoEdicion, PoliticaEdicion
@@ -103,11 +104,43 @@ def test_reclasificar_monto_guarda_override_en_campo_declarado_por_metadata(monk
         "token", "banco:1", "gas_comedera", monto="1,250.50",
     )
 
-    assert resultado["monto_original"] == "1250.50"
-    assert resultado["moneda_original"] == "CRC"
+    assert resultado["monto"] == "1250.50"
+    assert resultado["moneda"] == "CRC"
     assert overrides == [
-        ("transacciones", "correo-1", "importe_capturado", "1250.50", "Monto actualizado desde dashboard"),
+        ("transacciones", "correo-1", "importe_capturado", "1250.50", "Monto visible actualizado desde dashboard: CRC 1250.50"),
     ]
+
+
+def test_reclasificar_monto_visible_en_crc_guarda_equivalente_de_origen(monkeypatch):
+    """Editar ₡21.000 nunca debe convertirse en USD 21.000."""
+    cliente = {"cliente_id": "cliente_a", "catalogo_spreadsheet_id": "sheet"}
+    overrides = []
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
+    monkeypatch.setattr(
+        dashboard_edicion, "_movimiento",
+        lambda *_: ({
+            "_modelo_id": "movimientos", "fuente": "banco", "clave_origen": "correo-1",
+            "linea_presupuesto_id": "gas_ropa", "medio_pago": "Tarjeta",
+            "monto_original": 43.29, "moneda_original": "USD",
+            "monto": 19649.331, "moneda": "CRC", "tipo_cambio": 453.9,
+        }, object()),
+    )
+    monkeypatch.setattr(dashboard_edicion, "_validar_linea", lambda *_: {"linea_id": "gas_ropa", "categoria": "Ropa", "concepto": "Ropa"})
+    monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {
+        "modelos": [], "movimientos_canonicos": [{
+            "modelo_id": "movimientos", "fuente": "banco", "medio_pago": "tarjeta", "monto": "importe",
+        }],
+    })
+    monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("semantic", {"modelo_id": "transacciones"}))
+    monkeypatch.setattr(dashboard_edicion, "_guardar_override", lambda *args: overrides.append(args[1:]))
+    monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *_: 1)
+
+    resultado = dashboard_edicion.reclasificar("token", "banco:1", "gas_ropa", monto="21000")
+
+    monto_fuente = Decimal(overrides[0][3])
+    assert monto_fuente * Decimal("453.9") == Decimal("21000")
+    assert resultado["monto"] == "21000"
+    assert resultado["moneda"] == "CRC"
 
 
 @pytest.mark.parametrize("monto", ["", "-1", "NaN", "infinito"])
@@ -148,7 +181,7 @@ def test_reclasificar_permite_monto_cero_para_conservar_movimiento(monkeypatch):
     resultado = dashboard_edicion.reclasificar("token", "manual-1", "gas", monto="0")
 
     assert guardado == ["0"]
-    assert resultado["monto_original"] == "0"
+    assert resultado["monto"] == "0"
 
 
 def test_reclasificar_rechaza_identificador_no_seguro(monkeypatch):
@@ -227,7 +260,7 @@ def test_reclasificar_manual_actualiza_monto_en_misma_fila(monkeypatch):
     resultado = dashboard_edicion.reclasificar("token", "manual-1", "gas", monto="2500")
 
     assert llamadas == [("MAN-1", "gas", "Efectivo", "2500"), ("cola", "manual-1", "finanzas")]
-    assert resultado["monto_original"] == "2500"
+    assert resultado["monto"] == "2500"
 
 
 def test_reclasificar_regla_guarda_metadata_por_comercio(monkeypatch):

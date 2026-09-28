@@ -12,6 +12,7 @@ import logging
 import re
 import threading
 from datetime import date
+from decimal import Decimal, InvalidOperation
 
 import config
 import registry
@@ -71,6 +72,7 @@ def _movimiento(cliente: dict, clave: str) -> tuple[dict, object]:
         "moneda_original" if "moneda_original" in columnas
         else f"{columna_moneda}"
     )
+    columna_tipo_cambio = "tipo_cambio" if "tipo_cambio" in columnas else "NULL::numeric"
     extras = []
     for columna in ("descripcion", "concepto", "categoria"):
         if columna in columnas:
@@ -82,7 +84,8 @@ def _movimiento(cliente: dict, clave: str) -> tuple[dict, object]:
         cliente,
         f"SELECT \"_clave\", \"_modelo_id\", fuente, clave_origen, linea_presupuesto_id, "
         f"{columna_medio_pago}, {columna_monto} AS monto, {columna_moneda} AS moneda, "
-        f"{columna_monto_original} AS monto_original, {columna_moneda_original} AS moneda_original"
+        f"{columna_monto_original} AS monto_original, {columna_moneda_original} AS moneda_original, "
+        f"{columna_tipo_cambio} AS tipo_cambio"
         f"{extras_sql} "
         f"FROM {_identificador(tabla.tabla_real)} WHERE \"_clave\" = :clave LIMIT 1",
         {"clave": clave},
@@ -322,6 +325,31 @@ def _monto_editable(valor: object) -> str:
         return edicion.normalizar_monto(valor, permitir_cero=True)
     except (ArithmeticError, ValueError) as exc:
         raise ErrorReclasificacion(f"el monto no es válido: {exc}") from exc
+
+
+def _monto_origen_desde_visible(movimiento: dict, monto_visible: str) -> str:
+    """Convierte el importe que vio la persona al importe de la fuente.
+
+    El dashboard consolida siempre en su moneda funcional (CRC para este
+    cliente). Por eso un usuario que corrige ``₡21.000`` debe obtener ese
+    mismo total, aunque el correo del banco hubiera llegado en USD. La tabla
+    semántica se reconstruye desde la fuente, así que el override se guarda
+    en la unidad de origen aplicando la tasa histórica inversa.
+    """
+    try:
+        visible = Decimal(monto_visible)
+        moneda_visible = str(movimiento.get("moneda") or "").strip().upper()
+        moneda_origen = str(
+            movimiento.get("moneda_original") or moneda_visible
+        ).strip().upper()
+        if not moneda_visible or moneda_visible == moneda_origen:
+            return str(visible)
+        tasa = Decimal(str(movimiento.get("tipo_cambio") or ""))
+        if not tasa.is_finite() or tasa <= 0:
+            raise ValueError("no hay una tasa histórica verificable para este movimiento")
+        return str(visible / tasa)
+    except (InvalidOperation, ValueError) as exc:
+        raise ErrorReclasificacion(f"no pude convertir el monto visible: {exc}") from exc
 
 
 def _fuente_canonica(datos: dict, movimiento: dict) -> dict:
@@ -676,11 +704,15 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
     medio = _validar_medio_pago(
         movimiento.get("medio_pago") if medio_pago is None else medio_pago
     )
-    monto_normalizado = _monto_editable(monto) if monto is not None else None
+    monto_visible = _monto_editable(monto) if monto is not None else None
     datos = metadata.leer(cliente)
     capa, origen = _modelo_origen(datos, movimiento)
     columna_medio_pago = _campo_medio_pago(datos, movimiento)
-    columna_monto = _campo_monto(datos, movimiento) if monto_normalizado is not None else ""
+    columna_monto = _campo_monto(datos, movimiento) if monto_visible is not None else ""
+    monto_origen = (
+        _monto_origen_desde_visible(movimiento, monto_visible)
+        if monto_visible is not None else None
+    )
     clave_origen = str(movimiento.get("clave_origen", "")).strip()
     if not _VALOR_SEGURO.fullmatch(clave_origen):
         raise ErrorReclasificacion("el movimiento no tiene una identidad estable para corregirse")
@@ -706,15 +738,16 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
                 columna_medio_pago, medio,
                 "Método de pago actualizado desde dashboard",
             )
-        if monto_normalizado is not None:
+        if monto_origen is not None:
             _guardar_override(
                 cliente, str(origen.get("modelo_id", "")).strip(), clave_origen,
-                columna_monto, monto_normalizado,
-                "Monto actualizado desde dashboard",
+                columna_monto, monto_origen,
+                f"Monto visible actualizado desde dashboard: "
+                f"{str(movimiento.get('moneda') or '').upper()} {monto_visible}",
             )
     else:
         fuente_id = _actualizar_movimiento_manual(
-            cliente, origen, clave_origen, linea, medio, monto_normalizado,
+            cliente, origen, clave_origen, linea, medio, monto_origen,
         )
     if regla:
         modelo_regla, campo_regla, comercio = regla
@@ -733,11 +766,9 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
         "estado": "pendiente",
         "version": version,
     }
-    if monto_normalizado is not None:
-        resultado["monto_original"] = monto_normalizado
-        resultado["moneda_original"] = str(
-            movimiento.get("moneda_original") or movimiento.get("moneda") or ""
-        ).upper()
+    if monto_visible is not None:
+        resultado["monto"] = monto_visible
+        resultado["moneda"] = str(movimiento.get("moneda") or "").upper()
     if alcance == "regla":
         resultado["alcance"] = alcance
         resultado["comercio"] = regla[2]

@@ -199,11 +199,11 @@
     methods.forEach((method) => { const option = document.createElement("option"); option.value = method; paymentList.append(option); });
     payment.setAttribute("list", paymentListId); paymentLabel.append(payment, paymentList);
     const amountLabel = document.createElement("label");
-    const amountCurrency = String(movement.moneda_original || movement.moneda || "CRC").trim().toUpperCase() || "CRC";
+    const amountCurrency = String(movement.moneda || "CRC").trim().toUpperCase() || "CRC";
     amountLabel.textContent = `Monto (${amountCurrency})`;
     const amount = document.createElement("input"); amount.type = "number"; amount.name = "monto";
     amount.min = "0"; amount.step = "0.01"; amount.inputMode = "decimal"; amount.required = true;
-    amount.value = String(movement.monto_original ?? movement.monto ?? "");
+    amount.value = String(movement.monto ?? "");
     amountLabel.append(amount);
     const scopeFieldset = document.createElement("fieldset"); scopeFieldset.className = "editor-alcance";
     const scopeLegend = document.createElement("legend"); scopeLegend.textContent = "Alcance de la reclasificación";
@@ -219,7 +219,7 @@
     scopeOptions.append(scopeIndividual, scopeGroup);
     scopeFieldset.append(scopeLegend, scopeOptions);
     const note = document.createElement("p"); note.className = "editor-nota";
-    note.textContent = "El monto y el método de pago solo cambian este gasto. La regla usa el comercio exacto y clasifica sus movimientos pasados y futuros en el concepto elegido.";
+    note.textContent = "El monto se edita en la misma moneda que muestra el dashboard. El monto y el método de pago solo cambian este gasto; la regla solo clasifica por comercio.";
     const actions = document.createElement("div"); actions.className = "editor-acciones";
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
     cancel.addEventListener("click", () => dialog.close());
@@ -245,8 +245,8 @@
         movement.categoria = result.categoria;
         movement.concepto = result.concepto;
         movement.medio_pago = result.medio_pago;
-        movement.monto_original = result.monto_original;
-        movement.moneda_original = result.moneda_original;
+        if (result.monto !== undefined) movement.monto = result.monto;
+        if (result.moneda) movement.moneda = result.moneda;
         dialog.close();
         renderVista();
         mostrarAviso(result.alcance === "regla"
