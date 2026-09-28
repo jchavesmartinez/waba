@@ -202,7 +202,10 @@
     const amountCurrency = String(movement.moneda || "CRC").trim().toUpperCase() || "CRC";
     amountLabel.textContent = `Monto (${amountCurrency})`;
     const amount = document.createElement("input"); amount.type = "number"; amount.name = "monto";
-    amount.min = "0"; amount.step = "0.01"; amount.inputMode = "decimal"; amount.required = true;
+    // Las conversiones históricas pueden producir fracciones de colón. El
+    // valor que se muestra y edita es CRC, por lo que el navegador no debe
+    // rechazar una corrección válida sólo por tener más de dos decimales.
+    amount.min = "0"; amount.step = "0.000001"; amount.inputMode = "decimal"; amount.required = true;
     amount.value = String(movement.monto ?? "");
     amountLabel.append(amount);
     const scopeFieldset = document.createElement("fieldset"); scopeFieldset.className = "editor-alcance";
