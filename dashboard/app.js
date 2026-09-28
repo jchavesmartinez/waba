@@ -1,7 +1,34 @@
-(() => {
+(async () => {
   "use strict";
-  const data = JSON.parse(document.getElementById("dashboard-data").textContent);
   const byId = (id) => document.getElementById(id);
+  const API_BASE = "/api/dashboard";
+  const parametros = new URLSearchParams(window.location.search);
+  const inicioSolicitado = parametros.get("mes") || "";
+  const cargarUrl = new URL(`${API_BASE}/datos`, window.location.origin);
+  if (inicioSolicitado) cargarUrl.searchParams.set("inicio", `${inicioSolicitado.slice(0, 7)}-01`);
+  let data;
+  try {
+    const response = await fetch(cargarUrl, { headers: { Accept: "application/json" } });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "No pude cargar el dashboard.");
+    data = result.dashboard;
+    byId("cargando-dashboard").hidden = true;
+    const claveRecarga = `dashboard-actualizando:${data.periodo?.inicio || "actual"}`;
+    if (result.actualizando) {
+      const intentos = Number(sessionStorage.getItem(claveRecarga) || 0);
+      document.querySelector(".estado")?.replaceChildren(document.createTextNode("Actualizando datos…"));
+      if (intentos < 3) {
+        sessionStorage.setItem(claveRecarga, String(intentos + 1));
+        window.setTimeout(() => window.location.reload(), 5000);
+      }
+    } else {
+      sessionStorage.removeItem(claveRecarga);
+    }
+  } catch (reason) {
+    const loading = byId("cargando-dashboard");
+    loading.innerHTML = `<strong>${reason.message || "No pude cargar el dashboard."}</strong>`;
+    return;
+  }
   const clean = (s) => String(s ?? "").replaceAll("_", " ");
   const isMoney = (name, unit) => /monto|gasto|presupuesto|disponible|exceso|venta|ingreso|saldo|total/i.test(name) || /colon|crc|usd|moneda/i.test(unit);
   const number = (value) => typeof value === "number" ? value : Number(value);
@@ -54,6 +81,25 @@
   );
   const creation = data.creacion_manual && Array.isArray(data.creacion_manual.campos)
     ? data.creacion_manual : null;
+  const irAMes = (desplazamiento) => {
+    const actual = new Date(`${String(data.periodo?.inicio).slice(0, 10)}T12:00:00`);
+    actual.setMonth(actual.getMonth() + desplazamiento);
+    const mes = `${actual.getFullYear()}-${String(actual.getMonth() + 1).padStart(2, "0")}`;
+    const url = new URL(window.location.href); url.searchParams.set("mes", mes);
+    window.location.assign(url);
+  };
+  byId("mes-anterior")?.addEventListener("click", () => irAMes(-1));
+  byId("mes-siguiente")?.addEventListener("click", () => irAMes(1));
+  byId("mes-actual")?.addEventListener("click", () => window.location.assign("/dashboard"));
+  const colasEdicion = new Map();
+  const encolarEdicion = (clave, trabajo) => {
+    const anterior = colasEdicion.get(clave) || Promise.resolve();
+    const actual = anterior.catch(() => {}).then(trabajo);
+    colasEdicion.set(clave, actual);
+    const limpiar = () => { if (colasEdicion.get(clave) === actual) colasEdicion.delete(clave); };
+    actual.then(limpiar, limpiar);
+    return actual;
+  };
   const mostrarAviso = (mensaje) => {
     document.querySelectorAll(".aviso-dashboard").forEach((aviso) => aviso.remove());
     const aviso = document.createElement("div"); aviso.className = "aviso-dashboard";
@@ -67,7 +113,7 @@
     window.setTimeout(async () => {
       try {
         const response = await fetch(
-          `${window.location.pathname}/movimientos/${encodeURIComponent(movimientoClave)}/estado`,
+          `${API_BASE}/movimientos/${encodeURIComponent(movimientoClave)}/estado`,
           { headers: { Accept: "application/json" } },
         );
         const result = await response.json();
@@ -84,28 +130,47 @@
       }
     }, 1500);
   };
-  const aplicarMovimientoPendiente = (movimiento) => {
+  const ajustarKpisMovimiento = (movimiento, factor) => {
     if (!movimiento || !movimiento.linea_id || !Number.isFinite(number(movimiento.monto))) return;
-    // La proyección local es sólo UX: la fuente de verdad ya se confirmó en
-    // Sheets y la cola durable la materializa en Neon. Así el usuario no
-    // espera la reconstrucción para ver su gasto.
-    data.movimientos = Array.isArray(data.movimientos) ? data.movimientos : [];
-    data.movimientos.push(movimiento);
-    const monto = number(movimiento.monto);
+    const monto = number(movimiento.monto) * factor;
     (data.kpis || []).forEach((kpi) => {
       if (!Array.isArray(kpi.columnas) || !Array.isArray(kpi.filas)) return;
       kpi.filas.forEach((fila) => {
         const row = rowObject(kpi, fila);
         const lineaKey = keyMatch(row, /^linea_id$|linea_presupuesto_id/i);
         const categoriaKey = keyMatch(row, /^categoria$|categoría/i);
-        const coincide = (lineaKey && String(row[lineaKey]) === String(movimiento.linea_id)) ||
+        const resumenGeneral = ["presupuesto_disponible", "gasto_total"].includes(
+          String(kpi.kpi || "").toLocaleLowerCase("es"),
+        ) && !lineaKey && !categoriaKey && kpi.filas.length === 1;
+        const coincide = resumenGeneral ||
+          (lineaKey && String(row[lineaKey]) === String(movimiento.linea_id)) ||
           (!lineaKey && categoriaKey && normalized(row[categoriaKey]) === normalized(movimiento.categoria));
         if (!coincide) return;
-        const spentKey = metricKeys(row).spent;
+        const keys = metricKeys(row);
+        const spentKey = keys.spent;
         const indice = spentKey ? kpi.columnas.indexOf(spentKey) : -1;
-        if (indice >= 0) fila[indice] = (number(fila[indice]) || 0) + monto;
+        if (indice < 0) return;
+        fila[indice] = (number(fila[indice]) || 0) + monto;
+        const gastado = number(fila[indice]);
+        const presupuesto = keys.budget ? number(row[keys.budget]) : NaN;
+        if (keys.available && Number.isFinite(presupuesto)) {
+          fila[kpi.columnas.indexOf(keys.available)] = presupuesto - gastado;
+        }
+        if (keys.pct && Number.isFinite(presupuesto) && presupuesto !== 0) {
+          fila[kpi.columnas.indexOf(keys.pct)] = gastado / presupuesto * 100;
+        }
       });
     });
+  };
+  const aplicarMovimientoPendiente = (movimiento, agregar = true) => {
+    if (!movimiento || !movimiento.linea_id || !Number.isFinite(number(movimiento.monto))) return;
+    // La proyección local es sólo UX: la fuente de verdad ya se confirmó en
+    // el endpoint y la cola durable la materializa en Neon. Así el usuario no
+    // espera la reconstrucción para ver su gasto.
+    data.movimientos = Array.isArray(data.movimientos) ? data.movimientos : [];
+    if (agregar) data.movimientos.push(movimiento);
+    else data.movimientos = data.movimientos.filter((item) => item !== movimiento);
+    ajustarKpisMovimiento(movimiento, agregar ? 1 : -1);
     renderVista();
   };
   const iniciarChat = () => {
@@ -163,7 +228,7 @@
       mostrarError(""); agregarMensaje("user", texto); entrada.value = "";
       enviar.disabled = true; entrada.disabled = true; enviar.textContent = "Pensando…";
       try {
-        const respuesta = await fetch(`${window.location.pathname}/chat`, {
+        const respuesta = await fetch(`${API_BASE}/chat`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ mensaje: texto }),
         });
@@ -182,7 +247,7 @@
       if (evento.key === "Enter" && !evento.shiftKey) { evento.preventDefault(); formulario.requestSubmit(); }
     });
     mensajes.textContent = "Cargando conversación…";
-    fetch(`${window.location.pathname}/chat`, { headers: { Accept: "application/json" } })
+    fetch(`${API_BASE}/chat`, { headers: { Accept: "application/json" } })
       .then(respuestaJson)
       .then((resultado) => {
         mensajes.replaceChildren();
@@ -253,37 +318,56 @@
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar cambios";
     const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
     actions.append(cancel, save); form.append(title, detail, label, paymentLabel, amountLabel, scopeFieldset, note, error, actions); dialog.append(form);
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault(); save.disabled = true; cancel.disabled = true; error.hidden = true;
-      try {
-        const response = await fetch(`${window.location.pathname}/movimientos/reclasificar`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            movimiento_clave: movement.movimiento_clave,
-            linea_id: select.value,
-            medio_pago: payment.value,
-            alcance: groupRadio.checked ? "regla" : "individual",
-            monto: amount.value,
-          }),
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!form.reportValidity()) return;
+      const lineaNueva = linesById.get(String(select.value));
+      const anterior = {
+        linea_id: movement.linea_id, categoria: movement.categoria, concepto: movement.concepto,
+        medio_pago: movement.medio_pago, monto: movement.monto, moneda: movement.moneda,
+      };
+      const revision = (number(movement.__revision_local) || 0) + 1;
+      movement.__revision_local = revision;
+      ajustarKpisMovimiento(anterior, -1);
+      movement.linea_id = select.value;
+      movement.categoria = lineaNueva?.categoria || movement.categoria;
+      movement.concepto = lineaNueva?.concepto || movement.concepto;
+      movement.medio_pago = payment.value;
+      movement.monto = amount.value;
+      ajustarKpisMovimiento(movement, 1);
+      dialog.close(); renderVista();
+      mostrarAviso("Cambio aplicado. Guardando en segundo plano…");
+      const payload = {
+        movimiento_clave: movement.movimiento_clave,
+        linea_id: select.value,
+        medio_pago: payment.value,
+        alcance: groupRadio.checked ? "regla" : "individual",
+        monto: amount.value, periodo_inicio: data.periodo?.inicio,
+      };
+      encolarEdicion(movement.movimiento_clave, async () => {
+        const response = await fetch(`${API_BASE}/movimientos/reclasificar`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
+          body: JSON.stringify(payload),
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar la clasificación.");
-        movement.linea_id = result.linea_id;
-        movement.categoria = result.categoria;
-        movement.concepto = result.concepto;
-        movement.medio_pago = result.medio_pago;
-        if (result.monto !== undefined) movement.monto = result.monto;
-        if (result.moneda) movement.moneda = result.moneda;
-        dialog.close();
-        renderVista();
-        mostrarAviso(result.alcance === "regla"
-          ? `Regla guardada para ${result.comercio || "este comercio"}. Sincronizando…`
-          : "Cambios guardados. Sincronizando en segundo plano…");
+        if (movement.__revision_local === revision) {
+          ajustarKpisMovimiento(movement, -1);
+          movement.linea_id = result.linea_id; movement.categoria = result.categoria;
+          movement.concepto = result.concepto; movement.medio_pago = result.medio_pago;
+          if (result.monto !== undefined) movement.monto = result.monto;
+          if (result.moneda) movement.moneda = result.moneda;
+          ajustarKpisMovimiento(movement, 1);
+          renderVista();
+        }
         vigilarSincronizacion(movement.movimiento_clave);
-      } catch (reason) {
-        error.textContent = reason.message || "No pude guardar la clasificación.";
-        error.hidden = false; save.disabled = false; cancel.disabled = false;
-      }
+      }).catch((reason) => {
+        if (movement.__revision_local === revision) {
+          ajustarKpisMovimiento(movement, -1); Object.assign(movement, anterior);
+          ajustarKpisMovimiento(movement, 1); renderVista();
+        }
+        mostrarAviso(reason.message || "No pude guardar el cambio; restauré el valor anterior.");
+      });
     });
     document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove()); dialog.showModal();
   };
@@ -341,27 +425,42 @@
     cancel.addEventListener("click", () => dialog.close());
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar movimiento";
     actions.append(cancel, save); form.prepend(title, note); form.append(error, actions); dialog.append(form);
-    form.addEventListener("submit", async (event) => {
+    form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (!form.reportValidity()) return;
       const valores = {};
       creation.campos.filter((field) => !field.derivado_de_linea).forEach((field) => {
         const control = controls.get(field.nombre); if (control) valores[field.nombre] = control.value;
       });
-      save.disabled = true; cancel.disabled = true; error.hidden = true;
-      try {
-        const response = await fetch(`${window.location.pathname}/movimientos/crear`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ valores }),
+      const campoLinea = creation.campos.find((field) => field.seleccion_linea);
+      const campoMonto = creation.campos.find((field) => field.tipo === "monto_positivo");
+      const campoFecha = creation.campos.find((field) => field.tipo === "fecha_iso");
+      const campoMoneda = creation.campos.find((field) => field.tipo === "moneda_iso");
+      const campoDescripcion = creation.campos.find((field) => /descripci/i.test(field.nombre));
+      const linea = linesById.get(String(valores[campoLinea?.nombre] || ""));
+      const pendiente = {
+        linea_id: linea?.linea_id, categoria: linea?.categoria, concepto: linea?.concepto,
+        fecha: valores[campoFecha?.nombre] || "", descripcion: valores[campoDescripcion?.nombre] || "Movimiento manual",
+        monto: valores[campoMonto?.nombre] || "0", moneda: valores[campoMoneda?.nombre] || "CRC",
+        medio_pago: valores.medio_pago || "Sin método de pago",
+        movimiento_clave: `pendiente:${Date.now()}`, pendiente_sincronizacion: true,
+      };
+      dialog.close(); aplicarMovimientoPendiente(pendiente);
+      mostrarAviso("Movimiento agregado. Guardando en segundo plano…");
+      (async () => {
+        const response = await fetch(`${API_BASE}/movimientos/crear`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
+          body: JSON.stringify({ valores, periodo_inicio: data.periodo?.inicio }),
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el movimiento.");
-        dialog.close(); aplicarMovimientoPendiente(result.movimiento);
+        Object.assign(pendiente, result.movimiento);
         mostrarAviso("Movimiento guardado. Sincronizando en segundo plano…");
         vigilarSincronizacion(result.movimiento_clave);
-      } catch (reason) {
-        error.textContent = reason.message || "No pude guardar el movimiento.";
-        error.hidden = false; save.disabled = false; cancel.disabled = false;
-      }
+      })().catch((reason) => {
+        aplicarMovimientoPendiente(pendiente, false);
+        mostrarAviso(reason.message || "No pude guardar el movimiento; lo retiré de la vista.");
+      });
     });
     document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove()); dialog.showModal();
   };
@@ -422,24 +521,31 @@
     cancel.addEventListener("click", () => dialog.close());
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Confirmar pago";
     actions.append(cancel, save); form.append(title, detail, resumen, montoLabel, fechaLabel, note, error, actions); dialog.append(form);
-    form.addEventListener("submit", async (event) => {
+    form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (!form.reportValidity()) return;
-      save.disabled = true; cancel.disabled = true; error.hidden = true;
-      try {
-        const response = await fetch(`${window.location.pathname}/conceptos/${encodeURIComponent(line.linea_id)}/pagar`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ monto: monto.value, fecha: fecha.value }),
+      const pendiente = {
+        linea_id: line.linea_id, categoria: line.categoria, concepto: line.concepto,
+        fecha: fecha.value, descripcion: `Pago - ${line.concepto}`,
+        monto: monto.value, moneda: row.moneda || "CRC", medio_pago: "Sin método de pago",
+        movimiento_clave: `pendiente:${Date.now()}`, pendiente_sincronizacion: true,
+      };
+      dialog.close(); aplicarMovimientoPendiente(pendiente);
+      mostrarAviso("Pago aplicado. Guardando en segundo plano…");
+      (async () => {
+        const response = await fetch(`${API_BASE}/conceptos/${encodeURIComponent(line.linea_id)}/pagar`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
+          body: JSON.stringify({ monto: monto.value, fecha: fecha.value, periodo_inicio: data.periodo?.inicio }),
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el pago.");
-        dialog.close(); aplicarMovimientoPendiente(result.movimiento);
+        Object.assign(pendiente, result.movimiento);
         mostrarAviso("Pago guardado. Sincronizando en segundo plano…");
         vigilarSincronizacion(result.movimiento_clave);
-      } catch (reason) {
-        error.textContent = reason.message || "No pude guardar el pago.";
-        error.hidden = false; save.disabled = false; cancel.disabled = false;
-      }
+      })().catch((reason) => {
+        aplicarMovimientoPendiente(pendiente, false);
+        mostrarAviso(reason.message || "No pude guardar el pago; lo retiré de la vista.");
+      });
     });
     document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove()); dialog.showModal();
   };
@@ -705,7 +811,7 @@
             const keys = metricKeys(movement); const value = document.createElement("strong");
             value.textContent = keys.spent ? format(movement[keys.spent], keys.spent, movement.moneda || commerceKpi?.unidad) : "";
             item.append(detail, value);
-            if (movement.movimiento_clave && lines.length) {
+            if (movement.movimiento_clave && !movement.pendiente_sincronizacion && lines.length) {
               const edit = document.createElement("button"); edit.type = "button"; edit.className = "editar-movimiento";
               edit.setAttribute("aria-label", `Reclasificar ${movementName(movement)}`); edit.title = "Reclasificar"; edit.textContent = "✎";
               edit.addEventListener("click", () => abrirEditor(movement)); item.append(edit);
@@ -782,7 +888,7 @@
         const amountKey = keyMatch(movement, /^monto$|gasto.?neto|gastado/i);
         const amount = document.createElement("strong"); amount.textContent = amountKey ? format(movement[amountKey], amountKey, group.currency) : "";
         item.append(detail, amount);
-        if (movement.movimiento_clave && lines.length) {
+        if (movement.movimiento_clave && !movement.pendiente_sincronizacion && lines.length) {
           const edit = document.createElement("button"); edit.type = "button"; edit.className = "editar-movimiento";
           edit.setAttribute("aria-label", `Reclasificar ${movementName(movement)}`); edit.title = "Reclasificar"; edit.textContent = "✎";
           edit.addEventListener("click", () => abrirEditor(movement)); item.append(edit);

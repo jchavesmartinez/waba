@@ -9,6 +9,7 @@ auditables en Google Sheets; la tabla canónica nunca se edita directamente.
 from __future__ import annotations
 
 import logging
+import json
 import re
 import threading
 import time
@@ -502,13 +503,18 @@ def _asegurar_jobs(cx) -> None:
             actualizado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             bloqueado_en TIMESTAMPTZ,
             ultimo_error TEXT NOT NULL DEFAULT '',
+            proyeccion JSONB NOT NULL DEFAULT '{{}}'::jsonb,
             PRIMARY KEY (cliente_id, movimiento_clave)
         )'''
     ))
+    cx.execute(text(f'''
+        ALTER TABLE "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}"
+        ADD COLUMN IF NOT EXISTS proyeccion JSONB NOT NULL DEFAULT '{{}}'::jsonb
+    '''))
 
 
 def _encolar_reconstruccion(cliente: dict, movimiento_clave: str,
-                            fuente_id: str = "") -> int:
+                            fuente_id: str = "", proyeccion: dict | None = None) -> int:
     """Persiste una edición pendiente y devuelve su versión creciente.
 
     La clave única es el movimiento canónico. Dos guardados consecutivos no
@@ -522,20 +528,24 @@ def _encolar_reconstruccion(cliente: dict, movimiento_clave: str,
             _asegurar_jobs(cx)
             fila = cx.execute(text(f'''
                 INSERT INTO "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}"
-                    (cliente_id, movimiento_clave, fuente_id)
-                VALUES (:cliente_id, :movimiento_clave, :fuente_id)
+                    (cliente_id, movimiento_clave, fuente_id, proyeccion)
+                VALUES (:cliente_id, :movimiento_clave, :fuente_id,
+                        CAST(:proyeccion AS jsonb))
                 ON CONFLICT (cliente_id, movimiento_clave) DO UPDATE SET
                     version = "{_TABLA_JOBS}".version + 1,
                     fuente_id = EXCLUDED.fuente_id,
                     estado = 'pendiente',
                     actualizado_en = CURRENT_TIMESTAMP,
                     bloqueado_en = NULL,
-                    ultimo_error = ''
+                    ultimo_error = '',
+                    proyeccion = EXCLUDED.proyeccion
                 RETURNING version
             '''), {
                 "cliente_id": str(cliente.get("cliente_id", "")),
                 "movimiento_clave": movimiento_clave,
                 "fuente_id": fuente_id,
+                "proyeccion": json.dumps(proyeccion or {}, ensure_ascii=False,
+                                          separators=(",", ":")),
             }).scalar_one()
             return int(fila)
     finally:
@@ -687,6 +697,7 @@ def procesar_reconstrucciones(cliente: dict, maximo: int = 20,
                 actualizo_cache = True
         if actualizo_cache:
             dashboard.invalidar_cache(cliente_id)
+            dashboard.refrescar_snapshot_actual(cliente)
         return len(trabajos)
     finally:
         candado.release()
@@ -729,6 +740,49 @@ def estado_reconstruccion(token: str, movimiento_clave: object) -> dict:
             if not fila:
                 return {"ok": True, "estado": "listo"}
             return {"ok": True, "estado": str(fila["estado"]), "version": int(fila["version"])}
+    finally:
+        destino.cerrar()
+
+
+def proyecciones_pendientes(cliente: dict) -> list[dict]:
+    """Devuelve la última vista optimista durable de cada movimiento.
+
+    La fila de la cola es única por movimiento y cada nuevo guardado reemplaza
+    ``proyeccion`` a la vez que incrementa ``version``. Por eso una recarga, un
+    segundo proceso web o un reinicio siempre reconstruyen la última intención
+    confirmada por el usuario, nunca una edición anterior.
+    """
+    destino, motor = _motor_jobs(cliente)
+    try:
+        with motor.begin() as cx:
+            _asegurar_jobs(cx)
+            filas = cx.execute(text(f'''
+                SELECT movimiento_clave, version, estado, proyeccion
+                FROM "{_ESQUEMA_JOBS}"."{_TABLA_JOBS}"
+                WHERE cliente_id = :cliente_id
+                  AND estado IN ('pendiente', 'procesando', 'error')
+                  AND proyeccion <> '{{}}'::jsonb
+                ORDER BY actualizado_en, movimiento_clave
+            '''), {
+                "cliente_id": str(cliente.get("cliente_id", "")),
+            }).mappings().all()
+            resultado = []
+            for fila in filas:
+                proyeccion = fila["proyeccion"]
+                if isinstance(proyeccion, str):
+                    proyeccion = json.loads(proyeccion)
+                if not isinstance(proyeccion, dict):
+                    continue
+                resultado.append({
+                    **proyeccion,
+                    "movimiento_clave": str(
+                        proyeccion.get("movimiento_clave")
+                        or fila["movimiento_clave"]
+                    ),
+                    "version": int(fila["version"]),
+                    "estado": str(fila["estado"]),
+                })
+            return resultado
     finally:
         destino.cerrar()
 
@@ -804,9 +858,6 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
         _guardar_regla_clasificacion(
             cliente, modelo_regla, campo_regla, comercio, linea,
         )
-    version = _encolar_reconstruccion(
-        cliente, clave, fuente_id,
-    )
     resultado = {
         "ok": True,
         "linea_id": destino["linea_id"],
@@ -814,7 +865,6 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
         "concepto": destino["concepto"],
         "medio_pago": medio,
         "estado": "pendiente",
-        "version": version,
     }
     if monto_visible is not None:
         resultado["monto"] = monto_visible
@@ -822,6 +872,19 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
     if alcance == "regla":
         resultado["alcance"] = alcance
         resultado["comercio"] = regla[2]
+    version = _encolar_reconstruccion(
+        cliente, clave, fuente_id, {
+            "tipo": "editar",
+            "movimiento_clave": clave,
+            "linea_id": resultado["linea_id"],
+            "categoria": resultado["categoria"],
+            "concepto": resultado["concepto"],
+            "medio_pago": resultado["medio_pago"],
+            **({"monto": str(monto_visible), "moneda": resultado.get("moneda", "")}
+               if monto_visible is not None else {}),
+        },
+    )
+    resultado["version"] = version
     return resultado
 
 
@@ -878,7 +941,6 @@ def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None
     if not clave or not _VALOR_SEGURO.fullmatch(clave):
         raise ErrorReclasificacion("el origen no devolvió un identificador estable para el movimiento")
     trabajo = f"manual:{clave}"
-    version = _encolar_reconstruccion(cliente, trabajo, politica.origen_fuente_id)
     campo_monto = next((campo for campo in politica.campos.values()
                          if campo.tipo == "monto_positivo"), None)
     campo_fecha = next((campo for campo in politica.campos.values()
@@ -901,6 +963,10 @@ def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None
         "movimiento_clave": trabajo,
         "pendiente_sincronizacion": True,
     }
+    version = _encolar_reconstruccion(
+        cliente, trabajo, politica.origen_fuente_id,
+        {"tipo": "crear", "movimiento": movimiento},
+    )
     return {
         "ok": True,
         "movimiento_id": clave,

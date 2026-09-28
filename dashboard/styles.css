@@ -21,6 +21,15 @@ body {
 .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 30px; }
 .hero { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 28px; }
 .hero-acciones { display: grid; justify-items: end; gap: 10px; }
+.navegacion-mes { display: flex; gap: 6px; }
+.navegacion-mes button { border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; background: white; color: var(--green); font: inherit; font-size: .8rem; font-weight: 800; cursor: pointer; }
+.navegacion-mes button:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 2px; }
+.cargando-dashboard { display: flex; align-items: center; gap: 13px; min-height: 88px; }
+.cargando-dashboard[hidden] { display: none; }
+.cargando-dashboard div { display: grid; gap: 4px; }
+.cargando-dashboard small { color: var(--muted); }
+.cargando-pulso { width: 18px; height: 18px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 0 0 rgba(185, 231, 105, .7); animation: pulso 1.3s infinite; }
+@keyframes pulso { 70% { box-shadow: 0 0 0 12px rgba(185, 231, 105, 0); } 100% { box-shadow: 0 0 0 0 rgba(185, 231, 105, 0); } }
 .selector-vista { display: grid; gap: 4px; color: var(--muted); font-size: .72rem; font-weight: 760; text-align: left; }
 .selector-vista select { min-width: 175px; border: 1px solid var(--line); border-radius: 9px; padding: 8px 28px 8px 10px; background: white; color: var(--ink); font: inherit; font-size: .86rem; font-weight: 700; }
 .selector-vista select:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 2px; }

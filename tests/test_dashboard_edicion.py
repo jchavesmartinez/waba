@@ -70,7 +70,12 @@ def test_reclasificar_guarda_override_y_encola_materializacion(monkeypatch):
         ("transacciones", "correo-1", "linea_presupuesto_id", "gas_comedera", "Reclasificado desde dashboard: Alimentacion > Comedera"),
         ("transacciones", "correo-1", "tarjeta", "SINPE", "Método de pago actualizado desde dashboard"),
     ]
-    assert guardado["cola"] == ("bac:movimiento-1", "")
+    assert guardado["cola"][:2] == ("bac:movimiento-1", "")
+    assert guardado["cola"][2] == {
+        "tipo": "editar", "movimiento_clave": "bac:movimiento-1",
+        "linea_id": "gas_comedera", "categoria": "Alimentacion",
+        "concepto": "Comedera", "medio_pago": "SINPE",
+    }
 
 
 def test_reclasificar_monto_guarda_override_en_campo_declarado_por_metadata(monkeypatch):
@@ -445,7 +450,9 @@ def test_crear_manual_guarda_en_origen_encola_e_impone_linea(monkeypatch):
     assert recibido["valores"]["linea_presupuesto_id"] == "gas_comedera"
     assert recibido["valores"]["categoria"] == "Alimentacion"
     assert recibido["valores"]["moneda"] == "USD"
-    assert llamadas == [("manual:MAN-1", "finanzas")]
+    assert llamadas[0][:2] == ("manual:MAN-1", "finanzas")
+    assert llamadas[0][2]["tipo"] == "crear"
+    assert llamadas[0][2]["movimiento"] == resultado["movimiento"]
 
 
 def test_lote_verifica_todas_las_fuentes_con_una_sincronizacion(monkeypatch):

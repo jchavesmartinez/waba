@@ -15,6 +15,7 @@ def dashboard_configurado(monkeypatch):
     monkeypatch.setattr(config, "APP_PUBLIC_URL", "https://app.example.com")
     monkeypatch.setattr(config, "DASHBOARD_SECRET", "s" * 48)
     monkeypatch.setattr(config, "DASHBOARD_TOKEN_TTL_MINUTOS", 30)
+    monkeypatch.setattr(config, "DASHBOARD_SESION_DIAS", 180)
     return {"cliente_id": "cliente_a", "nombre": "Cliente A"}
 
 
@@ -82,6 +83,158 @@ def test_render_incrusta_snapshot_sin_llamadas_del_frontend(
     assert '"nombre":"Cliente A"' in html
     assert "/dashboard-assets/app.js" in html
     assert 'id="chat-mensajes"' in html
+
+
+def test_enlace_activa_sesion_y_redirige_a_url_permanente(
+    monkeypatch, dashboard_configurado,
+):
+    cliente = dashboard_configurado
+    monkeypatch.setattr(dashboard.registry, "resolver", lambda _numero: cliente)
+    url, _ = dashboard.crear_enlace(cliente, "50688889999", "dashboard")
+
+    respuesta = TestClient(app_mod.app).get(
+        url.replace("https://app.example.com", ""), follow_redirects=False,
+    )
+
+    assert respuesta.status_code == 303
+    assert respuesta.headers["location"] == "/dashboard"
+    assert f"{dashboard.DASHBOARD_COOKIE}=" in respuesta.headers["set-cookie"]
+    assert "HttpOnly" in respuesta.headers["set-cookie"]
+
+
+def test_app_permanente_entrega_shell_y_datos_por_api(
+    monkeypatch, dashboard_configurado,
+):
+    cliente = dashboard_configurado
+    sesion = {"v": 2, "cid": "cliente_a", "num": "50688889999", "exp": int(time.time()) + 600}
+    snapshot = {
+        "cliente": {"id": "cliente_a", "nombre": "Cliente A"},
+        "periodo": {"inicio": "2026-09-01", "fin_exclusivo": "2026-10-01"},
+        "kpis": [], "movimientos": [], "lineas_presupuesto": [],
+    }
+    monkeypatch.setattr(app_mod.dashboard, "validar_sesion", lambda _: (sesion, cliente))
+    monkeypatch.setattr(app_mod.dashboard, "obtener_snapshot", lambda *_: (snapshot, False))
+    web = TestClient(app_mod.app)
+    web.cookies.set(dashboard.DASHBOARD_COOKIE, "sesion")
+
+    pagina = web.get("/dashboard")
+    datos = web.get("/api/dashboard/datos?inicio=2026-09-01")
+
+    assert pagina.status_code == 200
+    assert 'id="cargando-dashboard"' in pagina.text
+    assert '"nombre":"Cliente A"' not in pagina.text
+    assert datos.status_code == 200
+    assert datos.json()["dashboard"] == snapshot
+
+
+def test_snapshot_reaplica_ultima_edicion_pendiente_despues_de_recargar(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    periodo = {"inicio": "2026-09-01", "fin_exclusivo": "2026-10-01"}
+    snapshot = {
+        "kpis": [
+            {
+                "kpi": "gasto_por_concepto",
+                "columnas": [
+                    "linea_id", "categoria", "concepto", "presupuesto",
+                    "gastado", "disponible", "porcentaje",
+                ],
+                "filas": [
+                    ["linea_anterior", "Otros", "Anterior", 100, 40, 60, 40],
+                    ["linea_nueva", "Vivienda", "Nueva", 200, 10, 190, 5],
+                ],
+            },
+            {
+                "kpi": "presupuesto_disponible",
+                "columnas": ["presupuesto", "gastado", "disponible"],
+                "filas": [[300, 50, 250]],
+            },
+        ],
+        "movimientos": [{
+            "movimiento_clave": "bac:1", "linea_id": "linea_anterior",
+            "categoria": "Otros", "concepto": "Anterior", "monto": 40,
+            "moneda": "CRC", "medio_pago": "8774", "fecha": "2026-09-20",
+        }],
+    }
+    monkeypatch.setattr(
+        dashboard, "leer_snapshot_persistente", lambda *_: (snapshot, False),
+    )
+    monkeypatch.setattr(dashboard, "_leer_proyecciones_pendientes", lambda *_: [{
+        "tipo": "editar", "movimiento_clave": "bac:1", "version": 7,
+        "linea_id": "linea_nueva", "categoria": "Vivienda", "concepto": "Nueva",
+        "monto": "25", "moneda": "CRC", "medio_pago": "SINPE",
+    }])
+
+    proyectado, sucio = dashboard.obtener_snapshot(cliente, periodo)
+
+    movimiento = proyectado["movimientos"][0]
+    assert sucio is False
+    assert movimiento["linea_id"] == "linea_nueva"
+    assert movimiento["monto"] == 25
+    assert movimiento["medio_pago"] == "SINPE"
+    assert movimiento["pendiente_sincronizacion"] is True
+    assert movimiento["version_pendiente"] == 7
+    assert proyectado["kpis"][0]["filas"][0][4:] == [0.0, 100.0, 0.0]
+    assert proyectado["kpis"][0]["filas"][1][4:] == [35.0, 165.0, 17.5]
+    assert proyectado["kpis"][1]["filas"][0] == [300, 35.0, 265.0]
+    # La proyección no contamina el snapshot canónico que se reutiliza en Neon.
+    assert snapshot["movimientos"][0]["linea_id"] == "linea_anterior"
+    assert snapshot["kpis"][1]["filas"][0] == [300, 50, 250]
+
+
+def test_snapshot_muestra_creacion_pendiente_solo_en_su_mes(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    snapshot = {"kpis": [], "movimientos": []}
+    monkeypatch.setattr(
+        dashboard, "_leer_proyecciones_pendientes", lambda *_: [{
+            "tipo": "crear", "movimiento_clave": "manual:MAN-1", "version": 1,
+            "movimiento": {
+                "linea_id": "linea_1", "categoria": "Vivienda", "concepto": "Cuota",
+                "fecha": "2026-09-15", "descripcion": "Pago", "monto": "75000",
+                "moneda": "CRC", "medio_pago": "SINPE",
+            },
+        }],
+    )
+
+    septiembre = dashboard._aplicar_proyecciones(
+        snapshot, cliente, {"inicio": "2026-09-01", "fin_exclusivo": "2026-10-01"},
+    )
+    octubre = dashboard._aplicar_proyecciones(
+        snapshot, cliente, {"inicio": "2026-10-01", "fin_exclusivo": "2026-11-01"},
+    )
+
+    assert septiembre["movimientos"][0]["movimiento_clave"] == "manual:MAN-1"
+    assert septiembre["movimientos"][0]["monto"] == 75000
+    assert septiembre["sincronizaciones_pendientes"] == 1
+    assert octubre["movimientos"] == []
+
+
+def test_api_permanente_edita_con_periodo_de_la_vista(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    sesion = {"cid": "cliente_a", "num": "50688889999"}
+    recibido = {}
+    monkeypatch.setattr(app_mod, "_sesion_dashboard", lambda _request: (sesion, cliente))
+    monkeypatch.setattr(
+        app_mod.dashboard_edicion, "reclasificar",
+        lambda token, clave, linea, medio, alcance, monto: recibido.update(
+            token=token, clave=clave, linea=linea, monto=monto,
+        ) or {"ok": True, "estado": "pendiente"},
+    )
+    monkeypatch.setattr(app_mod.dashboard_edicion, "procesar_reconstrucciones_cliente", lambda *_: None)
+
+    respuesta = TestClient(app_mod.app).post(
+        "/api/dashboard/movimientos/reclasificar",
+        json={
+            "movimiento_clave": "bac:1", "linea_id": "gas_comedera",
+            "medio_pago": "VISA", "alcance": "individual", "monto": "4900",
+            "periodo_inicio": "2026-09-01",
+        },
+    )
+
+    assert respuesta.status_code == 200
+    payload = dashboard._decodificar_payload(recibido["token"])
+    assert payload["inicio"] == "2026-09-01"
+    assert payload["fin"] == "2026-10-01"
+    assert recibido["clave"] == "bac:1"
 
 
 def test_chat_dashboard_reutiliza_numero_e_historial_de_whatsapp(monkeypatch):

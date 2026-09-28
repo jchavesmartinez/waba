@@ -432,6 +432,9 @@ DASHBOARD_SECRET = (
 DASHBOARD_TOKEN_TTL_MINUTOS = int(os.environ.get(
     "DASHBOARD_TOKEN_TTL_MINUTOS", "30",
 ))
+DASHBOARD_SESION_DIAS = max(1, min(365, int(os.environ.get(
+    "DASHBOARD_SESION_DIAS", "180",
+))))
 DASHBOARD_CACHE_MINUTOS = int(os.environ.get("DASHBOARD_CACHE_MINUTOS", "15"))
 # Las correcciones del dashboard se confirman primero en la fuente editable y
 # quedan en una cola durable de Neon. Una ventana breve permite reunir varios

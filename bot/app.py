@@ -58,6 +58,10 @@ async def _ciclo_vida(_: FastAPI):
         target=dashboard_edicion.recuperar_reconstrucciones_pendientes,
         name="dashboard-ediciones-recuperacion", daemon=True,
     ).start()
+    threading.Thread(
+        target=dashboard.precalentar_snapshots,
+        name="dashboard-read-model-precalentamiento", daemon=True,
+    ).start()
     yield
 
 
@@ -383,37 +387,201 @@ def salud():
     return {"ok": True, "advertencias": _AVISOS_ARRANQUE}
 
 
+_CABECERAS_DASHBOARD = {
+    "Cache-Control": "private, no-store, max-age=0",
+    "Pragma": "no-cache",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": (
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
+        "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'"
+    ),
+}
+
+
+def _sesion_dashboard(request: Request) -> tuple[dict, dict]:
+    token = request.cookies.get(dashboard.DASHBOARD_COOKIE, "")
+    if not token:
+        raise dashboard.EnlaceInvalido("sesión ausente")
+    return dashboard.validar_sesion(token)
+
+
+def _token_dashboard_request(request: Request, inicio: object = None) -> tuple[str, dict, dict, dict]:
+    sesion, cliente = _sesion_dashboard(request)
+    periodo = dashboard.periodo_desde_inicio(inicio)
+    return dashboard.token_sesion_para_periodo(sesion, periodo), sesion, cliente, periodo
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def aplicacion_dashboard(request: Request):
+    """URL permanente: entrega la app ligera usando una sesión HttpOnly."""
+    try:
+        _sesion_dashboard(request)
+    except dashboard.EnlaceInvalido:
+        return HTMLResponse(
+            "<h1>Active su dashboard</h1><p>Solicite el enlace personal desde WhatsApp una sola vez.</p>",
+            status_code=401, headers=_CABECERAS_DASHBOARD,
+        )
+    return HTMLResponse(dashboard.renderizar_aplicacion(), headers=_CABECERAS_DASHBOARD)
+
+
 @app.get("/dashboard/{token}", response_class=HTMLResponse)
 def ver_dashboard(token: str):
-    """Entrega una vista autocontenida; los datos nunca quedan en una URL."""
-    cabeceras = {
-        "Cache-Control": "private, no-store, max-age=0",
-        "Pragma": "no-cache",
-        "Referrer-Policy": "no-referrer",
-        "X-Frame-Options": "DENY",
-        "Content-Security-Policy": (
-            "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
-            "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'"
-        ),
-    }
+    """Activa la sesión y redirige; el token temporal desaparece de la URL."""
     try:
-        html = dashboard.renderizar(token)
+        sesion = dashboard.crear_sesion(token)
     except dashboard.EnlaceInvalido:
         return HTMLResponse(
             "<h1>Enlace inválido o vencido</h1>"
             "<p>Solicite un enlace nuevo desde WhatsApp.</p>",
             status_code=410,
-            headers=cabeceras,
+            headers=_CABECERAS_DASHBOARD,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("No se pudo generar el dashboard: %s", exc)
-        return HTMLResponse(
-            "<h1>No pudimos cargar el dashboard</h1>"
-            "<p>Inténtelo nuevamente en unos minutos.</p>",
-            status_code=503,
-            headers=cabeceras,
+    respuesta = RedirectResponse("/dashboard", status_code=303, headers=_CABECERAS_DASHBOARD)
+    respuesta.set_cookie(
+        dashboard.DASHBOARD_COOKIE, sesion,
+        max_age=int(config.DASHBOARD_SESION_DIAS) * 86400,
+        httponly=True, secure=str(config.APP_PUBLIC_URL).startswith("https://"),
+        samesite="lax", path="/",
+    )
+    return respuesta
+
+
+@app.get("/api/dashboard/datos")
+def datos_dashboard(request: Request, tareas: BackgroundTasks, inicio: str = ""):
+    """Read model dinámico; devuelve stale-while-revalidate cuando corresponde."""
+    try:
+        _, _, cliente, periodo = _token_dashboard_request(request, inicio or None)
+        snapshot, sucio = dashboard.obtener_snapshot(cliente, periodo)
+        if sucio:
+            tareas.add_task(dashboard.refrescar_snapshot, cliente, periodo)
+        return JSONResponse(
+            {"ok": True, "dashboard": snapshot, "actualizando": sucio},
+            headers={"Cache-Control": "private, no-store"},
         )
-    return HTMLResponse(html, headers=cabeceras)
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo cargar el read model del dashboard")
+        return JSONResponse({"ok": False, "error": "No pude cargar el dashboard."}, status_code=503)
+
+
+@app.get("/api/dashboard/chat")
+def historial_chat_app(request: Request):
+    try:
+        sesion, cliente = _sesion_dashboard(request)
+        historial = memoria.cargar_historial(cliente, str(sesion["num"]))
+        mensajes = [
+            {"rol": turno["rol"], "contenido": str(turno.get("contenido", ""))}
+            for turno in historial[-40:]
+            if turno.get("rol") in {"user", "assistant"} and turno.get("contenido")
+        ]
+        return JSONResponse({"ok": True, "mensajes": mensajes}, headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+
+
+@app.post("/api/dashboard/chat")
+async def responder_chat_app(request: Request):
+    try:
+        datos = await request.json()
+        mensaje = str(datos.get("mensaje", "")).strip() if isinstance(datos, dict) else ""
+        if not mensaje or len(mensaje) > _DASHBOARD_CHAT_MAX_CARACTERES:
+            return JSONResponse({"ok": False, "error": "Escriba una consulta válida."}, status_code=400)
+        sesion, _ = _sesion_dashboard(request)
+        respuesta = await run_in_threadpool(responder, str(sesion["num"]), mensaje)
+        return JSONResponse({
+            "ok": True,
+            "mensaje": {"rol": "assistant", "contenido": respuesta.texto},
+            "botones": _botones_dashboard(respuesta.botones),
+            "adjuntos": _adjuntos_dashboard(respuesta.adjuntos),
+        }, headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo responder desde la app del dashboard")
+        return JSONResponse({"ok": False, "error": "No pude procesar la consulta."}, status_code=503)
+
+
+@app.post("/api/dashboard/movimientos/reclasificar")
+async def reclasificar_movimiento_app(request: Request, tareas: BackgroundTasks):
+    try:
+        datos = await request.json()
+        if not isinstance(datos, dict):
+            raise dashboard_edicion.ErrorReclasificacion("la solicitud no es válida")
+        token, sesion, _, _ = _token_dashboard_request(request, datos.get("periodo_inicio"))
+        resultado = dashboard_edicion.reclasificar(
+            token, datos.get("movimiento_clave"), datos.get("linea_id"),
+            datos.get("medio_pago"), datos.get("alcance", "individual"), datos.get("monto"),
+        )
+        tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(sesion["cid"]))
+        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except dashboard_edicion.ErrorReclasificacion as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo guardar una edición desde la app")
+        return JSONResponse({"ok": False, "error": "No pude guardar el cambio."}, status_code=503)
+
+
+@app.get("/api/dashboard/movimientos/{movimiento_clave}/estado")
+def estado_movimiento_app(movimiento_clave: str, request: Request):
+    try:
+        token, _, _, _ = _token_dashboard_request(request)
+        return JSONResponse(dashboard_edicion.estado_reconstruccion(token, movimiento_clave),
+                            headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except dashboard_edicion.ErrorReclasificacion as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo consultar una edición desde la app")
+        return JSONResponse({"ok": False, "error": "No pude verificar el cambio."}, status_code=503)
+
+
+@app.post("/api/dashboard/movimientos/crear")
+async def crear_movimiento_app(request: Request, tareas: BackgroundTasks):
+    try:
+        datos = await request.json()
+        if not isinstance(datos, dict):
+            raise dashboard_edicion.ErrorReclasificacion("la solicitud no es válida")
+        token, sesion, _, periodo = _token_dashboard_request(
+            request, datos.get("periodo_inicio"),
+        )
+        resultado = dashboard_edicion.crear_movimiento(
+            token, datos.get("valores"), periodo=periodo,
+        )
+        tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(sesion["cid"]))
+        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except dashboard_edicion.ErrorReclasificacion as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo crear un movimiento desde la app")
+        return JSONResponse({"ok": False, "error": "No pude guardar el movimiento."}, status_code=503)
+
+
+@app.post("/api/dashboard/conceptos/{linea_id}/pagar")
+async def pagar_concepto_app(linea_id: str, request: Request, tareas: BackgroundTasks):
+    try:
+        datos = await request.json()
+        if not isinstance(datos, dict):
+            raise dashboard_edicion.ErrorReclasificacion("la solicitud no es válida")
+        token, sesion, _, _ = _token_dashboard_request(request, datos.get("periodo_inicio"))
+        resultado = dashboard_edicion.registrar_pago(
+            token, linea_id, datos.get("monto"), datos.get("fecha"),
+        )
+        tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(sesion["cid"]))
+        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except dashboard_edicion.ErrorReclasificacion as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo registrar un pago desde la app")
+        return JSONResponse({"ok": False, "error": "No pude guardar el pago."}, status_code=503)
 
 
 def _botones_dashboard(botones: object) -> list[dict]:

@@ -156,6 +156,7 @@ services:
     name: waba
     runtime: python
     plan: starter
+    healthCheckPath: /salud
     buildCommand: pip install -r requirements-bot.txt
     startCommand: uvicorn bot.app:app --host 0.0.0.0 --port $PORT
     envVars:
@@ -303,6 +304,8 @@ services:
         sync: false
       - key: DASHBOARD_TOKEN_TTL_MINUTOS
         value: "30"
+      - key: DASHBOARD_SESION_DIAS
+        value: "180"
       - key: DASHBOARD_CACHE_MINUTOS
         value: "15"
       - key: DASHBOARD_MAX_KPIS
@@ -353,6 +356,7 @@ services:
     name: fachavi-dashboard-worker
     runtime: python
     plan: starter
+    maxShutdownDelaySeconds: 300
     buildCommand: pip install -r requirements-bot.txt
     startCommand: python -m bot.trabajador_dashboard
     envVars:

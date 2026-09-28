@@ -1,9 +1,9 @@
-"""Dashboard financiero multi-cliente servido mediante enlaces temporales.
+"""Aplicación financiera multi-cliente con sesión estable y datos dinámicos.
 
-La plantilla visual es unica. Los datos se obtienen exclusivamente de los KPI
+La plantilla visual es única. Los datos se obtienen exclusivamente de los KPI
 habilitados en ``_kpis`` y se materializan con el mismo resolvedor/validador SQL
-que usa el bot. El HTML recibe un snapshot embebido: una vez cargada la pagina,
-el navegador no consulta Neon ni expone credenciales.
+que usa el bot. El navegador consume una API autenticada por cookie HttpOnly;
+Neon y las credenciales de los orígenes nunca quedan expuestos al cliente.
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ import registry
 from bot import catalogo, edicion, kpis, nl2sql, seguimiento, warehouse_ro
 from modelo import metadata as metadata_modelos
 from bot.tiempo import fecha_local
+from sqlalchemy import text
+from warehouse import crear_destino
 
 logger = logging.getLogger("fachavi.bot.dashboard")
 
@@ -43,6 +45,9 @@ _MESES = (
     "enero", "febrero", "marzo", "abril", "mayo", "junio",
     "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
 )
+DASHBOARD_COOKIE = "fachavi_dashboard"
+_ESQUEMA_APP = "_bot"
+_TABLA_SNAPSHOTS = "dashboard_snapshots"
 
 
 class EnlaceInvalido(ValueError):
@@ -76,6 +81,24 @@ def _firma(payload: str) -> str:
         hashlib.sha256,
     ).digest()
     return _b64(digest)
+
+
+def _codificar_payload(payload: dict) -> str:
+    cuerpo = _b64(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    return f"{cuerpo}.{_firma(cuerpo)}"
+
+
+def _decodificar_payload(token: str) -> dict:
+    try:
+        cuerpo, firma = str(token).split(".", 1)
+        if not hmac.compare_digest(_firma(cuerpo), firma):
+            raise EnlaceInvalido("firma invalida")
+        payload = json.loads(_desb64(cuerpo).decode("utf-8"))
+    except EnlaceInvalido:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise EnlaceInvalido("token malformado") from exc
+    return payload
 
 
 def _periodo_actual() -> dict:
@@ -153,8 +176,7 @@ def crear_enlace(cliente: dict, numero: str, pregunta: str = "") -> tuple[str, s
         "exp": ahora + int(config.DASHBOARD_TOKEN_TTL_MINUTOS) * 60,
         "nonce": secrets.token_urlsafe(10),
     }
-    cuerpo = _b64(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    token = f"{cuerpo}.{_firma(cuerpo)}"
+    token = _codificar_payload(payload)
     return (
         f"{config.APP_PUBLIC_URL}/dashboard/{token}",
         _etiqueta_periodo(periodo),
@@ -162,15 +184,7 @@ def crear_enlace(cliente: dict, numero: str, pregunta: str = "") -> tuple[str, s
 
 
 def validar_enlace(token: str, ahora: int | None = None) -> tuple[dict, dict]:
-    try:
-        cuerpo, firma = str(token).split(".", 1)
-        if not hmac.compare_digest(_firma(cuerpo), firma):
-            raise EnlaceInvalido("firma invalida")
-        payload = json.loads(_desb64(cuerpo).decode("utf-8"))
-    except EnlaceInvalido:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise EnlaceInvalido("token malformado") from exc
+    payload = _decodificar_payload(token)
 
     instante = int(time.time()) if ahora is None else int(ahora)
     if int(payload.get("exp", 0)) <= instante:
@@ -182,6 +196,65 @@ def validar_enlace(token: str, ahora: int | None = None) -> tuple[dict, dict]:
     if not cliente or str(cliente.get("cliente_id")) != str(payload["cid"]):
         raise EnlaceInvalido("usuario revocado o cliente distinto")
     return payload, cliente
+
+
+def crear_sesion(token_activacion: str) -> str:
+    """Cambia un enlace breve por una sesión HttpOnly renovable y estable."""
+    payload, _ = validar_enlace(token_activacion)
+    ahora = int(time.time())
+    return _codificar_payload({
+        "v": 2,
+        "cid": str(payload["cid"]),
+        "num": str(payload["num"]),
+        "iat": ahora,
+        "exp": ahora + int(config.DASHBOARD_SESION_DIAS) * 86400,
+    })
+
+
+def validar_sesion(token: str, ahora: int | None = None) -> tuple[dict, dict]:
+    payload = _decodificar_payload(token)
+    instante = int(time.time()) if ahora is None else int(ahora)
+    if payload.get("v") != 2 or int(payload.get("exp", 0)) <= instante:
+        raise EnlaceInvalido("sesión vencida")
+    if not payload.get("cid") or not payload.get("num"):
+        raise EnlaceInvalido("sesión incompleta")
+    cliente = registry.resolver(str(payload["num"]))
+    if not cliente or str(cliente.get("cliente_id")) != str(payload["cid"]):
+        raise EnlaceInvalido("usuario revocado o cliente distinto")
+    return payload, cliente
+
+
+def periodo_desde_inicio(valor: object = None) -> dict:
+    """Normaliza el mes solicitado por la app sin aceptar rangos arbitrarios."""
+    if not valor:
+        return _periodo_actual()
+    try:
+        inicio = date.fromisoformat(str(valor)[:10]).replace(day=1)
+    except ValueError as exc:
+        raise EnlaceInvalido("período inválido") from exc
+    fin = date(inicio.year + 1, 1, 1) if inicio.month == 12 else date(
+        inicio.year, inicio.month + 1, 1,
+    )
+    return {
+        "inicio": inicio.isoformat(),
+        "fin_exclusivo": fin.isoformat(),
+        "granularidad": "mes",
+    }
+
+
+def token_sesion_para_periodo(sesion: dict, periodo: dict) -> str:
+    """Token interno compatible con la lógica existente; nunca va al navegador."""
+    ahora = int(time.time())
+    return _codificar_payload({
+        "v": 1,
+        "cid": str(sesion["cid"]),
+        "num": str(sesion["num"]),
+        "inicio": str(periodo["inicio"]),
+        "fin": str(periodo["fin_exclusivo"]),
+        "iat": ahora,
+        "exp": ahora + 300,
+        "nonce": secrets.token_urlsafe(8),
+    })
 
 
 def _serializable(valor):
@@ -523,6 +596,7 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
         if len(_CACHE) > 100:
             mas_antigua = min(_CACHE, key=lambda k: _CACHE[k][0])
             _CACHE.pop(mas_antigua, None)
+    _guardar_snapshot_persistente(cliente, periodo, snapshot)
     return snapshot
 
 
@@ -615,11 +689,302 @@ def _lineas_presupuesto(cliente: dict, ctx, periodo: dict | None = None) -> list
     ]
 
 
+def _motor_snapshots(cliente: dict):
+    destino = crear_destino(config.WAREHOUSE_TIPO, config.dsn_de_cliente(cliente))
+    if not hasattr(destino, "conectar"):
+        destino.cerrar()
+        raise RuntimeError("los snapshots persistentes requieren PostgreSQL")
+    return destino, destino.conectar()
+
+
+def _asegurar_snapshots(cx) -> None:
+    cx.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{_ESQUEMA_APP}"'))
+    cx.execute(text(f'''
+        CREATE TABLE IF NOT EXISTS "{_ESQUEMA_APP}"."{_TABLA_SNAPSHOTS}" (
+            cliente_id TEXT NOT NULL,
+            periodo_inicio DATE NOT NULL,
+            periodo_fin DATE NOT NULL,
+            snapshot JSONB NOT NULL,
+            sucio BOOLEAN NOT NULL DEFAULT FALSE,
+            actualizado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (cliente_id, periodo_inicio, periodo_fin)
+        )
+    '''))
+
+
+def _guardar_snapshot_persistente(cliente: dict, periodo: dict, snapshot: dict) -> None:
+    """Publica el read model en Neon; un fallo no inutiliza el dashboard."""
+    destino = None
+    try:
+        destino, motor = _motor_snapshots(cliente)
+        with motor.begin() as cx:
+            _asegurar_snapshots(cx)
+            cx.execute(text(f'''
+                INSERT INTO "{_ESQUEMA_APP}"."{_TABLA_SNAPSHOTS}"
+                    (cliente_id, periodo_inicio, periodo_fin, snapshot, sucio)
+                VALUES (:cliente_id, CAST(:inicio AS date), CAST(:fin AS date),
+                        CAST(:snapshot AS jsonb), FALSE)
+                ON CONFLICT (cliente_id, periodo_inicio, periodo_fin) DO UPDATE SET
+                    snapshot = EXCLUDED.snapshot,
+                    sucio = FALSE,
+                    actualizado_en = CURRENT_TIMESTAMP
+            '''), {
+                "cliente_id": str(cliente.get("cliente_id", "")),
+                "inicio": str(periodo["inicio"]),
+                "fin": str(periodo["fin_exclusivo"]),
+                "snapshot": json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("no se pudo publicar el snapshot persistente: %s", exc)
+    finally:
+        if destino:
+            destino.cerrar()
+
+
+def leer_snapshot_persistente(cliente: dict, periodo: dict) -> tuple[dict | None, bool]:
+    destino = None
+    try:
+        destino, motor = _motor_snapshots(cliente)
+        with motor.begin() as cx:
+            _asegurar_snapshots(cx)
+            fila = cx.execute(text(f'''
+                SELECT snapshot, sucio
+                FROM "{_ESQUEMA_APP}"."{_TABLA_SNAPSHOTS}"
+                WHERE cliente_id = :cliente_id
+                  AND periodo_inicio = CAST(:inicio AS date)
+                  AND periodo_fin = CAST(:fin AS date)
+            '''), {
+                "cliente_id": str(cliente.get("cliente_id", "")),
+                "inicio": str(periodo["inicio"]),
+                "fin": str(periodo["fin_exclusivo"]),
+            }).mappings().first()
+            if not fila:
+                return None, False
+            snapshot = fila["snapshot"]
+            if isinstance(snapshot, str):
+                snapshot = json.loads(snapshot)
+            return dict(snapshot), bool(fila["sucio"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("no se pudo leer el snapshot persistente: %s", exc)
+        return None, False
+    finally:
+        if destino:
+            destino.cerrar()
+
+
+def _normalizar_dimension(valor: object) -> str:
+    import unicodedata
+
+    return "".join(
+        caracter for caracter in unicodedata.normalize("NFD", str(valor or "").strip().casefold())
+        if unicodedata.category(caracter) != "Mn"
+    )
+
+
+def _indice_columna(columnas: list, expresion: str) -> int | None:
+    patron = re.compile(expresion, re.IGNORECASE)
+    return next((indice for indice, columna in enumerate(columnas)
+                 if patron.search(str(columna))), None)
+
+
+def _decimal_snapshot(valor: object) -> Decimal | None:
+    try:
+        numero = Decimal(str(valor))
+    except Exception:  # noqa: BLE001 - un KPI ajeno no debe romper la vista
+        return None
+    return numero if numero.is_finite() else None
+
+
+def _ajustar_kpis_movimiento(snapshot: dict, movimiento: dict, factor: int) -> None:
+    """Ajusta la proyección derivada sin crear otro estado financiero."""
+    monto = _decimal_snapshot(movimiento.get("monto"))
+    linea = str(movimiento.get("linea_id") or movimiento.get("linea_presupuesto_id") or "")
+    categoria = _normalizar_dimension(movimiento.get("categoria"))
+    if monto is None or not linea:
+        return
+    generales = {"presupuesto_disponible", "gasto_total"}
+    for kpi in snapshot.get("kpis", []):
+        columnas = list(kpi.get("columnas") or [])
+        filas = kpi.get("filas") or []
+        if not columnas or not isinstance(filas, list):
+            continue
+        indice_gasto = _indice_columna(
+            columnas, r"^(gastado|gasto)$|gasto_neto|^monto$|total_gastado",
+        )
+        if indice_gasto is None:
+            continue
+        indice_linea = _indice_columna(columnas, r"^linea_id$|linea_presupuesto_id")
+        indice_categoria = _indice_columna(columnas, r"^categor(?:ia|ía)$")
+        es_general = (
+            str(kpi.get("kpi", "")).casefold() in generales
+            and indice_linea is None and indice_categoria is None
+            and len(filas) == 1
+        )
+        for fila in filas:
+            if not isinstance(fila, list) or indice_gasto >= len(fila):
+                continue
+            coincide = es_general
+            if indice_linea is not None and indice_linea < len(fila):
+                coincide = str(fila[indice_linea]) == linea
+            elif indice_categoria is not None and indice_categoria < len(fila):
+                coincide = _normalizar_dimension(fila[indice_categoria]) == categoria
+            if not coincide:
+                continue
+            anterior = _decimal_snapshot(fila[indice_gasto]) or Decimal("0")
+            nuevo = anterior + (monto * factor)
+            fila[indice_gasto] = float(nuevo)
+
+            indice_presupuesto = _indice_columna(
+                columnas, r"^presupuesto$|monto_presupuestado|presupuesto_mensual|^mensual$",
+            )
+            presupuesto = (
+                _decimal_snapshot(fila[indice_presupuesto])
+                if indice_presupuesto is not None and indice_presupuesto < len(fila)
+                else None
+            )
+            indice_disponible = _indice_columna(columnas, r"^disponible$|saldo")
+            if presupuesto is not None and indice_disponible is not None and indice_disponible < len(fila):
+                fila[indice_disponible] = float(presupuesto - nuevo)
+            indice_porcentaje = _indice_columna(columnas, r"pct|porcentaje")
+            if (presupuesto is not None and presupuesto != 0
+                    and indice_porcentaje is not None and indice_porcentaje < len(fila)):
+                fila[indice_porcentaje] = float(nuevo / presupuesto * 100)
+
+
+def _leer_proyecciones_pendientes(cliente: dict) -> list[dict]:
+    # Importación diferida: dashboard_edicion usa este módulo para validar el
+    # token, pero al atender un GET ambos módulos ya terminaron de cargar.
+    from bot import dashboard_edicion
+
+    try:
+        return dashboard_edicion.proyecciones_pendientes(cliente)
+    except Exception as exc:  # una cola inaccesible no impide leer el dashboard
+        logger.warning("no se pudieron aplicar ediciones pendientes al snapshot: %s", exc)
+        return []
+
+
+def _aplicar_proyecciones(snapshot: dict, cliente: dict, periodo: dict) -> dict:
+    proyecciones = _leer_proyecciones_pendientes(cliente)
+    if not proyecciones:
+        return snapshot
+    # El read model persistente permanece canónico. La copia es la vista
+    # publicada y puede incorporar trabajos pendientes sin contaminar Neon.
+    resultado = json.loads(json.dumps(snapshot, ensure_ascii=False, default=_serializable))
+    movimientos = resultado.setdefault("movimientos", [])
+    inicio = str(periodo.get("inicio", ""))
+    fin = str(periodo.get("fin_exclusivo", ""))
+    aplicadas = 0
+    for proyeccion in proyecciones:
+        tipo = str(proyeccion.get("tipo", ""))
+        clave = str(proyeccion.get("movimiento_clave", ""))
+        if tipo == "editar":
+            movimiento = next(
+                (fila for fila in movimientos
+                 if str(fila.get("movimiento_clave", "")) == clave),
+                None,
+            )
+            if not movimiento:
+                continue
+            _ajustar_kpis_movimiento(resultado, movimiento, -1)
+            movimiento["linea_id"] = str(proyeccion.get("linea_id") or movimiento.get("linea_id") or "")
+            if "linea_presupuesto_id" in movimiento:
+                movimiento["linea_presupuesto_id"] = movimiento["linea_id"]
+            for campo in ("categoria", "concepto", "medio_pago", "moneda"):
+                if campo in proyeccion:
+                    movimiento[campo] = proyeccion[campo]
+            if "monto" in proyeccion:
+                monto = _decimal_snapshot(proyeccion["monto"])
+                if monto is not None:
+                    movimiento["monto"] = float(monto)
+            movimiento["pendiente_sincronizacion"] = True
+            movimiento["version_pendiente"] = proyeccion.get("version")
+            _ajustar_kpis_movimiento(resultado, movimiento, 1)
+            aplicadas += 1
+        elif tipo == "crear" and isinstance(proyeccion.get("movimiento"), dict):
+            movimiento = dict(proyeccion["movimiento"])
+            fecha = str(movimiento.get("fecha", ""))[:10]
+            if not (inicio <= fecha < fin):
+                continue
+            if any(str(fila.get("movimiento_clave", "")) == clave for fila in movimientos):
+                continue
+            movimiento["movimiento_clave"] = clave
+            movimiento["pendiente_sincronizacion"] = True
+            movimiento["version_pendiente"] = proyeccion.get("version")
+            monto = _decimal_snapshot(movimiento.get("monto"))
+            if monto is not None:
+                movimiento["monto"] = float(monto)
+            movimientos.append(movimiento)
+            _ajustar_kpis_movimiento(resultado, movimiento, 1)
+            aplicadas += 1
+    if aplicadas:
+        resultado["sincronizaciones_pendientes"] = aplicadas
+    return resultado
+
+
+def obtener_snapshot(cliente: dict, periodo: dict) -> tuple[dict, bool]:
+    """Lee el read model rápido; solo calcula sincrónicamente en el primer uso."""
+    snapshot, sucio = leer_snapshot_persistente(cliente, periodo)
+    if snapshot:
+        return _aplicar_proyecciones(snapshot, cliente, periodo), sucio
+    snapshot = generar_snapshot(cliente, periodo)
+    return _aplicar_proyecciones(snapshot, cliente, periodo), False
+
+
+def refrescar_snapshot(cliente: dict, periodo: dict) -> dict:
+    """Recalcula explícitamente un mes, ignorando cachés locales antiguas."""
+    cliente_id = str(cliente.get("cliente_id", ""))
+    clave = (cliente_id, str(periodo["inicio"]), str(periodo["fin_exclusivo"]))
+    with _CACHE_LOCK:
+        _CACHE.pop(clave, None)
+    return generar_snapshot(cliente, periodo)
+
+
+def refrescar_snapshot_actual(cliente: dict) -> None:
+    try:
+        refrescar_snapshot(cliente, _periodo_actual())
+    except Exception:  # el job ya quedó materializado; el siguiente GET reintenta
+        logger.exception("[%s] no se pudo refrescar el read model", cliente.get("cliente_id"))
+
+
+def precalentar_snapshots() -> None:
+    """Prepara el mes actual sin retrasar el arranque ni el health check web."""
+    try:
+        clientes = registry.listar_clientes()
+    except Exception:
+        logger.exception("no se pudo leer el registro para precalentar dashboards")
+        return
+    for cliente in clientes:
+        refrescar_snapshot_actual(cliente)
+
+
 def invalidar_cache(cliente_id: str) -> None:
-    """Descarta snapshots de un cliente tras una edición confirmada."""
+    """Marca snapshots obsoletos localmente y en Neon entre instancias."""
     with _CACHE_LOCK:
         for clave in [k for k in _CACHE if k[0] == str(cliente_id)]:
             _CACHE.pop(clave, None)
+    try:
+        cliente = next((c for c in registry.listar_clientes()
+                        if str(c.get("cliente_id", "")) == str(cliente_id)), None)
+    except Exception:
+        logger.exception("no se pudo resolver el cliente al invalidar snapshots")
+        return
+    if not cliente:
+        return
+    destino = None
+    try:
+        destino, motor = _motor_snapshots(cliente)
+        with motor.begin() as cx:
+            _asegurar_snapshots(cx)
+            cx.execute(text(f'''
+                UPDATE "{_ESQUEMA_APP}"."{_TABLA_SNAPSHOTS}"
+                SET sucio = TRUE
+                WHERE cliente_id = :cliente_id
+            '''), {"cliente_id": str(cliente_id)})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("no se pudo invalidar el snapshot persistente: %s", exc)
+    finally:
+        if destino:
+            destino.cerrar()
 
 
 def renderizar(token: str) -> str:
@@ -645,6 +1010,17 @@ def renderizar(token: str) -> str:
             .replace("__DASHBOARD_ASSET_VERSION__", huella_assets))
 
 
+def renderizar_aplicacion() -> str:
+    """Entrega solo la app; los datos financieros llegan por API autenticada."""
+    plantilla = _PLANTILLA.read_text(encoding="utf-8")
+    huella_assets = hashlib.sha256(
+        _PLANTILLA.read_bytes() + (ASSETS_DIR / "app.js").read_bytes()
+        + (ASSETS_DIR / "styles.css").read_bytes()
+    ).hexdigest()[:16]
+    return (plantilla.replace("__DASHBOARD_DATA__", "{}")
+            .replace("__DASHBOARD_ASSET_VERSION__", huella_assets))
+
+
 def mensaje_enlace(cliente: dict, numero: str, pregunta: str = "") -> str:
     if not habilitado():
         return (
@@ -652,10 +1028,6 @@ def mensaje_enlace(cliente: dict, numero: str, pregunta: str = "") -> str:
             "El administrador debe completar su configuración."
         )
     try:
-        # Se materializa al pedirlo, antes de enviar el enlace. En el servicio
-        # actual (una instancia) la apertura reutiliza este snapshot y no vuelve
-        # a ejecutar los KPI durante la ventana de cache.
-        generar_snapshot(cliente, periodo_solicitado(pregunta))
         url, periodo = crear_enlace(cliente, numero, pregunta)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -668,6 +1040,6 @@ def mensaje_enlace(cliente: dict, numero: str, pregunta: str = "") -> str:
         )
     return (
         f"Aquí tiene su dashboard financiero de {periodo}:\n{url}\n\n"
-        f"El enlace es personal y vence en "
-        f"{config.DASHBOARD_TOKEN_TTL_MINUTOS} minutos."
+        "Este enlace activa su sesión. Después puede guardar como favorito la "
+        "dirección permanente del dashboard."
     )

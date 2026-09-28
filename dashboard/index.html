@@ -16,6 +16,11 @@
         <p id="periodo" class="periodo"></p>
       </div>
       <div class="hero-acciones">
+        <nav class="navegacion-mes" aria-label="Cambiar mes">
+          <button id="mes-anterior" type="button" aria-label="Mes anterior">←</button>
+          <button id="mes-actual" type="button">Mes actual</button>
+          <button id="mes-siguiente" type="button" aria-label="Mes siguiente">→</button>
+        </nav>
         <label class="selector-vista" for="agrupar-gastos">
           Ver gastos por
           <select id="agrupar-gastos">
@@ -28,6 +33,10 @@
       </div>
     </header>
 
+    <section id="cargando-dashboard" class="panel cargando-dashboard" aria-live="polite">
+      <span class="cargando-pulso"></span>
+      <div><strong>Cargando sus finanzas…</strong><small>La página ya está lista; estamos trayendo los datos.</small></div>
+    </section>
     <section id="resumen" class="cards" aria-label="Resumen"></section>
     <section id="presupuesto" class="panel presupuesto" hidden></section>
     <section id="indicadores" class="indicadores"></section>
