@@ -10,6 +10,8 @@ Los textos de ejemplo son los cuerpos reales de notificaciones del BAC, ya
 convertidos a texto plano por el conector IMAP (que es como llegan a la tabla).
 """
 
+from decimal import Decimal
+
 import pytest
 
 from modelo.motor import SIN_CLASIFICAR, Modelo, _normalizar
@@ -516,3 +518,8 @@ def test_el_separador_ambiguo_se_lee_como_miles():
     # con 1 o 2 decimales no hay ambiguedad
     assert convertir("decimal", "3,32")[""] == 3.32
     assert convertir("decimal", "113.13")[""] == 113.13
+
+
+def test_numero_ya_tipado_con_tres_decimales_no_se_reinterpreta_como_texto():
+    assert convertir("decimal", 4893.042)[""] == 4893.042
+    assert convertir("decimal", Decimal("4893.042"))[""] == 4893.042

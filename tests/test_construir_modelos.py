@@ -13,6 +13,7 @@ from modelo.construir import (
     FUENTE_METADATA_SEMANTICA,
     SUFIJO_RECHAZOS,
     _escribir,
+    _invalidar_snapshot_dashboard,
     _publicar_metadata_semantica,
     nombre_esquema_semantico,
 )
@@ -59,6 +60,42 @@ def test_el_esquema_semantico_es_hermano_del_raw():
     """
     assert nombre_esquema_semantico("cliente_a") == "semantic_cliente_a"
     assert nombre_esquema_semantico("Cliente-B") == "semantic_cliente_b"
+
+
+def test_reconstruccion_postgres_invalida_snapshot_persistente():
+    ejecutadas = []
+
+    class Resultado:
+        def scalar(self):
+            return "_bot.dashboard_snapshots"
+
+    class Conexion:
+        def execute(self, consulta, parametros=None):
+            ejecutadas.append((str(consulta), parametros))
+            return Resultado()
+
+    class Transaccion:
+        def __enter__(self):
+            return Conexion()
+
+        def __exit__(self, *_):
+            return False
+
+    class Motor:
+        def begin(self):
+            return Transaccion()
+
+    class Destino:
+        tipo = "postgres"
+
+        def conectar(self):
+            return Motor()
+
+    _invalidar_snapshot_dashboard(Destino(), "cliente_a")
+
+    assert "to_regclass" in ejecutadas[0][0]
+    assert 'UPDATE "_bot"."dashboard_snapshots"' in ejecutadas[1][0]
+    assert ejecutadas[1][1] == {"cliente_id": "cliente_a"}
 
 
 # --- creacion de tablas ---------------------------------------------------

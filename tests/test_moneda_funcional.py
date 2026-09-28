@@ -137,6 +137,63 @@ def test_repara_override_heredado_que_confundio_monto_visible_con_moneda_origen(
     assert fila["monto"] == Decimal("23000")
 
 
+def test_intencion_visible_con_tres_decimales_no_se_convierte_en_millones():
+    class ConversorFalso:
+        moneda_funcional = "CRC"
+
+        def convertir(self, monto, moneda, fecha):
+            tasa = Decimal("453.9") if moneda == "USD" else Decimal("1")
+            return {
+                "monto": Decimal(str(monto)) * tasa, "moneda": "CRC",
+                "tasa": tasa, "fecha_tasa": "2026-09-24", "proveedor": "prueba",
+            }
+
+    # El parser textual histórico interpreta 4893.042 como 4.893.042. La nota
+    # del editor conserva el valor que la persona realmente confirmó en CRC y
+    # debe prevalecer sobre esa ambigüedad regional.
+    fila, motivo = _proyectar(
+        {
+            "fecha": "2026-09-24", "descripcion": "WM SUPERCENTER Ñ5092",
+            "moneda": "USD", "monto": "4893.042", "id": "wm-1",
+        },
+        {
+            "fuente": "banco", "fecha": "fecha", "descripcion": "descripcion",
+            "moneda": "moneda", "monto": "monto", "clave": "id",
+        },
+        "movimientos", {}, ConversorFalso(), ("CRC", Decimal("4893.042")),
+    )
+
+    assert motivo == ""
+    assert fila["monto"] == Decimal("4893.042")
+    assert fila["monto_original"] * Decimal("453.9") == Decimal("4893.042")
+
+
+def test_intencion_visible_tambien_corrige_fuente_en_misma_moneda():
+    class ConversorFalso:
+        moneda_funcional = "CRC"
+
+        def convertir(self, monto, moneda, fecha):
+            return {
+                "monto": Decimal(str(monto)), "moneda": "CRC", "tasa": Decimal("1"),
+                "fecha_tasa": "2026-09-24", "proveedor": "origen",
+            }
+
+    fila, motivo = _proyectar(
+        {
+            "fecha": "2026-09-24", "descripcion": "Compra CRC",
+            "moneda": "CRC", "monto": "4893.042", "id": "crc-1",
+        },
+        {
+            "fuente": "banco", "fecha": "fecha", "descripcion": "descripcion",
+            "moneda": "moneda", "monto": "monto", "clave": "id",
+        },
+        "movimientos", {}, ConversorFalso(), ("CRC", Decimal("4893.042")),
+    )
+
+    assert motivo == ""
+    assert fila["monto_original"] == fila["monto"] == Decimal("4893.042")
+
+
 def test_intenciones_visibles_se_resuelven_por_metadata_y_no_por_cliente():
     metadata = {
         "modelos": [{"modelo_id": "banco", "tabla_destino": "finanzas__banco"}],

@@ -19,8 +19,11 @@ entre MASTER, VISA y AMEX segun con que se pago).
 """
 
 import logging
+import math
 import re
 from datetime import datetime
+from decimal import Decimal
+from numbers import Real
 
 logger = logging.getLogger("fachavi.modelo.tipos")
 
@@ -156,6 +159,15 @@ def _a_numero(valor):
     """
     if valor is None:
         return None
+    # Un número que ya fue tipado por Sheets/Postgres no contiene separadores
+    # regionales. Volver a convertirlo a texto hacía que 4893.042 (tres
+    # decimales reales) se leyera como 4.893.042 por la heurística reservada a
+    # textos humanos. La heurística se aplica únicamente a strings.
+    if isinstance(valor, Decimal):
+        return float(valor) if valor.is_finite() else None
+    if isinstance(valor, Real) and not isinstance(valor, bool):
+        numero = float(valor)
+        return numero if math.isfinite(numero) else None
     texto = str(valor).strip().replace(" ", "")
     if not texto:
         return None

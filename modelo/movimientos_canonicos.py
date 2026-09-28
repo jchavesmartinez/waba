@@ -179,7 +179,7 @@ def _proyectar(cruda: dict, cfg: dict, modelo_id: str,
         "monto": monto, "moneda": moneda, "tasa": None,
         "fecha_tasa": None, "proveedor": "",
     }
-    monto, conversion = _reparar_override_visible_heredado(
+    monto, conversion = _aplicar_intencion_monto_visible(
         monto, moneda, fecha, conversor, conversion, intencion_monto_visible)
     return {
         "_clave": f"{fuente}:{clave}",
@@ -247,28 +247,32 @@ def _intenciones_monto_visible(metadata: dict, cfg: dict) -> dict[str, tuple[str
     return salida
 
 
-def _reparar_override_visible_heredado(
+def _aplicar_intencion_monto_visible(
     monto: object, moneda_origen: str, fecha, conversor: ConversorMoneda | None,
     conversion: dict, intencion: tuple[str, Decimal] | None,
 ) -> tuple[object, dict]:
-    """Repara el patrón inequívoco del editor legado sin tocar la fuente.
+    """Hace autoritativo el monto visible confirmado en el dashboard.
 
-    Una nota ``CRC 23000`` representa la intención del usuario. Si la fuente
-    es USD y el override también vale literalmente ``23000``, una versión
-    antigua confundió ambas monedas. Los overrides nuevos ya guardan el
-    equivalente USD, por lo que no cumplen esta condición y pasan intactos.
+    La nota ``CRC 4893.042`` es la intención explícita del usuario. No se puede
+    inferir esa intención otra vez desde el valor del override: al atravesar
+    un parser regional, ``4893.042`` puede convertirse en ``4.893.042`` antes
+    de llegar a este contrato y luego multiplicarse nuevamente por la tasa.
+
+    Tanto para overrides legados como nuevos se reconstruye el importe de
+    origen desde la intención visible y la tasa histórica. El resultado es
+    idempotente: un override moderno que ya contiene el equivalente USD llega
+    exactamente al mismo importe, mientras uno legado queda saneado.
     """
     if not intencion or not conversor:
         return monto, conversion
     moneda_visible, monto_visible = intencion
     moneda_normalizada = str(moneda_origen or "").strip().upper()
-    try:
-        monto_origen_actual = Decimal(str(monto))
-    except (InvalidOperation, ValueError):
+    if moneda_visible != str(conversion.get("moneda", "")).strip().upper():
         return monto, conversion
-    if (moneda_visible != str(conversion.get("moneda", "")).strip().upper()
-            or moneda_normalizada == moneda_visible or monto_origen_actual != monto_visible):
-        return monto, conversion
+    if moneda_normalizada == moneda_visible:
+        return monto_visible, conversor.convertir(
+            monto_visible, moneda_normalizada, fecha,
+        )
     try:
         tasa = Decimal(str(conversion.get("tasa")))
     except (InvalidOperation, ValueError):

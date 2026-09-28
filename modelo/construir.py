@@ -34,6 +34,7 @@ from .metadata import leer as leer_metadata
 from .movimientos_canonicos import construir as construir_movimientos_canonicos
 from .motor import Modelo
 import registry
+from sqlalchemy import text
 from warehouse import crear_destino
 from warehouse.base import nombre_esquema
 
@@ -120,8 +121,38 @@ def construir_cliente(destino, cliente: dict, probar: bool = False) -> dict:
 
     _publicar_metadata_semantica(
         destino, cliente, esquema_raw, esquema_sem, tablas_construidas, probar)
+    if not probar:
+        _invalidar_snapshot_dashboard(destino, cid)
 
     return total
+
+
+def _invalidar_snapshot_dashboard(destino, cliente_id: str) -> None:
+    """Marca obsoleto el read model tras publicar datos semánticos nuevos.
+
+    El cron de modelos corre separado del web. Sin esta señal, un snapshot
+    persistente podía seguir mostrando durante horas un monto ya corregido en
+    la tabla canónica. DuckDB y destinos sin el read model no hacen nada.
+    """
+    if str(getattr(destino, "tipo", "")).casefold() != "postgres":
+        return
+    try:
+        motor = destino.conectar()
+        with motor.begin() as cx:
+            existe = cx.execute(
+                text("SELECT to_regclass('_bot.dashboard_snapshots')"),
+            ).scalar()
+            if existe:
+                cx.execute(text('''
+                    UPDATE "_bot"."dashboard_snapshots"
+                    SET sucio = TRUE
+                    WHERE cliente_id = :cliente_id
+                '''), {"cliente_id": str(cliente_id)})
+    except Exception as exc:  # el modelo quedó publicado; el dashboard reintenta por TTL
+        logger.warning(
+            "[%s] no se pudo invalidar el snapshot del dashboard: %s",
+            cliente_id, exc,
+        )
 
 
 def _publicar_metadata_semantica(destino, cliente: dict, esquema_raw: str,

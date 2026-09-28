@@ -748,7 +748,9 @@ def leer_snapshot_persistente(cliente: dict, periodo: dict) -> tuple[dict | None
         with motor.begin() as cx:
             _asegurar_snapshots(cx)
             fila = cx.execute(text(f'''
-                SELECT snapshot, sucio
+                SELECT snapshot, sucio,
+                       actualizado_en < CURRENT_TIMESTAMP
+                           - (:ttl_minutos * INTERVAL '1 minute') AS vencido
                 FROM "{_ESQUEMA_APP}"."{_TABLA_SNAPSHOTS}"
                 WHERE cliente_id = :cliente_id
                   AND periodo_inicio = CAST(:inicio AS date)
@@ -757,13 +759,14 @@ def leer_snapshot_persistente(cliente: dict, periodo: dict) -> tuple[dict | None
                 "cliente_id": str(cliente.get("cliente_id", "")),
                 "inicio": str(periodo["inicio"]),
                 "fin": str(periodo["fin_exclusivo"]),
+                "ttl_minutos": max(0, int(config.DASHBOARD_CACHE_MINUTOS)),
             }).mappings().first()
             if not fila:
                 return None, False
             snapshot = fila["snapshot"]
             if isinstance(snapshot, str):
                 snapshot = json.loads(snapshot)
-            return dict(snapshot), bool(fila["sucio"])
+            return dict(snapshot), bool(fila["sucio"] or fila["vencido"])
     except Exception as exc:  # noqa: BLE001
         logger.warning("no se pudo leer el snapshot persistente: %s", exc)
         return None, False
