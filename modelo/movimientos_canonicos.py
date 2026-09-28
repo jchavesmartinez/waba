@@ -12,6 +12,7 @@ completa a partir de raw/semantic + metadata y conserva la clave de origen.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 import re
 
 from .metadata import movimientos_canonicos_de, monedas_de
@@ -22,6 +23,15 @@ from .tipos import convertir
 _IDENTIFICADOR = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _SI = {"1", "si", "sí", "true", "yes", "x"}
 _REVERSOS = {"REVERSO", "ANULACION", "ANULACIÓN"}
+# La nota no es texto libre: la escribe el editor al guardar el monto que el
+# usuario vio en el dashboard. Se conserva para poder sanar de forma segura
+# los overrides creados por versiones anteriores del editor, que equivocaban
+# esa moneda visible con la moneda de la fuente.
+_NOTA_MONTO_VISIBLE = re.compile(
+    r"^Monto visible actualizado desde dashboard:\s*([A-Z]{3})\s+"
+    r"([0-9]+(?:\.[0-9]+)?)\s*$",
+    re.IGNORECASE,
+)
 
 COLUMNAS = [
     ("_clave", "texto"),
@@ -83,9 +93,12 @@ def construir(destino, cliente_id: str, esquema_raw: str, esquema_sem: str,
         origen = config["tabla_origen"].strip()
         crudas = _leer(destino, esquema, origen, config.get("filtro", ""))
         referencias = _referencias(destino, config, esquema_raw, esquema_sem)
+        intenciones_visibles = _intenciones_monto_visible(metadata, config)
         for cruda in crudas:
+            clave_cruda = _texto(cruda.get(str(config.get("clave", "")).strip()))
             resultado, motivo = _proyectar(
-                cruda, config, modelo_id, referencias, conversor)
+                cruda, config, modelo_id, referencias, conversor,
+                intenciones_visibles.get(clave_cruda))
             if motivo:
                 rechazo = _rechazo(cruda, config, modelo_id, motivo)
                 rechazos.append(rechazo)
@@ -121,7 +134,9 @@ def construir(destino, cliente_id: str, esquema_raw: str, esquema_sem: str,
 
 
 def _proyectar(cruda: dict, cfg: dict, modelo_id: str,
-               referencias: dict, conversor: ConversorMoneda | None = None) -> tuple[dict | None, str]:
+               referencias: dict, conversor: ConversorMoneda | None = None,
+               intencion_monto_visible: tuple[str, Decimal] | None = None,
+               ) -> tuple[dict | None, str]:
     if not _incluida(cruda, cfg):
         return None, ""
 
@@ -164,6 +179,8 @@ def _proyectar(cruda: dict, cfg: dict, modelo_id: str,
         "monto": monto, "moneda": moneda, "tasa": None,
         "fecha_tasa": None, "proveedor": "",
     }
+    monto, conversion = _reparar_override_visible_heredado(
+        monto, moneda, fecha, conversor, conversion, intencion_monto_visible)
     return {
         "_clave": f"{fuente}:{clave}",
         "_origen": clave,
@@ -190,6 +207,76 @@ def _proyectar(cruda: dict, cfg: dict, modelo_id: str,
         "titular": _texto(valor("titular")),
         "medio_pago": _texto(valor("medio_pago")),
     }, ""
+
+
+def _intenciones_monto_visible(metadata: dict, cfg: dict) -> dict[str, tuple[str, Decimal]]:
+    """Relaciona overrides explícitos de moneda visible con su fuente semántica.
+
+    La entrada sigue siendo la hoja de metadata. No se asume un cliente ni una
+    tabla: el modelo de origen se resuelve desde ``tabla_destino`` y la columna
+    de importe desde ``_movimientos_canonicos``.
+    """
+    if str(cfg.get("capa_origen", "")).strip().lower() != "semantic":
+        return {}
+    tabla = str(cfg.get("tabla_origen", "")).strip()
+    columna = str(cfg.get("monto", "")).strip()
+    if not tabla or not columna:
+        return {}
+    modelo_origen = next((
+        str(modelo.get("modelo_id", "")).strip()
+        for modelo in metadata.get("modelos", [])
+        if str(modelo.get("tabla_destino") or modelo.get("modelo_id", "")).strip() == tabla
+    ), "")
+    if not modelo_origen:
+        return {}
+    salida: dict[str, tuple[str, Decimal]] = {}
+    for override in metadata.get("overrides", []):
+        if (str(override.get("modelo_id", "")).strip() != modelo_origen
+                or str(override.get("columna", "")).strip() != columna):
+            continue
+        coincidencia = _NOTA_MONTO_VISIBLE.fullmatch(str(override.get("nota", "")).strip())
+        clave = str(override.get("clave", "")).strip()
+        if not coincidencia or not clave:
+            continue
+        try:
+            monto = Decimal(coincidencia.group(2))
+        except InvalidOperation:
+            continue
+        if monto.is_finite() and monto >= 0:
+            salida[clave] = (coincidencia.group(1).upper(), monto)
+    return salida
+
+
+def _reparar_override_visible_heredado(
+    monto: object, moneda_origen: str, fecha, conversor: ConversorMoneda | None,
+    conversion: dict, intencion: tuple[str, Decimal] | None,
+) -> tuple[object, dict]:
+    """Repara el patrón inequívoco del editor legado sin tocar la fuente.
+
+    Una nota ``CRC 23000`` representa la intención del usuario. Si la fuente
+    es USD y el override también vale literalmente ``23000``, una versión
+    antigua confundió ambas monedas. Los overrides nuevos ya guardan el
+    equivalente USD, por lo que no cumplen esta condición y pasan intactos.
+    """
+    if not intencion or not conversor:
+        return monto, conversion
+    moneda_visible, monto_visible = intencion
+    moneda_normalizada = str(moneda_origen or "").strip().upper()
+    try:
+        monto_origen_actual = Decimal(str(monto))
+    except (InvalidOperation, ValueError):
+        return monto, conversion
+    if (moneda_visible != str(conversion.get("moneda", "")).strip().upper()
+            or moneda_normalizada == moneda_visible or monto_origen_actual != monto_visible):
+        return monto, conversion
+    try:
+        tasa = Decimal(str(conversion.get("tasa")))
+    except (InvalidOperation, ValueError):
+        return monto, conversion
+    if not tasa.is_finite() or tasa <= 0:
+        return monto, conversion
+    monto_origen = monto_visible / tasa
+    return monto_origen, conversor.convertir(monto_origen, moneda_normalizada, fecha)
 
 
 def _incluida(fila: dict, cfg: dict) -> bool:

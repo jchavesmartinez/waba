@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 
 from modelo.moneda_funcional import ConversorMoneda, ErrorTipoCambio
-from modelo.movimientos_canonicos import _proyectar
+from modelo.movimientos_canonicos import _intenciones_monto_visible, _proyectar
 
 
 class _Respuesta:
@@ -112,3 +112,43 @@ def test_error_de_tasa_detiene_el_build_en_vez_de_omitir_el_gasto_extranjero():
             {"fuente": "banco", "fecha": "fecha", "descripcion": "descripcion", "moneda": "moneda", "monto": "monto", "clave": "id"},
             "movimientos", {}, ConversorQueFalla(),
         )
+
+
+def test_repara_override_heredado_que_confundio_monto_visible_con_moneda_origen():
+    class ConversorFalso:
+        moneda_funcional = "CRC"
+
+        def convertir(self, monto, moneda, fecha):
+            assert moneda == "USD"
+            return {
+                "monto": Decimal(str(monto)) * Decimal("450"), "moneda": "CRC",
+                "tasa": Decimal("450"), "fecha_tasa": "2026-09-05",
+                "proveedor": "prueba",
+            }
+
+    fila, motivo = _proyectar(
+        {"fecha": "2026-09-05", "descripcion": "Compra USD", "moneda": "USD", "monto": "23000", "id": "x-1"},
+        {"fuente": "banco", "fecha": "fecha", "descripcion": "descripcion", "moneda": "moneda", "monto": "monto", "clave": "id"},
+        "movimientos", {}, ConversorFalso(), ("CRC", Decimal("23000")),
+    )
+
+    assert motivo == ""
+    assert fila["monto_original"] * Decimal("450") == Decimal("23000")
+    assert fila["monto"] == Decimal("23000")
+
+
+def test_intenciones_visibles_se_resuelven_por_metadata_y_no_por_cliente():
+    metadata = {
+        "modelos": [{"modelo_id": "banco", "tabla_destino": "finanzas__banco"}],
+        "overrides": [{
+            "modelo_id": "banco", "clave": "mov-1", "columna": "importe",
+            "valor": "23000", "nota": "Monto visible actualizado desde dashboard: CRC 23000",
+        }],
+    }
+    configuracion = {
+        "capa_origen": "semantic", "tabla_origen": "finanzas__banco", "monto": "importe",
+    }
+
+    assert _intenciones_monto_visible(metadata, configuracion) == {
+        "mov-1": ("CRC", Decimal("23000")),
+    }
