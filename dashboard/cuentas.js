@@ -307,6 +307,10 @@
       detalle.append(lista); card.append(detalle); grid.append(card);
     });
     contenido.append(grid);
+    (estado.advertencias || []).forEach((mensaje) => {
+      const nota = document.createElement("p"); nota.className = "cuentas-sin-vincular";
+      nota.textContent = mensaje; contenido.append(nota);
+    });
     if (estado.sin_vincular?.length) {
       const nota = document.createElement("p"); nota.className = "cuentas-sin-vincular";
       nota.textContent = `${estado.sin_vincular.length} movimientos recientes tienen un método de pago sin cuenta vinculada y no afectan los saldos.`;

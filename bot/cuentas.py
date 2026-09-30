@@ -273,14 +273,24 @@ def _canonicos(cliente: dict, corte: date, hasta: date) -> list[dict]:
     tabla = dashboard.tabla_movimientos_canonicos(cliente, ctx)
     if not tabla:
         raise ErrorCuentas("no encontré los movimientos canónicos para calcular saldos")
-    columnas = {str(c).lower() for c in tabla.columnas_config}
-    requeridas = {"_clave", "fecha", "medio_pago", "monto_neto", "moneda_original", "monto_original"}
+    # columnas_config es el catálogo público de consultas, no el esquema
+    # físico: omite deliberadamente columnas técnicas como la moneda original.
+    columnas = {str(nombre).lower() for nombre, _ in
+                warehouse_ro.listar_columnas(cliente, {tabla.tabla_real}).get(tabla.tabla_real, [])}
+    requeridas = {"_clave", "fecha", "medio_pago", "monto_neto"}
     if not requeridas.issubset(columnas):
-        raise ErrorCuentas("los movimientos canónicos no tienen moneda y método de pago completos")
+        raise ErrorCuentas("los movimientos canónicos no tienen fecha, monto y método de pago completos")
     tipo = "tipo_movimiento" if "tipo_movimiento" in columnas else "'' AS tipo_movimiento"
     descripcion = "descripcion" if "descripcion" in columnas else "'' AS descripcion"
+    monto_original = ("monto_original" if "monto_original" in columnas
+                      else "NULL::numeric AS monto_original")
+    moneda_original = ("moneda_original" if "moneda_original" in columnas
+                       else "moneda AS moneda_original" if "moneda" in columnas
+                       else "'CRC' AS moneda_original")
+    moneda_estimada = "TRUE" if "moneda_original" not in columnas else "FALSE"
     return warehouse_ro.leer_interno(cliente, f'''SELECT _clave, fecha, {descripcion},
-        medio_pago, monto_neto, monto_original, moneda_original, {tipo}
+        medio_pago, monto_neto, {monto_original}, {moneda_original}, {tipo},
+        {moneda_estimada} AS moneda_estimada
         FROM {_identificador(tabla.tabla_real)}
         WHERE fecha > :corte AND fecha <= :hasta ORDER BY fecha, _clave''',
         {"corte": corte, "hasta": hasta})
@@ -298,7 +308,7 @@ def _aplicar_pendientes(cliente: dict, movimientos: list[dict]) -> list[dict]:
                 nuevo = _decimal(pendiente["monto"])
                 signo = -1 if anterior < 0 else 1
                 fila["monto_neto"] = nuevo * signo
-                if anterior:
+                if anterior and fila.get("monto_original") is not None:
                     fila["monto_original"] = _decimal(fila["monto_original"]) * nuevo / abs(anterior)
             if "medio_pago" in pendiente:
                 fila["medio_pago"] = pendiente["medio_pago"]
@@ -353,8 +363,11 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
         for o in operaciones if o.get("tipo") == "pago_tarjeta"
     ]
     sin_vincular = []
+    sin_conversion = []
+    moneda_estimada = False
     ingresos_importados: list[tuple[str, str, Decimal]] = []
     for movimiento in movimientos:
+        moneda_estimada = moneda_estimada or bool(movimiento.get("moneda_estimada"))
         tipo = str(movimiento.get("tipo_movimiento") or "").strip().upper()
         if tipo in {"TRANSFERENCIA", "PAGO_TARJETA", "PAGO TARJETA"}:
             continue
@@ -379,7 +392,11 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
         if cuenta["tipo"] == "credito":
             moneda = str(movimiento.get("moneda_original") or "CRC").upper()
             if moneda == "USD":
-                original = _decimal(movimiento.get("monto_original") or 0)
+                if movimiento.get("monto_original") is None:
+                    sin_conversion.append({"fecha": fecha, "descripcion": movimiento.get("descripcion") or "",
+                                           "cuenta_id": cuenta["cuenta_id"]})
+                    continue
+                original = _decimal(movimiento["monto_original"])
                 cambio = abs(original) * (-1 if neto < 0 or es_ingreso else 1)
                 cuenta["saldo_usd"] += cambio
             else:
@@ -438,7 +455,13 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
             cuenta[campo] = str(cuenta[campo].quantize(Decimal("0.01")))
         for m in cuenta["movimientos"]:
             m["monto"] = str(m["monto"].quantize(Decimal("0.01")))
-    return {"cuentas": list(por_id.values()), "sin_vincular": sin_vincular[-20:]}
+    advertencias = []
+    if moneda_estimada:
+        advertencias.append("El modelo canónico aún no expone la moneda original: los cargos de crédito se muestran en la moneda funcional hasta la próxima reconstrucción del modelo.")
+    if sin_conversion:
+        advertencias.append(f"{len(sin_conversion)} cargo(s) en USD no tienen monto original y no se agregaron a la deuda para evitar un saldo incorrecto.")
+    return {"cuentas": list(por_id.values()), "sin_vincular": sin_vincular[-20:],
+            "advertencias": advertencias, "sin_conversion": sin_conversion[-20:]}
 
 
 def obtener(cliente: dict) -> dict:

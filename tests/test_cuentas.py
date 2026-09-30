@@ -2,6 +2,7 @@
 
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -89,6 +90,53 @@ def test_lee_cuentas_desde_hoja_tarjetas_sin_requerir_numero_para_ahorro(monkeyp
     assert [(s["cuenta_id"], s["ultimos4"]) for s in semillas] == [
         ("bac_salario", "8774"), ("mismart", ""),
     ]
+
+
+def test_canonicos_usa_columnas_fisicas_no_catalogo_publico(monkeypatch):
+    cliente = {"cliente_id": "a"}
+    tabla = SimpleNamespace(tabla_real="movimientos", columnas_config={"fecha": {}})
+    monkeypatch.setattr(cuentas.catalogo, "construir_contexto", lambda _: object())
+    monkeypatch.setattr(cuentas.dashboard, "tabla_movimientos_canonicos", lambda *_: tabla)
+    monkeypatch.setattr(cuentas.warehouse_ro, "listar_columnas", lambda *_: {
+        "movimientos": [(n, "text") for n in (
+            "_clave", "fecha", "descripcion", "medio_pago", "monto_neto",
+            "monto_original", "moneda_original", "tipo_movimiento")],
+    })
+    consultas = []
+    monkeypatch.setattr(cuentas.warehouse_ro, "leer_interno", lambda _, sql, params: (
+        consultas.append((sql, params)) or []))
+
+    assert cuentas._canonicos(cliente, date(2026, 9, 29), date(2026, 9, 30)) == []
+    assert "monto_original, moneda_original" in consultas[0][0]
+    assert consultas[0][1]["corte"] == date(2026, 9, 29)
+
+
+def test_canonicos_anteriores_sin_moneda_original_degradan_con_advertencia(monkeypatch):
+    cliente = {"cliente_id": "a"}
+    tabla = SimpleNamespace(tabla_real="movimientos", columnas_config={})
+    monkeypatch.setattr(cuentas.catalogo, "construir_contexto", lambda _: object())
+    monkeypatch.setattr(cuentas.dashboard, "tabla_movimientos_canonicos", lambda *_: tabla)
+    monkeypatch.setattr(cuentas.warehouse_ro, "listar_columnas", lambda *_: {
+        "movimientos": [(n, "text") for n in (
+            "_clave", "fecha", "medio_pago", "monto_neto", "moneda")],
+    })
+    consultas = []
+    monkeypatch.setattr(cuentas.warehouse_ro, "leer_interno", lambda _, sql, params: (
+        consultas.append(sql) or [_movimiento("cargo", "8715", "5000") | {
+            "monto_original": None, "moneda_original": "CRC", "moneda_estimada": True}]))
+
+    filas = cuentas._canonicos(cliente, date(2026, 9, 29), date(2026, 9, 30))
+    resultado = cuentas.proyectar_saldos(CUENTAS, filas, [], date(2026, 9, 30))
+    assert "NULL::numeric AS monto_original" in consultas[0]
+    assert resultado["advertencias"]
+
+
+def test_deuda_usd_sin_monto_original_no_inventa_importe():
+    cargo = _movimiento("usd", "8715", "5200", "USD", "10")
+    cargo["monto_original"] = None
+    resultado = cuentas.proyectar_saldos(CUENTAS, [cargo], [], date(2026, 9, 30))
+    assert _por_id(resultado)["amex_8715"]["saldo_usd"] == "284.50"
+    assert len(resultado["sin_conversion"]) == 1
 
 
 def test_pago_tarjeta_y_transferencia_no_duplican_egreso():
