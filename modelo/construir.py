@@ -33,7 +33,7 @@ import config
 from .metadata import leer as leer_metadata
 from .mapeo import leer_mapeo
 from .movimientos_canonicos import construir as construir_movimientos_canonicos
-from .motor import Modelo
+from .motor import Modelo, PREFIJO_MAPEO_COMPATIBLE
 import registry
 from sqlalchemy import text
 from warehouse import crear_destino
@@ -321,6 +321,7 @@ def _leer_mapeo(destino, esquema_sem, modelo) -> dict:
     """
     filas = leer_mapeo(destino, esquema_sem, modelo.modelo_id)
     salida = {}
+    compatibles = {}
     for f in filas:
         clave = f.get("valor_normalizado")
         if not clave:
@@ -329,6 +330,25 @@ def _leer_mapeo(destino, esquema_sem, modelo) -> dict:
         salida[(dimension, clave)] = f.get("valor_asignado")
         if not dimension:
             salida[clave] = f.get("valor_asignado")
+
+        # Las claves exactas siguen siendo la fuente primaria. Construimos un
+        # índice secundario únicamente para contextos ausentes y solo a partir
+        # de valores históricos que se puedan interpretar con certeza.
+        for campo in (c for c in modelo.campos
+                      if c.get("clasifica_en", "") == dimension):
+            for parcial in modelo.claves_compatibles_de_mapeo(
+                    f.get("valor_original", ""), campo):
+                compatibles.setdefault((dimension, parcial), set()).add(
+                    f.get("valor_asignado"))
+
+    # Si dos decisiones históricas quedan iguales al omitir un contexto, no
+    # hay forma segura de escoger una. No las indexamos: la fila seguirá como
+    # sin clasificar hasta que llegue el contexto o exista un override/regla.
+    for (dimension, parcial), destinos in compatibles.items():
+        destinos.discard(None)
+        if len(destinos) == 1:
+            salida[(dimension, PREFIJO_MAPEO_COMPATIBLE + parcial)] = (
+                next(iter(destinos)))
     return salida
 
 

@@ -20,7 +20,7 @@ from modelo.construir import (
     nombre_esquema_semantico,
 )
 from modelo.clasificar import COLUMNAS_MAPEO
-from modelo.motor import Modelo
+from modelo.motor import PREFIJO_MAPEO_COMPATIBLE, Modelo, _normalizar
 from modelo.movimientos_canonicos import construir as construir_movimientos
 from warehouse.duckdb_dest import DuckDBDestino
 
@@ -182,6 +182,41 @@ def test_menos_filas_que_ayer_no_deja_las_viejas(destino):
 
 def test_sin_tabla_de_mapeo_la_primera_construccion_sigue_funcionando(destino):
     assert _leer_mapeo(destino, "semantic_cliente_a", _modelo()) == {}
+
+
+def test_indice_compatible_restaura_mapeo_si_falta_un_contexto(destino):
+    """El índice parcial solo aparece cuando todas las decisiones coinciden."""
+    modelo = Modelo(
+        {"modelo_id": "bac", "tabla_origen": "correos",
+         "tabla_destino": "transacciones", "columna_texto": "cuerpo"},
+        {"campos": [{
+            "modelo_id": "bac", "columna": "comercio_concepto",
+            "tipo": "texto", "clasifica_en": "linea_presupuesto_id",
+            "clasifica_con": "titular,monto",
+        }], "clasificacion": [], "overrides": []},
+    )
+    filas = [
+        {"modelo_id": "bac", "clasifica_en": "linea_presupuesto_id",
+         "valor_normalizado": "nina-jose",
+         "valor_original": "comercio_concepto: NINA CAFE | titular: Jose | monto: 4050.0",
+         "valor_asignado": "gas_comidas_afuera"},
+        {"modelo_id": "bac", "clasifica_en": "linea_presupuesto_id",
+         "valor_normalizado": "nina-aline",
+         "valor_original": "comercio_concepto: NINA CAFE | titular: Aline | monto: 1200.0",
+         "valor_asignado": "gas_regalos"},
+    ]
+    _escribir(destino, "semantic_cliente_a", "_mapeo", COLUMNAS_MAPEO, filas)
+
+    mapeo = _leer_mapeo(destino, "semantic_cliente_a", modelo)
+    sin_titular = _normalizar("comercio_concepto: NINA CAFE | monto: 4050.0")
+    solo_comercio = _normalizar("NINA CAFE")
+
+    # El importe mantiene una decisión única de Jose; sin ambos contextos la
+    # decisión ya es ambigua y se omite del índice seguro.
+    assert mapeo[("linea_presupuesto_id",
+                  PREFIJO_MAPEO_COMPATIBLE + sin_titular)] == "gas_comidas_afuera"
+    assert ("linea_presupuesto_id",
+            PREFIJO_MAPEO_COMPATIBLE + solo_comercio) not in mapeo
 
 
 def test_falla_de_lectura_del_mapeo_conserva_la_clasificacion_publicada(

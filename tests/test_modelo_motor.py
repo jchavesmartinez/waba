@@ -14,7 +14,12 @@ from decimal import Decimal
 
 import pytest
 
-from modelo.motor import SIN_CLASIFICAR, Modelo, _normalizar
+from modelo.motor import (
+    PREFIJO_MAPEO_COMPATIBLE,
+    SIN_CLASIFICAR,
+    Modelo,
+    _normalizar,
+)
 from modelo.tipos import convertir
 
 
@@ -126,6 +131,50 @@ def test_join_auxiliar_asigna_titular_y_separa_mapeos_por_dimension():
     assert filas[0]["titular"] == "Jose"
     assert filas[0]["cuenta_contable"] == "Alimentacion"
     assert filas[0]["linea_presupuesto_id"] == "GAS-008"
+
+
+def test_contexto_ausente_reutiliza_mapeo_compatible_no_ambiguo():
+    """Un titular ausente no debe borrar la clasificación de la compra."""
+    campos = CAMPOS + [{
+        "modelo_id": "bac", "columna": "comercio_concepto",
+        "tipo": "texto", "patron": "Comercio",
+        "clasifica_en": "linea_presupuesto_id",
+        "clasifica_con": "titular",
+    }]
+    modelo = _modelo(campos=campos, reglas=[])
+    parcial = _normalizar("AM PM VEROLIZ")
+    mapeo = {
+        ("linea_presupuesto_id", PREFIJO_MAPEO_COMPATIBLE + parcial):
+            "gas_comedera",
+    }
+
+    filas, rechazos = modelo.procesar([_fila()], mapeo=mapeo)
+
+    assert rechazos == []
+    assert filas[0]["titular"] is None
+    assert filas[0]["linea_presupuesto_id"] == "gas_comedera"
+
+
+def test_contexto_presente_no_usa_mapeo_compatible_de_otra_persona():
+    """La compatibilidad cubre faltantes, no reemplaza una clave específica."""
+    campos = CAMPOS + [{
+        "modelo_id": "bac", "columna": "comercio_concepto",
+        "tipo": "texto", "patron": "Comercio",
+        "clasifica_en": "linea_presupuesto_id",
+        "clasifica_con": "titular",
+    }]
+    modelo = _modelo(campos=campos, reglas=[])
+    parcial = _normalizar("AM PM VEROLIZ")
+    mapeo = {
+        ("linea_presupuesto_id", PREFIJO_MAPEO_COMPATIBLE + parcial):
+            "gas_comedera",
+    }
+    cruda = _fila()
+    cruda["titular"] = "Aline"
+
+    filas, _ = modelo.procesar([cruda], mapeo=mapeo)
+
+    assert filas[0]["linea_presupuesto_id"] == SIN_CLASIFICAR
 
 
 def test_join_posterior_usa_linea_presupuesto_nacida_de_clasificacion():

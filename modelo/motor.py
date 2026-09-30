@@ -35,6 +35,7 @@ tres son problemas que hay que ver, no filas que deban desaparecer en silencio.
 """
 
 import hashlib
+import itertools
 import json
 import logging
 import re
@@ -43,6 +44,11 @@ from . import extractores, tipos
 from .metadata import campos_de, clasificacion_de, joins_de, overrides_de
 
 logger = logging.getLogger("fachavi.modelo.motor")
+
+# Las claves de compatibilidad existen solamente en memoria durante una
+# reconstrucción. Separarlas de las claves exactas evita que una llave parcial
+# pueda desplazar una clasificación específica guardada por el usuario.
+PREFIJO_MAPEO_COMPATIBLE = "__compat__:"
 
 # Columnas tecnicas que lleva toda tabla derivada.
 COL_CLAVE = "_clave"
@@ -329,7 +335,20 @@ class Modelo:
                 fila[destino] = mapeo[clave]
                 continue
 
-            fila[destino] = SIN_CLASIFICAR
+            # Un join auxiliar puede quedar temporalmente incompleto (por
+            # ejemplo, la tabla de tarjetas sin titular). La clasificación
+            # histórica no debe desaparecer por eso. Solo se usa una llave
+            # parcial cuando el contexto ACTUAL está vacío y todos los mapeos
+            # históricos que coinciden en lo demás apuntan al mismo destino.
+            for clave_compatible in self.claves_compatibles_de_fila(fila, campo):
+                valor = mapeo.get((destino, PREFIJO_MAPEO_COMPATIBLE +
+                                   clave_compatible))
+                if valor is not None:
+                    fila[destino] = valor
+                    break
+            else:
+                fila[destino] = SIN_CLASIFICAR
+                continue
 
         # Overrides sobre columnas que no son de clasificacion (corregir un
         # monto mal leido, por ejemplo).
@@ -373,13 +392,57 @@ class Modelo:
 
     def valor_clasificacion(self, fila: dict, campo: dict) -> str:
         """Texto estable que se mapea y se presenta al LLM."""
-        columnas = self.columnas_de_clasificacion(campo)
+        return self._valor_con_columnas(fila, self.columnas_de_clasificacion(campo))
+
+    @staticmethod
+    def _valor_con_columnas(fila: dict, columnas: list[str]) -> str:
         if len(columnas) == 1:
             return str(fila.get(columnas[0]) or "").strip()
         return " | ".join(
             f"{columna}: {str(fila.get(columna) or '').strip()}"
             for columna in columnas
         )
+
+    def claves_compatibles_de_fila(self, fila: dict, campo: dict) -> list[str]:
+        """Llave parcial segura si una o más columnas de contexto faltan.
+
+        Nunca se omite un valor presente. Por eso una compra de Aline no puede
+        reutilizar por accidente la regla de Jose: esta ruta solo existe cuando
+        la fuente ni siquiera pudo aportar el dato contextual.
+        """
+        columnas = self.columnas_de_clasificacion(campo)
+        principal, contexto = columnas[0], columnas[1:]
+        if not str(fila.get(principal) or "").strip():
+            return []
+        faltantes = {c for c in contexto if not str(fila.get(c) or "").strip()}
+        if not faltantes:
+            return []
+        reducidas = [c for c in columnas if c not in faltantes]
+        clave = _normalizar(self._valor_con_columnas(fila, reducidas))
+        return [clave] if clave else []
+
+    def claves_compatibles_de_mapeo(self, valor: str, campo: dict) -> list[str]:
+        """Llaves parciales que un mapeo histórico permite consultar.
+
+        Se generan al cargar `_mapeo`, no se persisten. Cada combinación de
+        contexto omitido se valida luego contra todos los destinos posibles;
+        una colisión ambigua queda fuera del índice de compatibilidad.
+        """
+        fila = self._fila_desde_valor_clasificacion(valor, campo)
+        if fila is None:
+            return []
+        columnas = self.columnas_de_clasificacion(campo)
+        contexto = columnas[1:]
+        if not contexto:
+            return []
+        claves = []
+        for cantidad in range(1, len(contexto) + 1):
+            for omitidas in itertools.combinations(contexto, cantidad):
+                reducidas = [c for c in columnas if c not in omitidas]
+                clave = _normalizar(self._valor_con_columnas(fila, reducidas))
+                if clave:
+                    claves.append(clave)
+        return claves
 
     def regla_para_valor_clasificacion(self, valor: str, campo: dict):
         """Evalua las reglas actuales contra una llave guardada en _mapeo.
@@ -389,28 +452,34 @@ class Modelo:
         decisiones antiguas del LLM cuando una regla explicita pasa a cubrir
         el mismo valor, incluso si esa transaccion ya no esta en la tabla raw.
         """
-        columnas = self.columnas_de_clasificacion(campo)
-        if len(columnas) == 1:
-            fila = {columnas[0]: str(valor or "").strip()}
-        else:
-            restante = str(valor or "")
-            fila = {}
-            for i, columna in enumerate(columnas):
-                prefijo = f"{columna}: "
-                if not restante.startswith(prefijo):
-                    return None
-                restante = restante[len(prefijo):]
-                if i + 1 < len(columnas):
-                    separador = f" | {columnas[i + 1]}: "
-                    if separador not in restante:
-                        return None
-                    contenido, restante = restante.split(separador, 1)
-                    fila[columna] = contenido
-                    restante = f"{columnas[i + 1]}: {restante}"
-                else:
-                    fila[columna] = restante
+        fila = self._fila_desde_valor_clasificacion(valor, campo)
+        if fila is None:
+            return None
         origen = fila.get(campo.get("columna", ""))
         return self._por_regla(fila, campo, origen)
+
+    def _fila_desde_valor_clasificacion(self, valor: str, campo: dict):
+        """Invierte `valor_clasificacion` para inspeccionar un mapeo guardado."""
+        columnas = self.columnas_de_clasificacion(campo)
+        if len(columnas) == 1:
+            return {columnas[0]: str(valor or "").strip()}
+        restante = str(valor or "")
+        fila = {}
+        for i, columna in enumerate(columnas):
+            prefijo = f"{columna}: "
+            if not restante.startswith(prefijo):
+                return None
+            restante = restante[len(prefijo):]
+            if i + 1 < len(columnas):
+                separador = f" | {columnas[i + 1]}: "
+                if separador not in restante:
+                    return None
+                contenido, restante = restante.split(separador, 1)
+                fila[columna] = contenido
+                restante = f"{columnas[i + 1]}: {restante}"
+            else:
+                fila[columna] = restante
+        return fila
 
     def _copiar_contexto_raw(self, fila: dict, cruda: dict) -> None:
         for campo in self.campos:
