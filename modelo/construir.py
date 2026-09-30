@@ -31,6 +31,7 @@ import sys
 import catalogo_cliente
 import config
 from .metadata import leer as leer_metadata
+from .mapeo import leer_mapeo
 from .movimientos_canonicos import construir as construir_movimientos_canonicos
 from .motor import Modelo
 import registry
@@ -41,7 +42,6 @@ from warehouse.base import nombre_esquema
 logger = logging.getLogger("fachavi.modelo.construir")
 
 SUFIJO_RECHAZOS = "__rechazos"
-TABLA_MAPEO = "_mapeo"
 FUENTE_METADATA_SEMANTICA = "_modelo_semantico"
 
 
@@ -315,27 +315,21 @@ def _leer_mapeo(destino, esquema_sem, modelo) -> dict:
     """
     Lee {valor_normalizado: valor_asignado} que llena el job de clasificacion.
 
-    Ausente = diccionario vacio, sin error: la primera corrida siempre pasa por
-    aca antes de que el job haya escrito nada, y eso no es un problema (las
-    filas salen 'sin_clasificar', que es la respuesta honesta).
+    Solo una tabla comprobadamente ausente equivale a primera corrida. Si la
+    lectura de una tabla existente falla, la construcción se detiene para no
+    publicar gastos históricos como sin_clasificar.
     """
-    sql = (f'SELECT * FROM "{esquema_sem}"."'
-           f'{TABLA_MAPEO}" WHERE modelo_id = :m')
-    try:
-        filas = destino.leer_filas(sql, {"m": modelo.modelo_id})
-        salida = {}
-        for f in filas:
-            clave = f.get("valor_normalizado")
-            if not clave:
-                continue
-            dimension = f.get("clasifica_en", "")
-            salida[(dimension, clave)] = f.get("valor_asignado")
-            if not dimension:
-                salida[clave] = f.get("valor_asignado")
-        return salida
-    except Exception:  # noqa: BLE001
-        logger.debug("todavia no hay tabla de mapeo en %s", esquema_sem)
-        return {}
+    filas = leer_mapeo(destino, esquema_sem, modelo.modelo_id)
+    salida = {}
+    for f in filas:
+        clave = f.get("valor_normalizado")
+        if not clave:
+            continue
+        dimension = f.get("clasifica_en", "")
+        salida[(dimension, clave)] = f.get("valor_asignado")
+        if not dimension:
+            salida[clave] = f.get("valor_asignado")
+    return salida
 
 
 def _escribir(destino, esquema, tabla, columnas, filas):

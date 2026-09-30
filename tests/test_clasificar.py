@@ -306,6 +306,27 @@ def test_el_mapeo_conserva_las_entradas_de_otros_modelos(destino, monkeypatch):
     assert modelos == {"otro", "bac"}
 
 
+def test_falla_de_lectura_no_reemplaza_el_mapeo_existente(destino, monkeypatch):
+    esquema = "semantic_cliente_a"
+    anterior = {"modelo_id": "bac", "clasifica_en": "cuenta_contable",
+                "valor_normalizado": "am pm", "valor_original": "AM PM",
+                "valor_asignado": "Supermercado"}
+    destino.reconstruir_tabla(esquema, "_mapeo", C.COLUMNAS_MAPEO, [anterior])
+    leer_original = destino.leer_filas
+
+    def falla_mapeo(sql, params=None):
+        if '"_mapeo"' in sql:
+            raise ConnectionError("lectura interrumpida")
+        return leer_original(sql, params)
+
+    monkeypatch.setattr(destino, "leer_filas", falla_mapeo)
+    nuevo = {**anterior, "valor_normalizado": "nuevo", "valor_original": "NUEVO"}
+    with pytest.raises(RuntimeError, match="se conserva la clasificación publicada"):
+        C._guardar_mapeo(destino, esquema, {}, {"nuevo": nuevo})
+    filas = leer_original(f'SELECT valor_normalizado FROM "{esquema}"."_mapeo"')
+    assert filas == [{"valor_normalizado": "am pm"}]
+
+
 # --- parseo de la respuesta cruda ----------------------------------------
 
 class _Resp:

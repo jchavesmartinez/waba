@@ -115,6 +115,11 @@ def test_join_auxiliar_asigna_titular_y_separa_mapeos_por_dimension():
     auxiliares = {"sharepoint_db__tarjetas": [{
         "ultimos4": "8774", "titular": "Jose", "activo": "si",
         "vigencia_desde": "2026-01-01", "vigencia_hasta": "",
+        "cuenta_id": "bac_salario", "saldo_corte_crc": "517754.95",
+    }, {
+        "ultimos4": "", "titular": "Jose", "activo": "si",
+        "vigencia_desde": "2026-09-29", "vigencia_hasta": "",
+        "cuenta_id": "mismart", "saldo_corte_crc": "6798159.75",
     }]}
     filas, rechazos = modelo.procesar([_fila()], mapeo, auxiliares)
     assert rechazos == []

@@ -48,6 +48,7 @@ import config
 import llm
 import registry
 from warehouse import crear_destino
+from .mapeo import leer_mapeo
 from .metadata import categorias_de, leer as leer_metadata
 from .motor import SIN_CLASIFICAR, Modelo, _normalizar
 
@@ -337,16 +338,11 @@ Responde SOLO un array JSON, sin texto alrededor ni bloques de codigo:
 
 def _leer_mapeo(destino, esquema_sem: str, modelo_id: str,
                  clasifica_en: str = "", aceptar_legacy: bool = False) -> dict:
-    sql = (f'SELECT * FROM "{esquema_sem}"."{TABLA_MAPEO}" '
-           "WHERE modelo_id = :m")
-    try:
-        filas = destino.leer_filas(sql, {"m": modelo_id})
-        return {f["valor_normalizado"]: dict(f) for f in filas
-                if (f.get("clasifica_en", "") == clasifica_en or
-                    (not f.get("clasifica_en") and
-                     (not clasifica_en or aceptar_legacy)))}
-    except Exception:  # noqa: BLE001
-        return {}      # primera corrida: la tabla todavia no existe
+    filas = leer_mapeo(destino, esquema_sem, modelo_id)
+    return {f["valor_normalizado"]: dict(f) for f in filas
+            if (f.get("clasifica_en", "") == clasifica_en or
+                (not f.get("clasifica_en") and
+                 (not clasifica_en or aceptar_legacy)))}
 
 
 def _reconciliar_mapeo_con_reglas(destino, esquema_sem: str, modelo,
@@ -384,11 +380,7 @@ def _eliminar_mapeos(destino, esquema_sem: str, modelo_id: str,
                      clasifica_en: str, claves: set,
                      aceptar_legacy: bool = False) -> None:
     """Reescribe _mapeo sin las llaves conflictivas de una dimension."""
-    try:
-        filas = destino.leer_filas(
-            f'SELECT * FROM "{esquema_sem}"."{TABLA_MAPEO}"')
-    except Exception:  # noqa: BLE001
-        return
+    filas = leer_mapeo(destino, esquema_sem)
     conservadas = []
     for fila in filas:
         misma_dimension = fila.get("clasifica_en", "") == clasifica_en
@@ -416,13 +408,9 @@ def _guardar_mapeo(destino, esquema_sem: str, actual: dict, nuevos: dict):
     """
     # Se leen TODOS los modelos, no solo el que se acaba de clasificar, porque
     # la reescritura es de la tabla completa y perderiamos los demas.
-    try:
-        todos = {(f["modelo_id"], f.get("clasifica_en", ""),
-                  f["valor_normalizado"]): dict(f)
-                 for f in destino.leer_filas(
-                     f'SELECT * FROM "{esquema_sem}"."{TABLA_MAPEO}"')}
-    except Exception:  # noqa: BLE001
-        todos = {}
+    todos = {(f["modelo_id"], f.get("clasifica_en", ""),
+              f["valor_normalizado"]): dict(f)
+             for f in leer_mapeo(destino, esquema_sem)}
     for fila in actual.values():
         todos[(fila["modelo_id"], fila.get("clasifica_en", ""),
                fila["valor_normalizado"])] = fila

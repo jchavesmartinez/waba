@@ -12,11 +12,14 @@ import pytest
 from modelo.construir import (
     FUENTE_METADATA_SEMANTICA,
     SUFIJO_RECHAZOS,
+    _construir_modelo,
     _escribir,
     _invalidar_snapshot_dashboard,
+    _leer_mapeo,
     _publicar_metadata_semantica,
     nombre_esquema_semantico,
 )
+from modelo.clasificar import COLUMNAS_MAPEO
 from modelo.motor import Modelo
 from modelo.movimientos_canonicos import construir as construir_movimientos
 from warehouse.duckdb_dest import DuckDBDestino
@@ -175,6 +178,39 @@ def test_menos_filas_que_ayer_no_deja_las_viejas(destino):
         'SELECT _clave FROM "semantic_cliente_a"."finanzas__transacciones"'
     ).fetchall()
     assert filas == [("c1",)]
+
+
+def test_sin_tabla_de_mapeo_la_primera_construccion_sigue_funcionando(destino):
+    assert _leer_mapeo(destino, "semantic_cliente_a", _modelo()) == {}
+
+
+def test_falla_de_lectura_del_mapeo_conserva_la_clasificacion_publicada(
+        destino, monkeypatch):
+    modelo = _modelo()
+    esquema = "semantic_cliente_a"
+    filas, _ = modelo.procesar([{"correo_id": "c1", "cuerpo": CUERPO}])
+    filas[0]["cuenta_contable"] = "Alimentacion"
+    _escribir(destino, esquema, modelo.tabla_destino, modelo.columnas(), filas)
+    _escribir(destino, esquema, "_mapeo", COLUMNAS_MAPEO, [{"modelo_id": "bac",
+        "clasifica_en": "cuenta_contable", "valor_normalizado": "am pm veroliz",
+        "valor_original": "AM PM VEROLIZ", "valor_asignado": "Alimentacion"}])
+    leer_original = destino.leer_filas
+
+    def falla_mapeo(sql, params=None):
+        if '"_mapeo"' in sql:
+            raise ConnectionError("lectura interrumpida")
+        return leer_original(sql, params)
+
+    monkeypatch.setattr(destino, "leer_filas", falla_mapeo)
+    monkeypatch.setattr("modelo.construir._leer_origen", lambda *_: [
+        {"correo_id": "c1", "cuerpo": CUERPO}])
+    monkeypatch.setattr("modelo.construir._leer_auxiliares", lambda *_: {})
+    with pytest.raises(RuntimeError, match="se conserva la clasificación publicada"):
+        _construir_modelo(destino, "cliente_a", "raw_cliente_a", esquema,
+                          modelo, False)
+    publicada = leer_original(
+        f'SELECT cuenta_contable FROM "{esquema}"."{modelo.tabla_destino}"')
+    assert publicada == [{"cuenta_contable": "Alimentacion"}]
 
 
 # --- rechazos -------------------------------------------------------------
