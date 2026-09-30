@@ -713,6 +713,28 @@ def _escribir_catalogo_del_cliente(destino, cliente_id: str, catalogo_filas: lis
                len(catalogo_filas or []), len(kpis_filas or []))
 
 
+def _reconstruir_semantica(destino, cliente: dict) -> dict:
+    """Publica de inmediato las dependencias semánticas de una fuente nueva.
+
+    Una tabla auxiliar como ``tarjetas`` no aparece directamente en el
+    dashboard, pero puede completar el titular de cada transacción. Dejar su
+    reconstrucción para un cron posterior publica una foto intermedia y hace
+    que clasificaciones ya conocidas parezcan desaparecer.
+    """
+    from modelo.construir import construir_cliente
+
+    resultado = construir_cliente(destino, cliente)
+    alertas = resultado.get("alertas", [])
+    if alertas:
+        logger.error("[%s] la reconstrucción semántica terminó con alertas: %s",
+                     cliente.get("cliente_id"), "; ".join(map(str, alertas[:3])))
+    else:
+        logger.info("[%s] capa semántica reconstruida tras la ingesta: %d modelo(s), %d fila(s)",
+                    cliente.get("cliente_id"), resultado.get("modelos", 0),
+                    resultado.get("filas", 0))
+    return resultado
+
+
 def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
     """Recorre el registro completo y sincroniza lo que corresponda."""
     destinos = _Destinos(config.WAREHOUSE_TIPO)
@@ -775,6 +797,7 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
             # cliente cargaron en esta corrida, y recien con esa union
             # completa filtrar y escribir el catalogo, UNA vez, al final.
             tablas_del_cliente = set()
+            hubo_cambios_fuente = False
 
             for fuente in activas:
                 corrida = sincronizar_fuente(destino, cliente, fuente,
@@ -784,6 +807,13 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
                 resumen["alertas"] += corrida.alertas
                 resumen[corrida.estado] = resumen.get(corrida.estado, 0) + 1
                 resumen["filas"] += corrida.filas
+                # ``ok_con_bloqueo`` conserva la tabla anterior y ``omitido``
+                # no escribió nada. Solo una publicación real de raw debe
+                # disparar la reconstrucción; evita trabajo redundante y,
+                # sobre todo, impide que un fallo de origen publique datos
+                # semánticos a medias.
+                if corrida.estado in {"ok", "ok_con_alertas"}:
+                    hubo_cambios_fuente = True
                 resumen["fuentes"].append({
                     "cliente_id": cid,
                     "fuente_id": str(fuente.get("fuente_id", "")),
@@ -814,6 +844,8 @@ def sincronizar_todo(cliente_filtro=None, forzar=False, probar=False):
             _escribir_catalogo_del_cliente(
                 destino, cid, catalogo_filas, kpis_filas, tablas_del_cliente, probar
             )
+            if hubo_cambios_fuente and not probar:
+                _reconstruir_semantica(destino, cliente)
         # A-04: la bitacora crecia sin limite. Se purga al final de la corrida
         # completa (barato: una sola sentencia, y solo si hay retencion puesta).
         if not probar:

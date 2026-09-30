@@ -35,7 +35,7 @@ import pytest
 
 import sync
 from sources.base import Fragmento
-from warehouse.base import nombre_tabla
+from warehouse.base import Corrida, nombre_tabla
 
 
 CLIENTE = {"cliente_id": "demo"}
@@ -270,3 +270,51 @@ def test_la_fusion_de_detalles_tapa_huecos_del_historial(destino):
         "historial: la guarda de vaciado quedaria desarmada para esa tabla"
     )
     assert previo["inventario"]["filas"] == 80
+
+
+def test_sync_reconstruye_semantica_despues_de_publicar_una_fuente(monkeypatch):
+    """Una tabla auxiliar nueva no puede esperar al cron horario de modelos."""
+    cliente = {"cliente_id": "demo", "fuentes": [{
+        "fuente_id": "googledrive_db", "tipo": "google_sheets", "activo": True,
+    }]}
+    llamadas = []
+
+    class Destino:
+        def conectar(self):
+            return self
+
+        def cerrar(self):
+            pass
+
+        def registrar_corrida(self, corrida):
+            llamadas.append(("corrida", corrida.estado))
+
+    class Destinos:
+        def __init__(self, _tipo):
+            self.destino = Destino()
+
+        def para(self, _cliente):
+            return self.destino
+
+        def abiertos(self):
+            return [self.destino]
+
+        def cerrar(self):
+            pass
+
+    corrida = Corrida("c1", "demo", "googledrive_db", "google_sheets",
+                      sync.ahora_utc())
+    corrida.estado = "ok"
+    corrida.tablas_logicas = {"tarjetas"}
+    corrida.fin = sync.ahora_utc()
+    monkeypatch.setattr(sync.registry, "listar_clientes", lambda: [cliente])
+    monkeypatch.setattr(sync, "_Destinos", Destinos)
+    monkeypatch.setattr(sync.catalogo_cliente, "leer", lambda _: ([], []))
+    monkeypatch.setattr(sync, "sincronizar_fuente", lambda *_args, **_kwargs: corrida)
+    monkeypatch.setattr(sync, "_escribir_catalogo_del_cliente", lambda *_args: None)
+    monkeypatch.setattr(sync, "_reconstruir_semantica",
+                        lambda _destino, c: llamadas.append(("modelos", c["cliente_id"])))
+
+    sync.sincronizar_todo()
+
+    assert llamadas == [("corrida", "ok"), ("modelos", "demo")]
