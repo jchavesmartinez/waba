@@ -38,6 +38,19 @@
       <div><strong>Cargando sus finanzas…</strong><small>La página ya está lista; estamos trayendo los datos.</small></div>
     </section>
     <section id="resumen" class="cards" aria-label="Resumen"></section>
+    <section id="cuentas" class="panel cuentas-panel" aria-labelledby="cuentas-titulo">
+      <div class="cuentas-cabecera">
+        <div>
+          <h2 id="cuentas-titulo">Cuentas y saldos</h2>
+          <p>Saldo calculado desde el último corte y los movimientos registrados.</p>
+        </div>
+        <span id="cuentas-fecha" class="cuentas-fecha"></span>
+      </div>
+      <div id="cuentas-acciones" class="cuentas-acciones" hidden></div>
+      <div id="cuentas-contenido" aria-live="polite">Cargando saldos…</div>
+      <div id="cuentas-recurrencias"></div>
+      <p id="cuentas-error" class="editor-error" hidden></p>
+    </section>
     <section id="presupuesto" class="panel presupuesto" hidden></section>
     <section id="indicadores" class="indicadores"></section>
     <section class="panel chat-dashboard" aria-labelledby="chat-titulo">
@@ -64,5 +77,6 @@
   </main>
   <script id="dashboard-data" type="application/json">__DASHBOARD_DATA__</script>
   <script src="/dashboard-assets/app.js?v=__DASHBOARD_ASSET_VERSION__" defer></script>
+  <script src="/dashboard-assets/cuentas.js?v=__DASHBOARD_ASSET_VERSION__" defer></script>
 </body>
 </html>

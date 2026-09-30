@@ -42,6 +42,36 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .estado span { width: 8px; height: 8px; border-radius: 50%; background: #2ca362; box-shadow: 0 0 0 4px #ccebd7; }
 .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
 .card, .panel { background: var(--card); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); }
+.cuentas-cabecera { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.cuentas-cabecera p { margin: 0 0 16px; color: var(--muted); font-size: .86rem; }
+.cuentas-fecha { color: var(--muted); font-size: .76rem; white-space: nowrap; }
+.cuentas-acciones { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 17px; }
+.cuentas-acciones[hidden] { display: none; }
+.cuentas-acciones button { min-height: 42px; border: 1px solid #b7d8c5; border-radius: 9px; padding: 9px 12px; background: #f1f8e9; color: var(--green); font: inherit; font-size: .8rem; font-weight: 800; cursor: pointer; }
+.cuentas-acciones button:focus-visible, .cuenta-reglas button:focus-visible, .cuenta-anular:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 2px; }
+.cuentas-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.cuenta-card { min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: 12px; background: #fbfdf9; }
+.cuenta-card-cabecera { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.cuenta-card h3 { margin: 0; font-size: .96rem; overflow-wrap: anywhere; }
+.cuenta-card-cabecera span { flex: 0 0 auto; color: var(--green); font-size: .72rem; font-weight: 800; }
+.cuenta-saldos { display: grid; gap: 7px; margin: 16px 0 9px; }
+.cuenta-saldos > div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.cuenta-saldos span, .cuenta-corte { color: var(--muted); font-size: .76rem; }
+.cuenta-saldos strong { font-size: clamp(1rem, 3vw, 1.42rem); text-align: right; overflow-wrap: anywhere; }
+.cuenta-negativa { color: var(--red); }
+.cuenta-detalle { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.cuenta-detalle summary { cursor: pointer; color: var(--green); font-size: .82rem; font-weight: 800; }
+.cuenta-movimientos, .cuenta-reglas { list-style: none; padding: 0; margin: 10px 0 0; }
+.cuenta-movimientos li, .cuenta-reglas li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); font-size: .8rem; }
+.cuenta-movimientos li > span:first-child { display: grid; gap: 3px; min-width: 0; }
+.cuenta-movimientos li strong { overflow-wrap: anywhere; }
+.cuenta-movimientos small { color: var(--muted); }
+.cuenta-movimientos li > span:nth-child(2) { flex: 0 0 auto; white-space: nowrap; }
+.cuenta-anular, .cuenta-reglas button { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; background: white; color: var(--green); font: inherit; font-size: .72rem; font-weight: 700; cursor: pointer; }
+.cuenta-reglas li > span { min-width: 0; overflow-wrap: anywhere; }
+.cuentas-sin-vincular { margin: 14px 0 0; color: #925c18; font-size: .8rem; }
+#cuentas-recurrencias h3 { margin: 20px 0 0; font-size: .95rem; }
+.cuenta-dialogo { max-height: 88vh; overflow-y: auto; }
 .card { padding: 20px; min-height: 132px; }
 .card .label { color: var(--muted); font-size: .82rem; font-weight: 700; text-transform: capitalize; }
 .card .valor { margin-top: 16px; font-size: clamp(1.35rem, 3vw, 2rem); font-weight: 820; letter-spacing: -.035em; overflow-wrap: anywhere; }
@@ -154,6 +184,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: var(--
   .hero-acciones { justify-items: start; margin-top: 18px; }
   .estado { width: fit-content; margin-top: 18px; }
   .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cuentas-grid { grid-template-columns: 1fr; }
   .indicadores { grid-template-columns: 1fr; }
   .presupuesto { grid-template-columns: 1fr; justify-items: center; }
   .leyenda { width: 100%; }
@@ -163,6 +194,12 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: var(--
   .card { padding: 15px; min-height: 112px; }
   .card .valor { font-size: 1.25rem; }
   .panel { padding: 17px; }
+  .cuentas-cabecera { display: block; }
+  .cuentas-acciones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cuentas-acciones button { white-space: normal; }
+  .cuenta-movimientos li { flex-wrap: wrap; }
+  .cuenta-movimientos li > span:first-child { flex: 1 1 100%; }
+  .cuenta-movimientos li > span:nth-child(2) { margin-left: auto; }
   .bar-line { grid-template-columns: 66px minmax(50px, 1fr) auto; gap: 7px; font-size: .72rem; }
   .bar-line strong { font-size: .72rem; }
   .nivel summary { padding: 12px; }

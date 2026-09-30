@@ -361,6 +361,7 @@
           renderVista();
         }
         vigilarSincronizacion(movement.movimiento_clave);
+        window.dispatchEvent(new Event("fachavi:movimiento-editado"));
       }).catch((reason) => {
         if (movement.__revision_local === revision) {
           ajustarKpisMovimiento(movement, -1); Object.assign(movement, anterior);
@@ -457,6 +458,7 @@
         Object.assign(pendiente, result.movimiento);
         mostrarAviso("Movimiento guardado. Sincronizando en segundo plano…");
         vigilarSincronizacion(result.movimiento_clave);
+        window.dispatchEvent(new Event("fachavi:movimiento-editado"));
       })().catch((reason) => {
         aplicarMovimientoPendiente(pendiente, false);
         mostrarAviso(reason.message || "No pude guardar el movimiento; lo retiré de la vista.");
@@ -481,8 +483,13 @@
     if (pagado === monto) return { etiqueta: "Pagado ✓", accion: "Registrar pago adicional", sugerido: monto > 0 ? monto : "" };
     return { etiqueta: `Pagado · excedido ${format(pagado - monto, "monto", "CRC")}`, accion: "Registrar pago adicional", sugerido: monto > 0 ? monto : "" };
   };
-  const abrirPago = (line, row, budgetKey, spentKey) => {
+  const abrirPago = async (line, row, budgetKey, spentKey) => {
     if (!line?.linea_id || !esPagable(line.pagable)) return;
+    let cuentasPago = window.fachaviCuentasDisponibles?.() || [];
+    if (!cuentasPago.length && window.fachaviCargarCuentas) {
+      await window.fachaviCargarCuentas();
+      cuentasPago = window.fachaviCuentasDisponibles?.() || [];
+    }
     const presupuesto = number(row[budgetKey]);
     const gastado = number(row[spentKey]);
     const estado = estadoPago(presupuesto, gastado);
@@ -513,6 +520,22 @@
       fecha.max = [ultimo.getFullYear(), String(ultimo.getMonth() + 1).padStart(2, "0"), String(ultimo.getDate()).padStart(2, "0")].join("-");
     }
     fechaLabel.append(fecha);
+    const metodoLabel = document.createElement("label"); metodoLabel.textContent = "Pagar desde";
+    const metodo = document.createElement("select"); metodo.required = true;
+    if (cuentasPago.length) {
+      const cuentaPredeterminada = window.fachaviCuentaPagoPredeterminada?.() || cuentasPago[0].cuenta_id;
+      cuentasPago.forEach((cuenta) => {
+        const option = document.createElement("option");
+        option.value = cuenta.ultimos4 || `cuenta:${cuenta.cuenta_id}`;
+        option.textContent = cuenta.nombre;
+        option.selected = cuenta.cuenta_id === cuentaPredeterminada;
+        metodo.append(option);
+      });
+    } else {
+      const option = document.createElement("option"); option.value = "Sin método de pago";
+      option.textContent = "Sin cuenta vinculada"; metodo.append(option);
+    }
+    metodoLabel.append(metodo);
     const note = document.createElement("p"); note.className = "editor-nota";
     note.textContent = "Se guardará como un gasto manual normal asociado a este concepto.";
     const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
@@ -520,14 +543,14 @@
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
     cancel.addEventListener("click", () => dialog.close());
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Confirmar pago";
-    actions.append(cancel, save); form.append(title, detail, resumen, montoLabel, fechaLabel, note, error, actions); dialog.append(form);
+    actions.append(cancel, save); form.append(title, detail, resumen, montoLabel, fechaLabel, metodoLabel, note, error, actions); dialog.append(form);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (!form.reportValidity()) return;
       const pendiente = {
         linea_id: line.linea_id, categoria: line.categoria, concepto: line.concepto,
         fecha: fecha.value, descripcion: `Pago - ${line.concepto}`,
-        monto: monto.value, moneda: row.moneda || "CRC", medio_pago: "Sin método de pago",
+        monto: monto.value, moneda: row.moneda || "CRC", medio_pago: metodo.value,
         movimiento_clave: `pendiente:${Date.now()}`, pendiente_sincronizacion: true,
       };
       dialog.close(); aplicarMovimientoPendiente(pendiente);
@@ -535,13 +558,15 @@
       (async () => {
         const response = await fetch(`${API_BASE}/conceptos/${encodeURIComponent(line.linea_id)}/pagar`, {
           method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
-          body: JSON.stringify({ monto: monto.value, fecha: fecha.value, periodo_inicio: data.periodo?.inicio }),
+          body: JSON.stringify({ monto: monto.value, fecha: fecha.value,
+            medio_pago: metodo.value, periodo_inicio: data.periodo?.inicio }),
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el pago.");
         Object.assign(pendiente, result.movimiento);
         mostrarAviso("Pago guardado. Sincronizando en segundo plano…");
         vigilarSincronizacion(result.movimiento_clave);
+        window.dispatchEvent(new Event("fachavi:movimiento-editado"));
       })().catch((reason) => {
         aplicarMovimientoPendiente(pendiente, false);
         mostrarAviso(reason.message || "No pude guardar el pago; lo retiré de la vista.");

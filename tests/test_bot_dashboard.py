@@ -82,6 +82,8 @@ def test_render_incrusta_snapshot_sin_llamadas_del_frontend(
     assert "__DASHBOARD_ASSET_VERSION__" not in html
     assert '"nombre":"Cliente A"' in html
     assert "/dashboard-assets/app.js" in html
+    assert "/dashboard-assets/cuentas.js" in html
+    assert 'id="cuentas-contenido"' in html
     assert 'id="chat-mensajes"' in html
 
 

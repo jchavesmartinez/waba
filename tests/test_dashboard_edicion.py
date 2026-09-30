@@ -1,4 +1,5 @@
 import pytest
+from dataclasses import replace
 from decimal import Decimal
 
 from bot import dashboard_edicion
@@ -501,6 +502,29 @@ def test_registrar_pago_reutiliza_creacion_manual_con_linea_fecha_y_monto(monkey
         },
         "periodo": {"inicio": "2026-09-01", "fin_exclusivo": "2026-10-01"},
     }
+
+
+def test_registrar_pago_envia_cuenta_elegida_al_movimiento_manual(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    recibido = {}
+    politica = _politica_creacion()
+    politica = replace(politica, campos={
+        **politica.campos, "medio_pago": CampoEdicion("medio_pago", "Método de pago"),
+    })
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: (
+        {"inicio": "2026-09-01", "fin": "2026-10-01"}, cliente))
+    monkeypatch.setattr(dashboard_edicion.catalogo, "construir_contexto", lambda _: object())
+    monkeypatch.setattr(dashboard_edicion, "_validar_linea", lambda *_: {
+        "linea_id": "gas_cuota", "categoria": "Vivienda", "concepto": "Cuota", "pagable": True,
+    })
+    monkeypatch.setattr(dashboard_edicion.edicion, "politica_para", lambda *_: politica)
+    monkeypatch.setattr(dashboard_edicion, "crear_movimiento", lambda _, valores, **kw: (
+        recibido.update(valores) or {"ok": True}))
+
+    dashboard_edicion.registrar_pago("token", "gas_cuota", "75000", "2026-09-30",
+                                      "cuenta:mismart")
+    assert recibido["medio_pago"] == "cuenta:mismart"
+    assert recibido["monto"] == "75000"
 
 
 def test_registrar_pago_rechaza_linea_no_pagable_y_fecha_fuera_del_mes(monkeypatch):

@@ -980,7 +980,8 @@ def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None
     }
 
 
-def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: object) -> dict:
+def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: object,
+                   medio_pago: object = None) -> dict:
     """Registra un pago como movimiento manual ordinario.
 
     No existe tabla ni estado de pagos: el gasto y el saldo continúan siendo la
@@ -1019,6 +1020,13 @@ def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: obje
                         and not campo.calculado), None)
     if descripcion:
         valores[descripcion.nombre] = f"Pago - {destino['concepto']}"
+    campo_medio = next((campo for campo in politica.campos.values()
+                        if campo.nombre.casefold() in {"medio_pago", "metodo_pago", "método_pago"}
+                        and not campo.calculado), None)
+    if medio_pago is not None:
+        if not campo_medio:
+            raise ErrorReclasificacion("la creación manual no permite elegir método de pago")
+        valores[campo_medio.nombre] = _validar_medio_pago(medio_pago)
     # ``crear_movimiento`` conserva todas las validaciones, defaults de moneda,
     # escritura en Google Sheets, sincronización y reconstrucción existentes.
     return crear_movimiento(token, valores, periodo=periodo)
