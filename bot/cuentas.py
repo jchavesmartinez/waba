@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import text
@@ -61,6 +61,27 @@ def _fecha(valor: object, *, permitir_futura: bool = False) -> date:
     return resultado
 
 
+def _momento(valor: object) -> datetime | None:
+    """Convierte una hora civil del banco sin inventarle una zona horaria.
+
+    Las transacciones BAC se extraen como hora local de Costa Rica y se
+    guardan deliberadamente sin ``tzinfo``. El corte debe usar el mismo
+    contrato: compararlo como ``TIMESTAMPTZ`` desplazaría la hora seis horas
+    dependiendo del servidor que ejecute la consulta.
+    """
+    if valor is None or str(valor).strip() == "":
+        return None
+    if isinstance(valor, datetime):
+        return valor.replace(tzinfo=None)
+    if isinstance(valor, date):
+        return datetime.combine(valor, time.min)
+    try:
+        resultado = datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ErrorCuentas("el momento de corte no es válido") from exc
+    return resultado.replace(tzinfo=None)
+
+
 def _id(valor: object) -> str:
     resultado = str(valor or "").strip()
     if not _ID.fullmatch(resultado):
@@ -92,10 +113,16 @@ def _asegurar(cx) -> None:
         saldo_inicial_crc NUMERIC(20,6) NOT NULL DEFAULT 0,
         saldo_inicial_usd NUMERIC(20,6) NOT NULL DEFAULT 0,
         fecha_corte DATE NOT NULL,
+        corte_en TIMESTAMP,
         cuenta_pago_default TEXT NOT NULL DEFAULT '',
         activo BOOLEAN NOT NULL DEFAULT TRUE,
         PRIMARY KEY (cliente_id, cuenta_id)
     )'''))
+    # La primera versión guardaba solo el día. Mantenerlo permite que las
+    # cuentas viejas conserven su semántica, mientras los nuevos cortes pueden
+    # distinguir compras hechas antes y después de la hora indicada.
+    cx.execute(text(f'''ALTER TABLE "{_ESQUEMA}".cuentas
+        ADD COLUMN IF NOT EXISTS corte_en TIMESTAMP'''))
     cx.execute(text(f'''CREATE TABLE IF NOT EXISTS "{_ESQUEMA}".operaciones_cuenta (
         cliente_id TEXT NOT NULL,
         operacion_id TEXT NOT NULL,
@@ -292,7 +319,8 @@ def _canonicos(cliente: dict, corte: date, hasta: date) -> list[dict]:
         medio_pago, monto_neto, {monto_original}, {moneda_original}, {tipo},
         {moneda_estimada} AS moneda_estimada
         FROM {_identificador(tabla.tabla_real)}
-        WHERE fecha > :corte AND fecha <= :hasta ORDER BY fecha, _clave''',
+        WHERE fecha >= :corte AND fecha < (:hasta + INTERVAL '1 day')
+        ORDER BY fecha, _clave''',
         {"corte": corte, "hasta": hasta})
 
 
@@ -336,6 +364,20 @@ def _cuenta_de_medio(medio: object, por_ultimos4: dict[str, dict],
     return por_ultimos4.get(grupos[-1]) if grupos else None
 
 
+def _posterior_al_corte(cuenta: dict, momento: datetime, hasta: date) -> bool:
+    """Indica si un movimiento debe modificar el saldo de una cuenta.
+
+    Una cuenta migrada sin hora mantiene el contrato anterior (desde el día
+    siguiente). Al definir ``corte_en`` se vuelve preciso dentro del mismo día.
+    """
+    if momento.date() > hasta:
+        return False
+    corte_en = cuenta.get("corte_en")
+    if corte_en:
+        return momento > corte_en
+    return momento.date() > cuenta["fecha_corte"]
+
+
 def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
                      operaciones: list[dict], hasta: date) -> dict:
     """Calcula saldos sin guardar un contador mutable independiente."""
@@ -347,7 +389,10 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
             "cuenta_id": id_cuenta, "nombre": cuenta["nombre"],
             "tipo": cuenta["tipo"], "ultimos4": cuenta.get("ultimos4") or "",
             "moneda": cuenta.get("moneda") or "CRC",
-            "fecha_corte": str(cuenta["fecha_corte"])[:10],
+            # ``proyectar_saldos`` es una función pura: al recalcular meses
+            # históricos o de prueba no debe validar contra el reloj actual.
+            "fecha_corte": date.fromisoformat(str(cuenta["fecha_corte"])[:10]),
+            "corte_en": _momento(cuenta.get("corte_en")),
             "cuenta_pago_default": cuenta.get("cuenta_pago_default") or "",
             "saldo_crc": _decimal(cuenta["saldo_inicial_crc"]),
             "saldo_usd": _decimal(cuenta["saldo_inicial_usd"]),
@@ -372,14 +417,17 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
         if tipo in {"TRANSFERENCIA", "PAGO_TARJETA", "PAGO TARJETA"}:
             continue
         cuenta = _cuenta_de_medio(movimiento.get("medio_pago"), por_ultimos4, por_id)
-        fecha = str(movimiento.get("fecha") or "")[:10]
+        momento = _momento(movimiento.get("fecha"))
+        if momento is None:
+            continue
+        fecha = momento.date().isoformat()
         if not cuenta:
-            if not any(str(c["fecha_corte"]) < fecha <= hasta.isoformat() for c in por_id.values()):
+            if not any(_posterior_al_corte(c, momento, hasta) for c in por_id.values()):
                 continue
             sin_vincular.append({"fecha": fecha, "descripcion": movimiento.get("descripcion") or "",
                                  "medio_pago": movimiento.get("medio_pago") or ""})
             continue
-        if not (cuenta["fecha_corte"] < fecha <= hasta.isoformat()):
+        if not _posterior_al_corte(cuenta, momento, hasta):
             continue
         neto = _decimal(movimiento.get("monto_neto") or 0)
         es_ingreso = tipo == "INGRESO"
@@ -415,8 +463,11 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
             "monto": cambio, "moneda": moneda, "origen": "canónico",
         })
     for operacion in operaciones:
-        fecha = str(operacion["fecha"])[:10]
-        if fecha > hasta.isoformat():
+        # Es un registro ya validado/persistido; no debe depender de cuál sea
+        # la fecha actual al recalcular un período histórico.
+        fecha_operacion = date.fromisoformat(str(operacion["fecha"])[:10])
+        fecha = fecha_operacion.isoformat()
+        if fecha_operacion > hasta:
             continue
         origen = por_id.get(operacion.get("cuenta_origen"))
         destino = por_id.get(operacion.get("cuenta_destino"))
@@ -427,7 +478,7 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
             if firma in ingresos_importados:
                 ingresos_importados.remove(firma)
                 continue
-        if origen and origen["fecha_corte"] <= fecha:
+        if origen and origen["fecha_corte"] <= fecha_operacion:
             moneda = str(operacion["moneda_origen"]).upper()
             monto = _decimal(operacion["monto_origen"])
             origen[f"saldo_{moneda.lower()}"] -= monto
@@ -436,7 +487,7 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
                 "descripcion": operacion["descripcion"], "monto": -monto,
                 "moneda": moneda, "origen": "operación",
             })
-        if destino and destino["fecha_corte"] <= fecha:
+        if destino and destino["fecha_corte"] <= fecha_operacion:
             moneda = str(operacion["moneda_destino"]).upper()
             monto = _decimal(operacion["monto_destino"])
             # En una tarjeta de crédito, el pago reduce la deuda.
@@ -448,6 +499,9 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
                 "moneda": moneda, "origen": "operación",
             })
     for cuenta in por_id.values():
+        corte_en = cuenta.pop("corte_en", None)
+        cuenta["fecha_corte"] = cuenta["fecha_corte"].isoformat()
+        cuenta["corte_en"] = corte_en.isoformat(timespec="minutes") if corte_en else ""
         cuenta["movimientos"] = sorted(
             cuenta["movimientos"], key=lambda fila: (fila["fecha"], fila["id"]), reverse=True,
         )[:50]

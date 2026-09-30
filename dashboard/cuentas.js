@@ -278,7 +278,8 @@
       if (cuenta.tipo === "credito") linea("Deuda USD", cuenta.saldo_usd, "USD");
       card.append(saldos);
       const corte = document.createElement("small"); corte.className = "cuenta-corte";
-      corte.textContent = `Corte inicial: ${cuenta.fecha_corte}`; card.append(corte);
+      const horaCorte = cuenta.corte_en ? ` · ${cuenta.corte_en.slice(11, 16)} hora CR` : "";
+      corte.textContent = `Corte inicial: ${cuenta.fecha_corte}${horaCorte}`; card.append(corte);
       const detalle = document.createElement("details"); detalle.className = "cuenta-detalle";
       const summary = document.createElement("summary"); summary.textContent = "Ver movimientos"; detalle.append(summary);
       const lista = document.createElement("ul"); lista.className = "cuenta-movimientos";

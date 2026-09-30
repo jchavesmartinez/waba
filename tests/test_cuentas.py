@@ -1,6 +1,6 @@
 """Contrato de saldos: corte, cargos, ingresos y movimientos de cuenta."""
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -11,13 +11,14 @@ from bot import cuentas
 from bot import app as app_mod
 
 
-def _cuenta(cuenta_id, tipo, saldo_crc, *, ultimos4="", saldo_usd="0"):
+def _cuenta(cuenta_id, tipo, saldo_crc, *, ultimos4="", saldo_usd="0", corte_en=None):
     return {
         "cuenta_id": cuenta_id, "nombre": cuenta_id, "tipo": tipo,
         "ultimos4": ultimos4, "moneda": "CRC,USD" if tipo == "credito" else "CRC",
         "saldo_inicial_crc": Decimal(str(saldo_crc)),
         "saldo_inicial_usd": Decimal(str(saldo_usd)),
         "fecha_corte": date(2026, 9, 29), "cuenta_pago_default": "bac_salario",
+        "corte_en": corte_en,
     }
 
 
@@ -177,6 +178,25 @@ def test_corte_excluye_gastos_previos_y_efecto_posterior_de_edicion():
     resultado = _por_id(cuentas.proyectar_saldos(CUENTAS, cargos, [], date(2026, 9, 30)))
     assert resultado["bac_salario"]["saldo_crc"] == "517754.95"
     assert [m["id"] for m in resultado["bac_salario"]["movimientos"]] == ["despues"]
+
+
+def test_corte_con_hora_incluye_solo_los_gastos_posteriores_del_mismo_dia():
+    cuentas_con_hora = [
+        _cuenta("bac_salario", "banco", "517754.95", ultimos4="8774",
+                 corte_en=datetime(2026, 9, 29, 18, 40)),
+    ]
+    cargos = [
+        _movimiento("antes", "************8774", "1000", fecha="2026-09-29T18:39:00"),
+        _movimiento("despues", "************8774", "83270", fecha="2026-09-29T19:08:00"),
+        _movimiento("despues-2", "************8774", "31240", fecha="2026-09-29T20:46:00"),
+    ]
+    resultado = _por_id(cuentas.proyectar_saldos(
+        cuentas_con_hora, cargos, [], date(2026, 9, 29)))
+    assert resultado["bac_salario"]["saldo_crc"] == "403244.95"
+    assert [m["id"] for m in resultado["bac_salario"]["movimientos"]] == [
+        "despues-2", "despues",
+    ]
+    assert resultado["bac_salario"]["corte_en"] == "2026-09-29T18:40"
 
 
 def test_edicion_pendiente_actualiza_monto_y_metodo_sin_duplicar(monkeypatch):
