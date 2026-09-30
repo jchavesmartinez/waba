@@ -43,7 +43,7 @@ from starlette.concurrency import run_in_threadpool
 
 import config
 import registry
-from bot import audio, correo, dashboard, dashboard_edicion, entregas, memoria, menu, whatsapp
+from bot import audio, correo, cuentas, dashboard, dashboard_edicion, entregas, memoria, menu, whatsapp
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -466,6 +466,82 @@ def datos_dashboard(request: Request, tareas: BackgroundTasks, inicio: str = "")
         return JSONResponse({"ok": False, "error": "No pude cargar el dashboard."}, status_code=503)
 
 
+@app.get("/api/dashboard/cuentas")
+def cuentas_dashboard(request: Request):
+    try:
+        _, cliente = _sesion_dashboard(request)
+        return JSONResponse(cuentas.obtener(cliente), headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except cuentas.ErrorCuentas as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudieron cargar los saldos")
+        return JSONResponse({"ok": False, "error": "No pude cargar los saldos."}, status_code=503)
+
+
+@app.post("/api/dashboard/cuentas/operaciones")
+async def crear_operacion_cuenta(request: Request):
+    try:
+        _, cliente = _sesion_dashboard(request)
+        datos = await request.json()
+        resultado = await run_in_threadpool(cuentas.registrar_operacion, cliente, datos)
+        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except cuentas.ErrorCuentas as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo guardar la operación de cuenta")
+        return JSONResponse({"ok": False, "error": "No pude guardar la operación."}, status_code=503)
+
+
+@app.delete("/api/dashboard/cuentas/operaciones/{operacion_id}")
+def anular_operacion_cuenta(operacion_id: str, request: Request):
+    try:
+        _, cliente = _sesion_dashboard(request)
+        return JSONResponse(cuentas.anular_operacion(cliente, operacion_id),
+                            headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except cuentas.ErrorCuentas as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo anular la operación de cuenta")
+        return JSONResponse({"ok": False, "error": "No pude anular la operación."}, status_code=503)
+
+
+@app.post("/api/dashboard/cuentas/ingresos-recurrentes")
+async def guardar_ingreso_recurrente(request: Request):
+    try:
+        _, cliente = _sesion_dashboard(request)
+        datos = await request.json()
+        resultado = await run_in_threadpool(cuentas.guardar_regla, cliente, datos)
+        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except cuentas.ErrorCuentas as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo guardar el ingreso recurrente")
+        return JSONResponse({"ok": False, "error": "No pude guardar la recurrencia."}, status_code=503)
+
+
+@app.delete("/api/dashboard/cuentas/ingresos-recurrentes/{regla_id}")
+def desactivar_ingreso_recurrente(regla_id: str, request: Request):
+    try:
+        _, cliente = _sesion_dashboard(request)
+        return JSONResponse(cuentas.desactivar_regla(cliente, regla_id),
+                            headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except cuentas.ErrorCuentas as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo desactivar la recurrencia")
+        return JSONResponse({"ok": False, "error": "No pude desactivar la recurrencia."}, status_code=503)
+
+
 @app.get("/api/dashboard/chat")
 def historial_chat_app(request: Request):
     try:
@@ -572,6 +648,7 @@ async def pagar_concepto_app(linea_id: str, request: Request, tareas: Background
         token, sesion, _, _ = _token_dashboard_request(request, datos.get("periodo_inicio"))
         resultado = dashboard_edicion.registrar_pago(
             token, linea_id, datos.get("monto"), datos.get("fecha"),
+            datos.get("medio_pago"),
         )
         tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(sesion["cid"]))
         return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
