@@ -118,7 +118,9 @@ def test_join_auxiliar_asigna_titular_y_separa_mapeos_por_dimension():
             "GAS-008",
     }
     auxiliares = {"sharepoint_db__tarjetas": [{
-        "ultimos4": "8774", "titular": "Jose", "activo": "si",
+        # En producción la columna numérica de Sheets llega desde Postgres
+        # como 8774.0, no como el texto "8774".
+        "ultimos4": 8774.0, "titular": "Jose", "activo": "si",
         "vigencia_desde": "2026-01-01", "vigencia_hasta": "",
         "cuenta_id": "bac_salario", "saldo_corte_crc": "517754.95",
     }, {

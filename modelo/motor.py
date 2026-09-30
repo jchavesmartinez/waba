@@ -39,6 +39,7 @@ import itertools
 import json
 import logging
 import re
+from decimal import Decimal, InvalidOperation
 
 from . import extractores, tipos
 from .metadata import campos_de, clasificacion_de, joins_de, overrides_de
@@ -658,7 +659,19 @@ def _normalizar(valor) -> str:
 def _transformar_join(valor, transformacion: str) -> str:
     t = str(transformacion or "exacto").strip().lower()
     if t == "ultimos4":
-        return re.sub(r"\D", "", str(valor or ""))[-4:]
+        # Google Sheets infiere los últimos cuatro como número y Postgres los
+        # devuelve como ``8774.0``. Quitar caracteres no numéricos a ciegas
+        # produciría ``87740`` y el join contra ``************8774`` nunca
+        # calzaría. Primero conservamos el valor entero de un número real; el
+        # fallback sigue cubriendo tarjetas enmascaradas y texto libre.
+        texto = str(valor or "").strip()
+        try:
+            numero = Decimal(texto)
+            if numero.is_finite() and numero == numero.to_integral_value():
+                texto = str(int(numero))
+        except (InvalidOperation, ValueError):
+            pass
+        return re.sub(r"\D", "", texto)[-4:]
     if t == "normalizado":
         return _normalizar(valor)
     return str(valor or "").strip()
