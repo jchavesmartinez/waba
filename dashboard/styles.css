@@ -118,7 +118,7 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .nivel-hijos { display: grid; gap: 8px; padding: 0 10px 10px 28px; }
 .nivel-concepto { background: #fff; }
 .nivel-concepto > summary { padding: 12px 14px; font-size: .92rem; }
-.pago-acciones { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; }
+.pago-acciones { display: flex; align-items: center; justify-content: flex-end; gap: 7px; padding: 0 14px 12px 42px; }
 .pago-estado { color: #1b6b40; background: #e6f5e9; border-radius: 999px; padding: 4px 7px; font-size: .68rem; font-weight: 800; white-space: nowrap; }
 .boton-pagar { min-height: 34px; border: 0; border-radius: 8px; padding: 7px 9px; background: var(--green); color: white; font: inherit; font-size: .75rem; font-weight: 800; cursor: pointer; white-space: nowrap; }
 .boton-pagar:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 2px; }
@@ -212,7 +212,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: var(--
   .nivel-meta { font-size: .7rem; }
   .nivel-concepto > summary { flex-wrap: wrap; gap: 8px; }
   .nivel-concepto > summary .nivel-meta { flex-basis: calc(100% - 26px); margin-left: 26px; white-space: normal; }
-  .pago-acciones { margin-left: auto; }
+  .pago-acciones { padding-left: 38px; }
   .pago-estado { font-size: .62rem; padding: 4px 6px; }
   .chat-cabecera { display: grid; }
   .chat-contexto { width: fit-content; }
@@ -227,7 +227,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: var(--
      táctil completa debajo. */
   .nivel-concepto > summary { flex-wrap: wrap; gap: 8px; }
   .nivel-concepto > summary .nivel-meta { flex-basis: calc(100% - 26px); margin-left: 26px; white-space: normal; }
-  .nivel-concepto > summary .pago-acciones { width: 100%; justify-content: flex-end; padding-left: 26px; }
+  .pago-acciones { width: 100%; padding-left: 38px; }
   .tabla-wrap { max-height: none; overflow: visible; border: 0; }
   table, tbody, tr, td { display: block; }
   thead { display: none; }

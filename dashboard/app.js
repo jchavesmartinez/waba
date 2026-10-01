@@ -803,18 +803,20 @@
           gastoExcedePresupuesto(row[conceptKeys.budget], row[conceptKeys.spent]) ? "meta-gastado-excedido" : "",
         );
         conceptSummary.append(conceptHeading, conceptMeta);
+        let accionesPago = null;
         if (linea && esPagable(linea.pagable) && conceptKeys.budget && conceptKeys.spent) {
           const pago = estadoPago(row[conceptKeys.budget], row[conceptKeys.spent]);
-          const accionesPago = document.createElement("span"); accionesPago.className = "pago-acciones";
+          accionesPago = document.createElement("div"); accionesPago.className = "pago-acciones";
           const estado = document.createElement("span"); estado.className = "pago-estado"; estado.textContent = pago.etiqueta;
           const boton = document.createElement("button"); boton.type = "button"; boton.className = "boton-pagar"; boton.textContent = pago.accion;
           boton.addEventListener("click", (event) => {
             event.preventDefault(); event.stopPropagation();
             abrirPago(linea, row, conceptKeys.budget, conceptKeys.spent);
           });
-          accionesPago.append(estado, boton); conceptSummary.append(accionesPago);
+          accionesPago.append(estado, boton);
         }
         conceptDetails.append(conceptSummary);
+        if (accionesPago) conceptDetails.append(accionesPago);
         const conceptBody = document.createElement("div"); conceptBody.className = "nivel-detalle"; appendMetricBars(conceptBody, row);
         const matches = movements.filter((movement, index) => {
           const originalConcept = row.origen_concepto || row[conceptKey];
