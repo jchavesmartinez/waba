@@ -527,6 +527,34 @@ def test_registrar_pago_envia_cuenta_elegida_al_movimiento_manual(monkeypatch):
     assert recibido["monto"] == "75000"
 
 
+def test_registrar_pago_usa_debito_cuenta_si_la_hoja_restringe_el_medio(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    recibido = {}
+    politica = _politica_creacion()
+    politica = replace(politica, campos={
+        **politica.campos,
+        "medio_pago": CampoEdicion(
+            "medio_pago", "Método de pago", tipo="lista",
+            valores=("sinpe", "transferencia", "efectivo", "debito_cuenta", "otro"),
+        ),
+    })
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: (
+        {"inicio": "2026-09-01", "fin": "2026-10-01"}, cliente))
+    monkeypatch.setattr(dashboard_edicion.catalogo, "construir_contexto", lambda _: object())
+    monkeypatch.setattr(dashboard_edicion, "_validar_linea", lambda *_: {
+        "linea_id": "gas_cuota", "categoria": "Vivienda", "concepto": "Cuota", "pagable": True,
+    })
+    monkeypatch.setattr(dashboard_edicion.edicion, "politica_para", lambda *_: politica)
+    monkeypatch.setattr(dashboard_edicion, "crear_movimiento", lambda _, valores, **kw: (
+        recibido.update(valores) or {"ok": True}))
+
+    dashboard_edicion.registrar_pago(
+        "token", "gas_cuota", "75000", "2026-09-30", "cuenta:mismart", "CR - Salario Walmart")
+
+    assert recibido["medio_pago"] == "debito_cuenta"
+    assert recibido["descripcion"] == "Pago - Cuota · CR - Salario Walmart"
+
+
 def test_registrar_pago_rechaza_linea_no_pagable_y_fecha_fuera_del_mes(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     monkeypatch.setattr(

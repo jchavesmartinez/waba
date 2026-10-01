@@ -465,6 +465,39 @@ def _validar_medio_pago(valor: object) -> str:
     return medio
 
 
+def _medio_pago_para_registrar_pago(campo: edicion.CampoEdicion | None,
+                                    medio_pago: str) -> str:
+    """Convierte una cuenta elegida en un método permitido por la fuente.
+
+    El dashboard usa el número final o el id de la cuenta para poder asociar
+    visualmente el pago a la cuenta elegida. Algunas hojas de gastos manuales,
+    sin embargo, restringen ``medio_pago`` a opciones genéricas. En ese caso
+    el valor canónico ``debito_cuenta`` conserva la semántica y evita que la
+    validación de la hoja rechace el pago.
+    """
+    if campo is None or campo.tipo != "lista":
+        return medio_pago
+    permitidos = {valor.casefold(): valor for valor in campo.valores}
+    if medio_pago.casefold() in permitidos:
+        return permitidos[medio_pago.casefold()]
+    for alternativa in ("debito_cuenta", "otro"):
+        if alternativa in permitidos:
+            return permitidos[alternativa]
+    return medio_pago
+
+
+def _descripcion_pago(concepto: object, cuenta_origen: object) -> str:
+    """Genera una descripción corta que conserva la cuenta elegida."""
+    base = f"Pago - {str(concepto or '').strip()}"
+    cuenta = str(cuenta_origen or "").strip()
+    if not cuenta:
+        return base
+    if len(cuenta) > _MEDIO_PAGO_MAXIMO or any(ord(caracter) < 32 for caracter in cuenta):
+        raise ErrorReclasificacion("la cuenta de origen no es válida")
+    sufijo = f" · {cuenta}"
+    return f"{base[:max(0, 180 - len(sufijo))]}{sufijo}"
+
+
 def _reconstruir(cliente: dict) -> None:
     destino = crear_destino(config.WAREHOUSE_TIPO, config.dsn_de_cliente(cliente))
     try:
@@ -981,7 +1014,7 @@ def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None
 
 
 def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: object,
-                   medio_pago: object = None) -> dict:
+                   medio_pago: object = None, cuenta_origen: object = None) -> dict:
     """Registra un pago como movimiento manual ordinario.
 
     No existe tabla ni estado de pagos: el gasto y el saldo continúan siendo la
@@ -1015,18 +1048,19 @@ def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: obje
         campo_fecha.nombre: fecha,
         campo_monto.nombre: monto,
     }
+    campo_medio = next((campo for campo in politica.campos.values()
+                        if campo.nombre.casefold() in {"medio_pago", "metodo_pago", "método_pago"}
+                        and not campo.calculado), None)
     descripcion = next((campo for campo in politica.campos.values()
                         if campo.nombre.casefold() in {"descripcion", "descripción"}
                         and not campo.calculado), None)
     if descripcion:
-        valores[descripcion.nombre] = f"Pago - {destino['concepto']}"
-    campo_medio = next((campo for campo in politica.campos.values()
-                        if campo.nombre.casefold() in {"medio_pago", "metodo_pago", "método_pago"}
-                        and not campo.calculado), None)
+        valores[descripcion.nombre] = _descripcion_pago(destino["concepto"], cuenta_origen)
     if medio_pago is not None:
         if not campo_medio:
             raise ErrorReclasificacion("la creación manual no permite elegir método de pago")
-        valores[campo_medio.nombre] = _validar_medio_pago(medio_pago)
+        valores[campo_medio.nombre] = _medio_pago_para_registrar_pago(
+            campo_medio, _validar_medio_pago(medio_pago))
     # ``crear_movimiento`` conserva todas las validaciones, defaults de moneda,
     # escritura en Google Sheets, sincronización y reconstrucción existentes.
     return crear_movimiento(token, valores, periodo=periodo)

@@ -683,9 +683,13 @@ async def pagar_concepto_app(linea_id: str, request: Request, tareas: Background
         if not isinstance(datos, dict):
             raise dashboard_edicion.ErrorReclasificacion("la solicitud no es válida")
         token, sesion, _, _ = _token_dashboard_request(request, datos.get("periodo_inicio"))
+        opciones_pago = {}
+        if "medio_pago" in datos:
+            opciones_pago["medio_pago"] = datos.get("medio_pago")
+        if "cuenta_origen" in datos:
+            opciones_pago["cuenta_origen"] = datos.get("cuenta_origen")
         resultado = dashboard_edicion.registrar_pago(
-            token, linea_id, datos.get("monto"), datos.get("fecha"),
-            datos.get("medio_pago"),
+            token, linea_id, datos.get("monto"), datos.get("fecha"), **opciones_pago,
         )
         tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(sesion["cid"]))
         return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
@@ -902,8 +906,13 @@ async def pagar_concepto_dashboard(token: str, linea_id: str, request: Request,
         datos = await request.json()
         if not isinstance(datos, dict):
             raise dashboard_edicion.ErrorReclasificacion("la solicitud de pago no es válida")
+        opciones_pago = {}
+        if "medio_pago" in datos:
+            opciones_pago["medio_pago"] = datos.get("medio_pago")
+        if "cuenta_origen" in datos:
+            opciones_pago["cuenta_origen"] = datos.get("cuenta_origen")
         resultado = dashboard_edicion.registrar_pago(
-            token, linea_id, datos.get("monto"), datos.get("fecha"),
+            token, linea_id, datos.get("monto"), datos.get("fecha"), **opciones_pago,
         )
         payload, _ = dashboard.validar_enlace(token)
         tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(payload["cid"]))

@@ -528,6 +528,7 @@
         const option = document.createElement("option");
         option.value = cuenta.ultimos4 || `cuenta:${cuenta.cuenta_id}`;
         option.textContent = cuenta.nombre;
+        option.dataset.cuentaOrigen = cuenta.nombre;
         option.selected = cuenta.cuenta_id === cuentaPredeterminada;
         metodo.append(option);
       });
@@ -553,13 +554,15 @@
         monto: monto.value, moneda: row.moneda || "CRC", medio_pago: metodo.value,
         movimiento_clave: `pendiente:${Date.now()}`, pendiente_sincronizacion: true,
       };
+      const cuentaOrigen = metodo.selectedOptions[0]?.dataset.cuentaOrigen || "";
       dialog.close(); aplicarMovimientoPendiente(pendiente);
       mostrarAviso("Pago aplicado. Guardando en segundo plano…");
       (async () => {
         const response = await fetch(`${API_BASE}/conceptos/${encodeURIComponent(line.linea_id)}/pagar`, {
           method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
           body: JSON.stringify({ monto: monto.value, fecha: fecha.value,
-            medio_pago: metodo.value, periodo_inicio: data.periodo?.inicio }),
+            medio_pago: metodo.value, cuenta_origen: cuentaOrigen,
+            periodo_inicio: data.periodo?.inicio }),
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el pago.");
