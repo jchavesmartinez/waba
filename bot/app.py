@@ -476,10 +476,12 @@ def cuentas_dashboard(request: Request, inicio: str = ""):
         # Mantener vacío el parámetro conserva la lectura actual para clientes
         # que abran directamente este endpoint.
         hasta = None
+        desde = None
         if inicio:
             periodo = dashboard.periodo_desde_inicio(inicio)
+            desde = date.fromisoformat(periodo["inicio"])
             hasta = date.fromisoformat(periodo["fin_exclusivo"]) - timedelta(days=1)
-        resultado = cuentas.obtener(cliente, hasta) if hasta else cuentas.obtener(cliente)
+        resultado = cuentas.obtener(cliente, hasta, desde=desde) if hasta else cuentas.obtener(cliente)
         return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
     except dashboard.EnlaceInvalido:
         return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)

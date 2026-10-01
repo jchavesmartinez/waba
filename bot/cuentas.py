@@ -538,7 +538,7 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
             "advertencias": advertencias, "sin_conversion": sin_conversion[-20:]}
 
 
-def obtener(cliente: dict, hasta: date | None = None) -> dict:
+def obtener(cliente: dict, hasta: date | None = None, desde: date | None = None) -> dict:
     """Devuelve los saldos a una fecha, sin proyectar datos posteriores.
 
     El dashboard usa la fecha final del mes que el usuario está viendo. Para
@@ -562,6 +562,14 @@ def obtener(cliente: dict, hasta: date | None = None) -> dict:
     corte = min(_fecha(c["fecha_corte"]) for c in cuentas)
     movimientos = _aplicar_pendientes(cliente, _canonicos(cliente, corte, hasta))
     proyeccion = proyectar_saldos(cuentas, movimientos, operaciones, hasta)
+    if desde:
+        inicio = desde.isoformat()
+        fin = hasta.isoformat()
+        for cuenta in proyeccion["cuentas"]:
+            cuenta["movimientos"] = [movimiento for movimiento in cuenta["movimientos"]
+                                      if inicio <= str(movimiento["fecha"])[:10] <= fin]
+        proyeccion["sin_vincular"] = [movimiento for movimiento in proyeccion["sin_vincular"]
+                                       if inicio <= str(movimiento["fecha"])[:10] <= fin]
     proyeccion.update({
         "ok": True, "configurado": True, "fecha": hasta.isoformat(),
         "reglas": [{

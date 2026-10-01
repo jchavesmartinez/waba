@@ -208,6 +208,22 @@ def test_corte_con_hora_incluye_solo_los_gastos_posteriores_del_mismo_dia():
     assert resultado["bac_salario"]["corte_en"] == "2026-09-29T18:40"
 
 
+def test_obtener_filtra_el_detalle_al_mes_solicitado(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    monkeypatch.setattr(cuentas, "_leer_config", lambda _: (CUENTAS, [], []))
+    monkeypatch.setattr(cuentas, "_materializar_ingresos", lambda *_: None)
+    monkeypatch.setattr(cuentas, "fecha_local", lambda: date(2026, 10, 31))
+    monkeypatch.setattr(cuentas, "_aplicar_pendientes", lambda _, movimientos: movimientos)
+    monkeypatch.setattr(cuentas, "_canonicos", lambda *_: [
+        _movimiento("septiembre", "8774", "100", fecha="2026-09-30"),
+        _movimiento("octubre", "8774", "200", fecha="2026-10-01"),
+    ])
+
+    resultado = cuentas.obtener(cliente, date(2026, 10, 31), desde=date(2026, 10, 1))
+
+    assert [m["id"] for m in _por_id(resultado)["bac_salario"]["movimientos"]] == ["octubre"]
+
+
 def test_edicion_pendiente_actualiza_monto_y_metodo_sin_duplicar(monkeypatch):
     movimiento = _movimiento("usd", "8715", "5200", "USD", "10")
     monkeypatch.setattr(cuentas.dashboard_edicion, "proyecciones_pendientes", lambda _: [{
@@ -260,7 +276,7 @@ def test_endpoint_cuentas_acepta_el_mes_del_dashboard(monkeypatch):
     app = TestClient(app_mod.app)
     recibido = {}
     monkeypatch.setattr(app_mod, "_sesion_dashboard", lambda request: ({}, {"cliente_id": "a"}))
-    monkeypatch.setattr(cuentas, "obtener", lambda cliente, hasta: recibido.update(hasta=hasta) or {
+    monkeypatch.setattr(cuentas, "obtener", lambda cliente, hasta, desde=None: recibido.update(hasta=hasta, desde=desde) or {
         "ok": True, "configurado": True, "cuentas": [], "reglas": [],
     })
 
@@ -268,6 +284,7 @@ def test_endpoint_cuentas_acepta_el_mes_del_dashboard(monkeypatch):
 
     assert respuesta.status_code == 200
     assert recibido["hasta"] == date(2026, 9, 30)
+    assert recibido["desde"] == date(2026, 9, 1)
 
 
 def test_dashboard_descarga_reporte_pdf_del_mes(monkeypatch):
