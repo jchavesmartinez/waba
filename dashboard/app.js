@@ -76,6 +76,11 @@
   const normalized = (value) => String(value ?? "").trim().toLocaleLowerCase("es").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const lines = Array.isArray(data.lineas_presupuesto) ? data.lineas_presupuesto : [];
   const linesById = new Map(lines.map((line) => [String(line.linea_id || ""), line]));
+  const lineKey = (categoria, concepto) => `${normalized(categoria)}|${normalized(concepto)}`;
+  // Las filas del KPI de presupuesto no siempre incluyen linea_id. Conservar
+  // el ID cuando venga, pero resolver la línea vigente por categoría/concepto
+  // permite ofrecer el pago para cada rubro mostrado en el árbol mensual.
+  const linesByConcept = new Map(lines.map((line) => [lineKey(line.categoria, line.concepto), line]));
   const esPagable = (valor) => [true, "true", "1", "si", "sí", "yes"].includes(
     typeof valor === "string" ? valor.trim().toLocaleLowerCase("es") : valor,
   );
@@ -791,7 +796,9 @@
       rows.forEach((row) => {
         const conceptKey = keyMatch(row, /^concepto$|rubro/i);
         const conceptLineKey = keyMatch(row, /^linea_id$|linea_presupuesto_id/i);
-        const linea = conceptLineKey ? linesById.get(String(row[conceptLineKey] || "")) : null;
+        const lineaId = conceptLineKey ? String(row[conceptLineKey] || "") : "";
+        const linea = linesById.get(lineaId)
+          || linesByConcept.get(lineKey(bucket.name, row[conceptKey]));
         const conceptDetails = document.createElement("details"); conceptDetails.className = "nivel nivel-concepto";
         const conceptSummary = document.createElement("summary");
         const conceptHeading = document.createElement("span"); conceptHeading.className = "nivel-titulo"; conceptHeading.textContent = row[conceptKey];
