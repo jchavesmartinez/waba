@@ -1044,8 +1044,6 @@ def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: obje
         raise ErrorReclasificacion("seleccione un concepto presupuestario válido")
     ctx = catalogo.construir_contexto(cliente)
     destino = _validar_linea(cliente, ctx, linea, periodo)
-    if not destino.get("pagable"):
-        raise ErrorReclasificacion("este concepto no está habilitado para registrar pagos")
 
     politica = _politica_creacion_manual(cliente)
     campo_linea = next((campo for campo in politica.campos.values()

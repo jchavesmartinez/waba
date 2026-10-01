@@ -811,7 +811,7 @@
         );
         conceptSummary.append(conceptHeading, conceptMeta);
         let accionesPago = null;
-        if (linea && esPagable(linea.pagable) && conceptKeys.budget && conceptKeys.spent) {
+        if (linea && conceptKeys.budget && conceptKeys.spent) {
           const pago = estadoPago(row[conceptKeys.budget], row[conceptKeys.spent]);
           accionesPago = document.createElement("div"); accionesPago.className = "pago-acciones";
           const estado = document.createElement("span"); estado.className = "pago-estado"; estado.textContent = pago.etiqueta;

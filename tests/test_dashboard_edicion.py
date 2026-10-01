@@ -584,7 +584,7 @@ def test_registrar_pago_vincula_la_cuenta_elegida_aun_con_lista_de_medios(monkey
     assert recibido["permitir_medio_cuenta"] is True
 
 
-def test_registrar_pago_rechaza_linea_no_pagable_y_fecha_fuera_del_mes(monkeypatch):
+def test_registrar_pago_rechaza_fecha_fuera_del_mes(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     monkeypatch.setattr(
         dashboard_edicion.dashboard, "validar_enlace",
@@ -592,15 +592,6 @@ def test_registrar_pago_rechaza_linea_no_pagable_y_fecha_fuera_del_mes(monkeypat
     )
     with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="dentro del período"):
         dashboard_edicion.registrar_pago("token", "gas_cuota", "100", "2026-10-01")
-
-    monkeypatch.setattr(dashboard_edicion.catalogo, "construir_contexto", lambda _: object())
-    monkeypatch.setattr(
-        dashboard_edicion, "_validar_linea",
-        lambda *_: {"linea_id": "gas_variable", "categoria": "Otros", "concepto": "Variable", "pagable": False},
-    )
-    with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="no está habilitado"):
-        dashboard_edicion.registrar_pago("token", "gas_variable", "100", "2026-09-15")
-
 
 def test_sincronizacion_manual_ignora_error_de_otra_fuente(monkeypatch):
     monkeypatch.setattr(
