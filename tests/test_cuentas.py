@@ -259,3 +259,34 @@ def test_endpoint_cuentas_acepta_el_mes_del_dashboard(monkeypatch):
 
     assert respuesta.status_code == 200
     assert recibido["hasta"] == date(2026, 9, 30)
+
+
+def test_dashboard_descarga_reporte_pdf_del_mes(monkeypatch):
+    app = TestClient(app_mod.app)
+    monkeypatch.setattr(app_mod, "_sesion_dashboard", lambda request: ({}, {"cliente_id": "a"}))
+    monkeypatch.setattr(app_mod.dashboard, "obtener_snapshot", lambda *_: ({
+        "cliente": {"nombre": "Cliente A"},
+        "periodo": {"inicio": "2026-09-01", "etiqueta": "septiembre 2026"},
+        "kpis": [{
+            "kpi": "presupuesto_disponible", "columnas": ["presupuesto", "gastado"],
+            "filas": [[100000, 24000]],
+        }],
+        "movimientos": [{
+            "fecha": "2026-09-12", "categoria": "Hogar", "concepto": "Internet",
+            "descripcion": "Proveedor", "monto": 24000, "moneda": "CRC",
+        }],
+    }, False))
+    monkeypatch.setattr(cuentas, "obtener", lambda *_: {
+        "ok": True, "fecha": "2026-09-30", "cuentas": [{
+            "nombre": "Banco", "tipo": "banco", "moneda": "CRC",
+            "saldo_crc": "76000", "saldo_usd": "0", "fecha_corte": "2026-09-01",
+            "movimientos": [],
+        }],
+    })
+
+    respuesta = app.get("/api/dashboard/reporte.pdf?inicio=2026-09-01")
+
+    assert respuesta.status_code == 200
+    assert respuesta.headers["content-type"] == "application/pdf"
+    assert "reporte-financiero-2026-09.pdf" in respuesta.headers["content-disposition"]
+    assert respuesta.content.startswith(b"%PDF-")

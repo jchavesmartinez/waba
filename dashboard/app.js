@@ -1039,6 +1039,13 @@
     }
   };
   byId("descargar-reporte")?.addEventListener("click", descargarReporte);
+  byId("descargar-pdf")?.addEventListener("click", () => {
+    const inicio = String(data.periodo?.inicio || "").slice(0, 10);
+    const enlace = document.createElement("a");
+    enlace.href = `${API_BASE}/reporte.pdf?inicio=${encodeURIComponent(inicio)}`;
+    enlace.download = `reporte-financiero-${inicio.slice(0, 7) || "mes"}.pdf`;
+    enlace.click();
+  });
   const summaryKeys = summaryRow ? Object.keys(summaryRow).filter((k) => !/pct|gasto.?neto/i.test(k)).slice(0, 4) : [];
   const cards = byId("resumen");
   summaryKeys.forEach((key) => {

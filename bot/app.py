@@ -44,7 +44,8 @@ from starlette.concurrency import run_in_threadpool
 
 import config
 import registry
-from bot import audio, correo, cuentas, dashboard, dashboard_edicion, entregas, memoria, menu, whatsapp
+from bot import (audio, correo, cuentas, dashboard, dashboard_edicion, entregas, memoria,
+                 menu, reporte_dashboard, whatsapp)
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -487,6 +488,33 @@ def cuentas_dashboard(request: Request, inicio: str = ""):
     except Exception:  # noqa: BLE001
         logger.exception("No se pudieron cargar los saldos")
         return JSONResponse({"ok": False, "error": "No pude cargar los saldos."}, status_code=503)
+
+
+@app.get("/api/dashboard/reporte.pdf")
+def reporte_pdf_dashboard(request: Request, inicio: str = ""):
+    """Entrega el reporte PDF del mismo período que está abierto en la vista."""
+    try:
+        _, cliente = _sesion_dashboard(request)
+        periodo = dashboard.periodo_desde_inicio(inicio or None)
+        snapshot, _ = dashboard.obtener_snapshot(cliente, periodo)
+        hasta = date.fromisoformat(periodo["fin_exclusivo"]) - timedelta(days=1)
+        contenido = reporte_dashboard.crear_pdf(snapshot, cuentas.obtener(cliente, hasta))
+        nombre = f"reporte-financiero-{periodo['inicio'][:7]}.pdf"
+        return Response(
+            content=contenido,
+            media_type="application/pdf",
+            headers={
+                "Cache-Control": "private, no-store",
+                "Content-Disposition": f'attachment; filename="{nombre}"',
+            },
+        )
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except cuentas.ErrorCuentas as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo preparar el reporte PDF")
+        return JSONResponse({"ok": False, "error": "No pude preparar el reporte PDF."}, status_code=503)
 
 
 @app.post("/api/dashboard/cuentas/operaciones")
