@@ -87,9 +87,6 @@
   // el ID cuando venga, pero resolver la línea vigente por categoría/concepto
   // permite ofrecer el pago para cada rubro mostrado en el árbol mensual.
   const linesByConcept = new Map(lines.map((line) => [lineKey(line.categoria, line.concepto), line]));
-  const esPagable = (valor) => [true, "true", "1", "si", "sí", "yes"].includes(
-    typeof valor === "string" ? valor.trim().toLocaleLowerCase("es") : valor,
-  );
   const creation = data.creacion_manual && Array.isArray(data.creacion_manual.campos)
     ? data.creacion_manual : null;
   const irAMes = (desplazamiento) => {
@@ -495,7 +492,7 @@
     return { etiqueta: `Pagado · excedido ${format(pagado - monto, "monto", "CRC")}`, accion: "Registrar pago adicional", sugerido: monto > 0 ? monto : "" };
   };
   const abrirPago = async (line, row, budgetKey, spentKey) => {
-    if (!line?.linea_id || !esPagable(line.pagable)) return;
+    if (!line?.linea_id) return;
     let cuentasPago = window.fachaviCuentasDisponibles?.() || [];
     if (!cuentasPago.length && window.fachaviCargarCuentas) {
       await window.fachaviCargarCuentas();
