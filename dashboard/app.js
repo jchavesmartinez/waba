@@ -939,7 +939,7 @@
     if (!boton || boton.disabled) return;
     boton.disabled = true;
     const textoOriginal = boton.textContent;
-    boton.textContent = "Preparando reporte…";
+    boton.textContent = "Preparando descargas…";
     try {
       const inicio = String(data.periodo?.inicio || "").slice(0, 10);
       const respuesta = await fetch(
@@ -1024,13 +1024,22 @@
         ]);
       }
 
-      const blob = new Blob([`\ufeff${filas.join("\r\n")}`], { type: "text/csv;charset=utf-8" });
-      const enlace = document.createElement("a");
-      enlace.href = URL.createObjectURL(blob);
-      enlace.download = `reporte-financiero-${String(data.periodo?.inicio || "mes").slice(0, 7)}.csv`;
-      enlace.click();
-      window.setTimeout(() => URL.revokeObjectURL(enlace.href), 1000);
-      mostrarAviso("Reporte descargado.");
+      const periodoArchivo = String(data.periodo?.inicio || "mes").slice(0, 7);
+      const csv = new Blob([`\ufeff${filas.join("\r\n")}`], { type: "text/csv;charset=utf-8" });
+      const pdfRespuesta = await fetch(
+        `${API_BASE}/reporte.pdf?inicio=${encodeURIComponent(inicio)}`,
+        { headers: { Accept: "application/pdf" } },
+      );
+      if (!pdfRespuesta.ok) throw new Error("No pude preparar el reporte PDF.");
+      const pdf = await pdfRespuesta.blob();
+      const descargar = (archivo, nombre) => {
+        const enlace = document.createElement("a");
+        enlace.href = URL.createObjectURL(archivo); enlace.download = nombre; enlace.click();
+        window.setTimeout(() => URL.revokeObjectURL(enlace.href), 1000);
+      };
+      descargar(csv, `reporte-financiero-${periodoArchivo}.csv`);
+      descargar(pdf, `reporte-financiero-${periodoArchivo}.pdf`);
+      mostrarAviso("CSV y PDF descargados.");
     } catch (razon) {
       mostrarAviso(razon.message || "No pude preparar el reporte.");
     } finally {
@@ -1039,13 +1048,6 @@
     }
   };
   byId("descargar-reporte")?.addEventListener("click", descargarReporte);
-  byId("descargar-pdf")?.addEventListener("click", () => {
-    const inicio = String(data.periodo?.inicio || "").slice(0, 10);
-    const enlace = document.createElement("a");
-    enlace.href = `${API_BASE}/reporte.pdf?inicio=${encodeURIComponent(inicio)}`;
-    enlace.download = `reporte-financiero-${inicio.slice(0, 7) || "mes"}.pdf`;
-    enlace.click();
-  });
   const summaryKeys = summaryRow ? Object.keys(summaryRow).filter((k) => !/pct|gasto.?neto/i.test(k)).slice(0, 4) : [];
   const cards = byId("resumen");
   summaryKeys.forEach((key) => {
