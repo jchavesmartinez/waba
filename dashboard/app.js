@@ -526,7 +526,7 @@
       const cuentaPredeterminada = window.fachaviCuentaPagoPredeterminada?.() || cuentasPago[0].cuenta_id;
       cuentasPago.forEach((cuenta) => {
         const option = document.createElement("option");
-        option.value = cuenta.ultimos4 || `cuenta:${cuenta.cuenta_id}`;
+        option.value = `cuenta:${cuenta.cuenta_id}`;
         option.textContent = cuenta.nombre;
         option.dataset.cuentaOrigen = cuenta.nombre;
         option.selected = cuenta.cuenta_id === cuentaPredeterminada;

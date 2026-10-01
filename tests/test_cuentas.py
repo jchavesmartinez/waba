@@ -66,6 +66,15 @@ def test_cargos_usan_debito_y_deuda_en_moneda_original():
     assert resultado["mismart"]["saldo_crc"] == "6798159.75"
 
 
+def test_resolver_medio_de_cuenta_acepta_id_y_ultimos4(monkeypatch):
+    monkeypatch.setattr(cuentas, "_leer_config", lambda _: (CUENTAS, [], []))
+    cliente = {"cliente_id": "cliente_a"}
+
+    assert cuentas.resolver_medio_de_cuenta(cliente, "cuenta:bac_salario") == "cuenta:bac_salario"
+    assert cuentas.resolver_medio_de_cuenta(cliente, "8774") == "cuenta:bac_salario"
+    assert cuentas.resolver_medio_de_cuenta(cliente, "cuenta:ajena") is None
+
+
 def test_lee_cuentas_desde_hoja_tarjetas_sin_requerir_numero_para_ahorro(monkeypatch):
     class Hoja:
         def get_all_records(self):

@@ -364,6 +364,26 @@ def _cuenta_de_medio(medio: object, por_ultimos4: dict[str, dict],
     return por_ultimos4.get(grupos[-1]) if grupos else None
 
 
+def resolver_medio_de_cuenta(cliente: dict, medio: object) -> str | None:
+    """Devuelve el identificador canónico de una cuenta activa, si corresponde.
+
+    Los gastos manuales pueden llevar ``cuenta:<id>`` o los últimos cuatro
+    dígitos. Centralizar la resolución evita que un pago del dashboard se
+    guarde con una cuenta inventada o con un texto que los saldos no reconocen.
+    """
+    valor = str(medio or "").strip()
+    if not valor:
+        return None
+    cuentas, _, _ = _leer_config(cliente)
+    por_id = {str(c["cuenta_id"]): c for c in cuentas}
+    if valor.startswith("cuenta:"):
+        cuenta_id = valor.removeprefix("cuenta:")
+        return f"cuenta:{cuenta_id}" if cuenta_id in por_id else None
+    coincidencias = [str(c["cuenta_id"]) for c in cuentas
+                     if str(c.get("ultimos4") or "").strip() == valor]
+    return f"cuenta:{coincidencias[0]}" if len(coincidencias) == 1 else None
+
+
 def _posterior_al_corte(cuenta: dict, momento: datetime, hasta: date) -> bool:
     """Indica si un movimiento debe modificar el saldo de una cuenta.
 

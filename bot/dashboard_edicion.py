@@ -13,6 +13,7 @@ import json
 import re
 import threading
 import time
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
@@ -930,7 +931,8 @@ def _politica_creacion_manual(cliente: dict) -> edicion.PoliticaEdicion:
     return politica
 
 
-def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None) -> dict:
+def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None,
+                     permitir_medio_cuenta: bool = False) -> dict:
     """Crea un gasto manual y difiere sólo la materialización pesada.
 
     La fila se confirma primero en su Google Sheet normal; nunca se usa un
@@ -941,6 +943,18 @@ def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None
         raise ErrorReclasificacion("la solicitud de creación no es válida")
     politica = _politica_creacion_manual(cliente)
     entrada = {str(k): v for k, v in valores.items() if isinstance(k, str)}
+
+    if permitir_medio_cuenta:
+        campo_medio = next((campo for campo in politica.campos.values()
+                            if campo.nombre.casefold() in {"medio_pago", "metodo_pago", "método_pago"}), None)
+        if campo_medio and campo_medio.tipo == "lista":
+            # El identificador viene de una cuenta activa validada en
+            # ``registrar_pago``. La lista genérica de la hoja no lo contiene,
+            # pero sí admite guardarlo y los saldos lo usan para vincularlo.
+            politica = replace(politica, campos={
+                **politica.campos,
+                campo_medio.nombre: replace(campo_medio, tipo="texto", valores=()),
+            })
 
     # La relación presupuesto es siempre validada en el servidor. El navegador
     # sólo elige entre líneas que ya recibió; no puede inventar una categoría
@@ -1056,11 +1070,25 @@ def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: obje
                         and not campo.calculado), None)
     if descripcion:
         valores[descripcion.nombre] = _descripcion_pago(destino["concepto"], cuenta_origen)
+    permitir_medio_cuenta = False
     if medio_pago is not None:
         if not campo_medio:
             raise ErrorReclasificacion("la creación manual no permite elegir método de pago")
-        valores[campo_medio.nombre] = _medio_pago_para_registrar_pago(
-            campo_medio, _validar_medio_pago(medio_pago))
+        medio = _validar_medio_pago(medio_pago)
+        if campo_medio.tipo == "lista":
+            # Importación local: ``cuentas`` ya depende de este módulo para
+            # las operaciones del panel y así evitamos un ciclo al importar.
+            from bot import cuentas
+            medio_cuenta = cuentas.resolver_medio_de_cuenta(cliente, medio)
+            if medio_cuenta:
+                valores[campo_medio.nombre] = medio_cuenta
+                permitir_medio_cuenta = True
+            else:
+                valores[campo_medio.nombre] = _medio_pago_para_registrar_pago(campo_medio, medio)
+        else:
+            valores[campo_medio.nombre] = medio
     # ``crear_movimiento`` conserva todas las validaciones, defaults de moneda,
     # escritura en Google Sheets, sincronización y reconstrucción existentes.
-    return crear_movimiento(token, valores, periodo=periodo)
+    return crear_movimiento(
+        token, valores, periodo=periodo, permitir_medio_cuenta=permitir_medio_cuenta,
+    )

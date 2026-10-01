@@ -545,6 +545,8 @@ def test_registrar_pago_usa_debito_cuenta_si_la_hoja_restringe_el_medio(monkeypa
         "linea_id": "gas_cuota", "categoria": "Vivienda", "concepto": "Cuota", "pagable": True,
     })
     monkeypatch.setattr(dashboard_edicion.edicion, "politica_para", lambda *_: politica)
+    from bot import cuentas
+    monkeypatch.setattr(cuentas, "resolver_medio_de_cuenta", lambda *_: None)
     monkeypatch.setattr(dashboard_edicion, "crear_movimiento", lambda _, valores, **kw: (
         recibido.update(valores) or {"ok": True}))
 
@@ -553,6 +555,33 @@ def test_registrar_pago_usa_debito_cuenta_si_la_hoja_restringe_el_medio(monkeypa
 
     assert recibido["medio_pago"] == "debito_cuenta"
     assert recibido["descripcion"] == "Pago - Cuota · CR - Salario Walmart"
+
+
+def test_registrar_pago_vincula_la_cuenta_elegida_aun_con_lista_de_medios(monkeypatch):
+    cliente = {"cliente_id": "cliente_a"}
+    recibido = {}
+    politica = _politica_creacion()
+    politica = replace(politica, campos={
+        **politica.campos,
+        "medio_pago": CampoEdicion("medio_pago", "Método de pago", tipo="lista", valores=("debito_cuenta",)),
+    })
+    monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: (
+        {"inicio": "2026-09-01", "fin": "2026-10-01"}, cliente))
+    monkeypatch.setattr(dashboard_edicion.catalogo, "construir_contexto", lambda _: object())
+    monkeypatch.setattr(dashboard_edicion, "_validar_linea", lambda *_: {
+        "linea_id": "gas_cuota", "categoria": "Vivienda", "concepto": "Cuota", "pagable": True,
+    })
+    monkeypatch.setattr(dashboard_edicion.edicion, "politica_para", lambda *_: politica)
+    from bot import cuentas
+    monkeypatch.setattr(cuentas, "resolver_medio_de_cuenta", lambda *_: "cuenta:bac_salario")
+    monkeypatch.setattr(dashboard_edicion, "crear_movimiento", lambda _, valores, **kw: (
+        recibido.update(valores=valores, **kw) or {"ok": True}))
+
+    dashboard_edicion.registrar_pago(
+        "token", "gas_cuota", "75000", "2026-09-30", "cuenta:bac_salario", "CR - Salario Walmart")
+
+    assert recibido["valores"]["medio_pago"] == "cuenta:bac_salario"
+    assert recibido["permitir_medio_cuenta"] is True
 
 
 def test_registrar_pago_rechaza_linea_no_pagable_y_fecha_fuera_del_mes(monkeypatch):
