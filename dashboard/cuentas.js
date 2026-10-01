@@ -1,10 +1,14 @@
 (() => {
   "use strict";
   const base = "/api/dashboard/cuentas";
-  const mesSolicitado = new URLSearchParams(window.location.search).get("mes") || "";
-  const urlSaldos = mesSolicitado
-    ? `${base}?inicio=${encodeURIComponent(`${mesSolicitado.slice(0, 7)}-01`)}`
-    : base;
+  const mesActual = () => {
+    const hoy = new Date();
+    return `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}`;
+  };
+  // Mantiene la vista de cuentas en el mismo período que el dashboard, incluso
+  // cuando se abre la ruta directamente sin el parámetro ?mes=YYYY-MM.
+  const mesSolicitado = new URLSearchParams(window.location.search).get("mes") || mesActual();
+  const urlSaldos = `${base}?inicio=${encodeURIComponent(`${mesSolicitado.slice(0, 7)}-01`)}`;
   const contenido = document.getElementById("cuentas-contenido");
   const acciones = document.getElementById("cuentas-acciones");
   const recurrencias = document.getElementById("cuentas-recurrencias");
