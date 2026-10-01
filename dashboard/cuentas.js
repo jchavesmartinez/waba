@@ -1,6 +1,10 @@
 (() => {
   "use strict";
   const base = "/api/dashboard/cuentas";
+  const mesSolicitado = new URLSearchParams(window.location.search).get("mes") || "";
+  const urlSaldos = mesSolicitado
+    ? `${base}?inicio=${encodeURIComponent(`${mesSolicitado.slice(0, 7)}-01`)}`
+    : base;
   const contenido = document.getElementById("cuentas-contenido");
   const acciones = document.getElementById("cuentas-acciones");
   const recurrencias = document.getElementById("cuentas-recurrencias");
@@ -342,7 +346,7 @@
   const cargar = async () => {
     const solicitud = ++ultimaCarga;
     try {
-      const resultado = await peticion(base);
+      const resultado = await peticion(urlSaldos);
       if (solicitud !== ultimaCarga) return true;
       confirmado = resultado;
       pendientes.forEach((pendiente, id) => {

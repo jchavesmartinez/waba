@@ -934,6 +934,111 @@
 
   const summary = findKpi("presupuesto_disponible") || data.kpis.find((k) => k.filas.length === 1 && k.columnas.some((c) => /presupuesto/i.test(c)));
   const summaryRow = summary?.filas?.[0] ? rowObject(summary, summary.filas[0]) : null;
+  const descargarReporte = async () => {
+    const boton = byId("descargar-reporte");
+    if (!boton || boton.disabled) return;
+    boton.disabled = true;
+    const textoOriginal = boton.textContent;
+    boton.textContent = "Preparando reporte…";
+    try {
+      const inicio = String(data.periodo?.inicio || "").slice(0, 10);
+      const respuesta = await fetch(
+        `${API_BASE}/cuentas?inicio=${encodeURIComponent(inicio)}`,
+        { headers: { Accept: "application/json" } },
+      );
+      const saldos = await respuesta.json();
+      if (!respuesta.ok || !saldos.ok) throw new Error(saldos.error || "No pude cargar los saldos del período.");
+
+      // Un CSV con BOM y punto y coma se abre directamente en Excel con la
+      // configuración regional de Costa Rica, sin alterar montos ni fechas.
+      const filas = [];
+      const fila = (valores) => filas.push(valores.map((valor) =>
+        `"${String(valor ?? "").replaceAll('"', '""')}"`).join(";"));
+      const separador = () => filas.push("");
+      const tabla = (titulo, columnas, registros) => {
+        fila([titulo]);
+        fila(columnas);
+        registros.forEach((registro) => fila(columnas.map((columna) => registro[columna])));
+        separador();
+      };
+      const valorKpi = (valor, columna, unidad = "") => format(valor, columna, unidad);
+
+      fila(["Reporte financiero detallado"]);
+      fila(["Cliente", data.cliente?.nombre || ""]);
+      fila(["Período", data.periodo?.etiqueta || inicio]);
+      fila(["Generado", new Date().toLocaleString("es-CR")]);
+      fila(["Saldos calculados al", saldos.fecha || ""]);
+      separador();
+
+      if (summaryRow) {
+        tabla("Resumen mensual", ["Concepto", "Valor"], Object.keys(summaryRow).map((clave) => ({
+          Concepto: clean(clave), Valor: valorKpi(summaryRow[clave], clave, summary?.unidad),
+        })));
+      }
+
+      tabla("Saldos por cuenta", ["Cuenta", "Tipo", "Moneda", "Saldo CRC", "Saldo USD", "Corte inicial"],
+        (saldos.cuentas || []).map((cuenta) => ({
+          Cuenta: cuenta.nombre, Tipo: cuenta.tipo, Moneda: cuenta.moneda,
+          "Saldo CRC": format(cuenta.saldo_crc, "saldo", "CRC"),
+          "Saldo USD": cuenta.tipo === "credito" ? format(cuenta.saldo_usd, "saldo", "USD") : "",
+          "Corte inicial": cuenta.fecha_corte,
+        })));
+
+      const movimientos = Array.isArray(data.movimientos) ? data.movimientos : [];
+      tabla("Gastos y movimientos del mes", ["Fecha", "Categoría", "Concepto", "Descripción", "Método de pago", "Monto", "Moneda", "Monto original", "Moneda original", "Estado"],
+        movimientos.map((movimiento) => ({
+          Fecha: String(movimiento.fecha || "").slice(0, 10),
+          "Categoría": movimiento.categoria || "Sin clasificar",
+          Concepto: movimiento.concepto || "Gastos sin identificar",
+          "Descripción": movimiento.descripcion || "Movimiento",
+          "Método de pago": movimiento.medio_pago || "Sin método de pago",
+          Monto: valorKpi(movimiento.monto, "monto", movimiento.moneda),
+          Moneda: movimiento.moneda || "CRC",
+          "Monto original": movimiento.monto_original ?? "",
+          "Moneda original": movimiento.moneda_original || "",
+          Estado: movimiento.pendiente_sincronizacion ? "Pendiente de sincronización" : "Verificado",
+        })));
+
+      (data.kpis || []).filter((kpi) => kpi !== summary).forEach((kpi) => {
+        const columnas = kpi.columnas || [];
+        tabla(kpi.nombre || clean(kpi.kpi || "Detalle presupuestario"), columnas,
+          (kpi.filas || []).map((valores) => Object.fromEntries(columnas.map((columna, indice) => [
+            columna, valorKpi(valores[indice], columna, kpi.unidad),
+          ]))));
+      });
+
+      const movimientosCuenta = (saldos.cuentas || []).flatMap((cuenta) =>
+        (cuenta.movimientos || []).map((movimiento) => ({
+          Cuenta: cuenta.nombre, Fecha: movimiento.fecha, Descripción: movimiento.descripcion,
+          Monto: format(movimiento.monto, "monto", movimiento.moneda),
+          Moneda: movimiento.moneda, Origen: movimiento.origen,
+        })));
+      tabla("Movimientos incluidos en los saldos", ["Cuenta", "Fecha", "Descripción", "Monto", "Moneda", "Origen"], movimientosCuenta);
+
+      if (saldos.advertencias?.length || saldos.sin_vincular?.length) {
+        tabla("Notas y movimientos sin vincular", ["Tipo", "Detalle"], [
+          ...(saldos.advertencias || []).map((detalle) => ({ Tipo: "Advertencia", Detalle: detalle })),
+          ...(saldos.sin_vincular || []).map((movimiento) => ({
+            Tipo: "Sin cuenta vinculada", Detalle: `${movimiento.fecha} · ${movimiento.descripcion} · ${movimiento.medio_pago}`,
+          })),
+        ]);
+      }
+
+      const blob = new Blob([`\ufeff${filas.join("\r\n")}`], { type: "text/csv;charset=utf-8" });
+      const enlace = document.createElement("a");
+      enlace.href = URL.createObjectURL(blob);
+      enlace.download = `reporte-financiero-${String(data.periodo?.inicio || "mes").slice(0, 7)}.csv`;
+      enlace.click();
+      window.setTimeout(() => URL.revokeObjectURL(enlace.href), 1000);
+      mostrarAviso("Reporte descargado.");
+    } catch (razon) {
+      mostrarAviso(razon.message || "No pude preparar el reporte.");
+    } finally {
+      boton.disabled = false;
+      boton.textContent = textoOriginal;
+    }
+  };
+  byId("descargar-reporte")?.addEventListener("click", descargarReporte);
   const summaryKeys = summaryRow ? Object.keys(summaryRow).filter((k) => !/pct|gasto.?neto/i.test(k)).slice(0, 4) : [];
   const cards = byId("resumen");
   summaryKeys.forEach((key) => {

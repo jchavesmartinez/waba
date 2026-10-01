@@ -518,7 +518,13 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
             "advertencias": advertencias, "sin_conversion": sin_conversion[-20:]}
 
 
-def obtener(cliente: dict) -> dict:
+def obtener(cliente: dict, hasta: date | None = None) -> dict:
+    """Devuelve los saldos a una fecha, sin proyectar datos posteriores.
+
+    El dashboard usa la fecha final del mes que el usuario está viendo. Para
+    el mes en curso o uno futuro, el corte se limita a hoy: un saldo futuro no
+    debe presentarse como si ya hubiera ocurrido.
+    """
     cuentas, reglas, operaciones = _leer_config(cliente)
     if not cuentas:
         return {"ok": True, "configurado": False, "cuentas": [], "reglas": []}
@@ -526,11 +532,18 @@ def obtener(cliente: dict) -> dict:
     # Los ingresos recién generados deben estar presentes en la misma respuesta.
     cuentas, reglas, operaciones = _leer_config(cliente)
     hoy = fecha_local()
+    hasta = min(hasta or hoy, hoy)
+    # Una cuenta cuyo corte inicial aún no existía en esa fecha no tiene un
+    # saldo histórico verificable para incluir en el reporte del período.
+    cuentas = [cuenta for cuenta in cuentas if _fecha(cuenta["fecha_corte"]) <= hasta]
+    if not cuentas:
+        return {"ok": True, "configurado": True, "cuentas": [], "reglas": [],
+                "fecha": hasta.isoformat()}
     corte = min(_fecha(c["fecha_corte"]) for c in cuentas)
-    movimientos = _aplicar_pendientes(cliente, _canonicos(cliente, corte, hoy))
-    proyeccion = proyectar_saldos(cuentas, movimientos, operaciones, hoy)
+    movimientos = _aplicar_pendientes(cliente, _canonicos(cliente, corte, hasta))
+    proyeccion = proyectar_saldos(cuentas, movimientos, operaciones, hasta)
     proyeccion.update({
-        "ok": True, "configurado": True, "fecha": hoy.isoformat(),
+        "ok": True, "configurado": True, "fecha": hasta.isoformat(),
         "reglas": [{
             "regla_id": r["regla_id"], "nombre": r["nombre"],
             "cuenta_id": r["cuenta_id"], "monto": str(r["monto"]),

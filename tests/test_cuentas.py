@@ -245,3 +245,17 @@ def test_endpoint_cuentas_requiere_sesion_y_devuelve_resultado(monkeypatch):
     assert respuesta.status_code == 200
     assert respuesta.json()["configurado"] is True
     assert respuesta.headers["cache-control"] == "no-store"
+
+
+def test_endpoint_cuentas_acepta_el_mes_del_dashboard(monkeypatch):
+    app = TestClient(app_mod.app)
+    recibido = {}
+    monkeypatch.setattr(app_mod, "_sesion_dashboard", lambda request: ({}, {"cliente_id": "a"}))
+    monkeypatch.setattr(cuentas, "obtener", lambda cliente, hasta: recibido.update(hasta=hasta) or {
+        "ok": True, "configurado": True, "cuentas": [], "reglas": [],
+    })
+
+    respuesta = app.get("/api/dashboard/cuentas?inicio=2026-09-01")
+
+    assert respuesta.status_code == 200
+    assert recibido["hasta"] == date(2026, 9, 30)

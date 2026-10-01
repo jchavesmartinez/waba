@@ -31,6 +31,7 @@ import hmac
 import logging
 import threading
 import time
+from datetime import date, timedelta
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from html import escape
@@ -467,10 +468,18 @@ def datos_dashboard(request: Request, tareas: BackgroundTasks, inicio: str = "")
 
 
 @app.get("/api/dashboard/cuentas")
-def cuentas_dashboard(request: Request):
+def cuentas_dashboard(request: Request, inicio: str = ""):
     try:
         _, cliente = _sesion_dashboard(request)
-        return JSONResponse(cuentas.obtener(cliente), headers={"Cache-Control": "no-store"})
+        # La vista de cuentas y el CSV usan el mismo mes que el dashboard.
+        # Mantener vacío el parámetro conserva la lectura actual para clientes
+        # que abran directamente este endpoint.
+        hasta = None
+        if inicio:
+            periodo = dashboard.periodo_desde_inicio(inicio)
+            hasta = date.fromisoformat(periodo["fin_exclusivo"]) - timedelta(days=1)
+        resultado = cuentas.obtener(cliente, hasta) if hasta else cuentas.obtener(cliente)
+        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
     except dashboard.EnlaceInvalido:
         return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
     except cuentas.ErrorCuentas as exc:
