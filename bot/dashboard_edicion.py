@@ -8,6 +8,7 @@ auditables en Google Sheets; la tabla canónica nunca se edita directamente.
 
 from __future__ import annotations
 
+import base64
 import logging
 import json
 import re
@@ -147,12 +148,31 @@ def _validar_linea(cliente: dict, ctx, linea_id: str,
             " AND (vigencia_hasta IS NULL OR vigencia_hasta >= CAST(:fecha_periodo AS DATE))"
         )
     pagable = "CAST(pagable AS text) AS pagable" if "pagable" in columnas else "'' AS pagable"
+    parametros = {"linea": linea_id, "fecha_periodo": str((periodo or {}).get("inicio") or "")}
+    filtro_linea = "CAST(linea_id AS text) = :linea"
+    # Los KPIs del dashboard no necesariamente incluyen el identificador de la
+    # línea. El selector codifica categoría y concepto, que el servidor vuelve
+    # a resolver contra el presupuesto vigente: nunca confía en un ID inventado
+    # por el navegador.
+    if linea_id.startswith("concepto."):
+        try:
+            codificado = linea_id.removeprefix("concepto.")
+            relleno = "=" * (-len(codificado) % 4)
+            categoria, concepto = json.loads(base64.urlsafe_b64decode(
+                (codificado + relleno).encode("ascii")
+            ).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            raise ErrorReclasificacion("seleccione un concepto presupuestario válido") from exc
+        if not all(isinstance(valor, str) and valor.strip() for valor in (categoria, concepto)):
+            raise ErrorReclasificacion("seleccione un concepto presupuestario válido")
+        filtro_linea = "CAST(categoria AS text) = :categoria AND CAST(concepto AS text) = :concepto"
+        parametros.update({"categoria": categoria, "concepto": concepto})
     filas = warehouse_ro.leer_interno(
         cliente,
         f"SELECT CAST(linea_id AS text) AS linea_id, CAST(categoria AS text) AS categoria, "
         f"CAST(concepto AS text) AS concepto, {pagable} FROM {_identificador(presupuesto.tabla_real)} "
-        "WHERE CAST(linea_id AS text) = :linea" + tipo + vigencia + " LIMIT 1",
-        {"linea": linea_id, "fecha_periodo": str((periodo or {}).get("inicio") or "")},
+        "WHERE " + filtro_linea + tipo + vigencia + " LIMIT 1",
+        parametros,
     )
     if not filas:
         raise ErrorReclasificacion("esa línea presupuestaria no es válida")

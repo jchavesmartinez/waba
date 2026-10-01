@@ -77,6 +77,12 @@
   const lines = Array.isArray(data.lineas_presupuesto) ? data.lineas_presupuesto : [];
   const linesById = new Map(lines.map((line) => [String(line.linea_id || ""), line]));
   const lineKey = (categoria, concepto) => `${normalized(categoria)}|${normalized(concepto)}`;
+  const selectorPorConcepto = (categoria, concepto) => {
+    const bytes = new TextEncoder().encode(JSON.stringify([categoria, concepto]));
+    let binario = "";
+    bytes.forEach((byte) => { binario += String.fromCharCode(byte); });
+    return `concepto.${btoa(binario).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "")}`;
+  };
   // Las filas del KPI de presupuesto no siempre incluyen linea_id. Conservar
   // el ID cuando venga, pero resolver la línea vigente por categoría/concepto
   // permite ofrecer el pago para cada rubro mostrado en el árbol mensual.
@@ -798,7 +804,12 @@
         const conceptLineKey = keyMatch(row, /^linea_id$|linea_presupuesto_id/i);
         const lineaId = conceptLineKey ? String(row[conceptLineKey] || "") : "";
         const linea = linesById.get(lineaId)
-          || linesByConcept.get(lineKey(bucket.name, row[conceptKey]));
+          || linesByConcept.get(lineKey(bucket.name, row[conceptKey]))
+          || {
+            linea_id: selectorPorConcepto(bucket.name, row[conceptKey]),
+            categoria: bucket.name,
+            concepto: row[conceptKey],
+          };
         const conceptDetails = document.createElement("details"); conceptDetails.className = "nivel nivel-concepto";
         const conceptSummary = document.createElement("summary");
         const conceptHeading = document.createElement("span"); conceptHeading.className = "nivel-titulo"; conceptHeading.textContent = row[conceptKey];
