@@ -162,6 +162,13 @@
     }
     const monto = control(form, tipo === "pago_tarjeta" ? "Monto aplicado a la tarjeta" : "Monto",
       campo("number", "monto"));
+    if (tipo === "ingreso") {
+      monto.removeAttribute("min");
+      monto.placeholder = "Ej. -5000 para un ajuste";
+      const nota = document.createElement("p"); nota.className = "editor-nota";
+      nota.textContent = "Usa un monto negativo para registrar un ajuste que reduzca el saldo de esta cuenta.";
+      form.append(nota);
+    }
     const debito = tipo === "pago_tarjeta" ? control(form, "Monto debitado de la cuenta (CRC)",
       campo("number", "debito")) : null;
     if (debito) {

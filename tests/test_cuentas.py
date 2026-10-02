@@ -258,6 +258,22 @@ def test_operaciones_rechazan_montos_no_positivos(valor):
         cuentas._decimal(valor, positivo=True)
 
 
+def test_ingreso_manual_acepta_ajuste_negativo_y_rechaza_cero():
+    assert cuentas._monto_destino_operacion("ingreso", "-1250.50") == Decimal("-1250.50")
+    with pytest.raises(cuentas.ErrorCuentas, match="no puede ser cero"):
+        cuentas._monto_destino_operacion("ingreso", "0")
+    with pytest.raises(cuentas.ErrorCuentas):
+        cuentas._monto_destino_operacion("transferencia", "-1250.50")
+
+
+def test_ajuste_negativo_reduce_el_saldo_de_la_cuenta_destino():
+    ajuste = _operacion("ajuste", "ingreso", "", "bac_salario", "0", "-1250.50")
+    resultado = _por_id(cuentas.proyectar_saldos(CUENTAS, [], [ajuste], date(2026, 9, 30)))
+    cuenta = resultado["bac_salario"]
+    assert cuenta["saldo_crc"] == "516504.45"
+    assert cuenta["movimientos"][0]["monto"] == "-1250.50"
+
+
 def test_endpoint_cuentas_requiere_sesion_y_devuelve_resultado(monkeypatch):
     app = TestClient(app_mod.app)
     sin_sesion = app.get("/api/dashboard/cuentas")

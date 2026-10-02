@@ -51,6 +51,20 @@ def _decimal(valor: object, *, positivo: bool = False) -> Decimal:
     return numero
 
 
+def _monto_destino_operacion(tipo: str, valor: object) -> Decimal:
+    """Valida el importe que llega a la cuenta en una operación manual.
+
+    Un ingreso manual negativo representa un ajuste contra el saldo bancario:
+    se guarda como ingreso para conservar un único flujo, pero reduce el saldo
+    de la cuenta destino. Las demás operaciones conservan la restricción de
+    importes estrictamente positivos para no invertir sus dos lados.
+    """
+    monto = _decimal(valor, positivo=tipo != "ingreso")
+    if tipo == "ingreso" and monto == 0:
+        raise ErrorCuentas("el monto del ajuste no puede ser cero")
+    return monto
+
+
 def _fecha(valor: object, *, permitir_futura: bool = False) -> date:
     try:
         resultado = date.fromisoformat(str(valor or "")[:10])
@@ -603,7 +617,7 @@ def registrar_operacion(cliente: dict, datos: dict) -> dict:
         raise ErrorCuentas("indique una descripción breve")
     origen_id = str(datos.get("cuenta_origen") or "").strip()
     destino_id = _id(datos.get("cuenta_destino"))
-    monto_destino = _decimal(datos.get("monto_destino"), positivo=True)
+    monto_destino = _monto_destino_operacion(tipo, datos.get("monto_destino"))
     moneda_destino = str(datos.get("moneda_destino") or "CRC").upper()
     if moneda_destino not in _MONEDAS:
         raise ErrorCuentas("la moneda no es válida")
