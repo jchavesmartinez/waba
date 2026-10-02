@@ -1,10 +1,12 @@
 import time
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
 
 import config
 from bot import catalogo, dashboard
+from bot import cuentas
 from bot import app as app_mod
 from bot.salida import Adjunto, Respuesta
 
@@ -424,6 +426,44 @@ def test_lineas_presupuesto_sin_pagable_sigue_siendo_compatible(monkeypatch):
         "linea_id": "gas", "categoria": "Otros", "concepto": "No pagable", "pagable": False,
     }]
     assert "FALSE AS pagable" in capturado["sql"]
+
+
+def test_transferencia_a_ahorro_suma_presupuesto_sin_repetir_movimiento(monkeypatch):
+    """Una transferencia asignada se muestra como gasto presupuestario una vez."""
+    snapshot = {
+        "lineas_presupuesto": [{
+            "linea_id": "gas_ahorro", "categoria": "Ahorros", "concepto": "Ahorro",
+        }],
+        "movimientos": [],
+        "kpis": [
+            {
+                "kpi": "gasto_por_concepto",
+                "columnas": ["linea_id", "categoria", "concepto", "presupuesto", "gastado", "disponible", "porcentaje"],
+                "filas": [["gas_ahorro", "Ahorros", "Ahorro", 515222.5, 0, 515222.5, 0]],
+            },
+            {
+                "kpi": "presupuesto_disponible",
+                "columnas": ["presupuesto", "gastado", "disponible"],
+                "filas": [[4768242.5, 0, 4768242.5]],
+            },
+        ],
+    }
+    monkeypatch.setattr(cuentas, "asignaciones_presupuesto", lambda *_: [{
+        "operacion_id": "op-1", "fecha": "2026-10-01", "descripcion": "Ahorro octubre",
+        "monto_origen": Decimal("515222.50"), "moneda_origen": "CRC",
+        "linea_presupuesto_id": "gas_ahorro",
+    }])
+    periodo = {"inicio": "2026-10-01", "fin_exclusivo": "2026-11-01"}
+
+    dashboard._aplicar_transferencias_presupuesto(snapshot, {"cliente_id": "cliente_a"}, periodo)
+    dashboard._aplicar_transferencias_presupuesto(snapshot, {"cliente_id": "cliente_a"}, periodo)
+
+    assert len(snapshot["movimientos"]) == 1
+    assert snapshot["movimientos"][0]["origen"] == "transferencia_presupuestada"
+    concepto = snapshot["kpis"][0]["filas"][0]
+    assert concepto[4:] == [515222.5, 0.0, 100.0]
+    general = snapshot["kpis"][1]["filas"][0]
+    assert general == [4768242.5, 515222.5, 4253020.0]
 
 
 def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):

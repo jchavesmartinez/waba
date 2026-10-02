@@ -149,11 +149,17 @@ def _asegurar(cx) -> None:
         moneda_origen TEXT NOT NULL DEFAULT 'CRC',
         monto_destino NUMERIC(20,6) NOT NULL,
         moneda_destino TEXT NOT NULL DEFAULT 'CRC',
+        linea_presupuesto_id TEXT NOT NULL DEFAULT '',
         regla_id TEXT NOT NULL DEFAULT '',
         anulado BOOLEAN NOT NULL DEFAULT FALSE,
         creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (cliente_id, operacion_id)
     )'''))
+    # Las transferencias pueden representar una asignación de ahorro. Se
+    # persiste aparte del movimiento bancario: el saldo se mueve una vez, y el
+    # dashboard usa esta referencia solo para ejecutar el presupuesto.
+    cx.execute(text(f"""ALTER TABLE "{_ESQUEMA}".operaciones_cuenta
+        ADD COLUMN IF NOT EXISTS linea_presupuesto_id TEXT NOT NULL DEFAULT ''"""))
     cx.execute(text(f'''CREATE TABLE IF NOT EXISTS "{_ESQUEMA}".reglas_ingreso (
         cliente_id TEXT NOT NULL,
         regla_id TEXT NOT NULL,
@@ -250,6 +256,48 @@ def _leer_config(cliente: dict) -> tuple[list[dict], list[dict], list[dict]]:
         return cuentas, reglas, operaciones
     finally:
         destino.cerrar()
+
+
+def asignaciones_presupuesto(cliente: dict, periodo: dict) -> list[dict]:
+    """Transferencias internas que deben contar contra el presupuesto.
+
+    El dinero no se vuelve a mover: esta lectura solo permite que el dashboard
+    refleje la asignación contra una partida (por ahora, Ahorros).
+    """
+    _inicializar(cliente)
+    inicio = _fecha(periodo.get("inicio"), permitir_futura=True)
+    fin = _fecha(periodo.get("fin_exclusivo"), permitir_futura=True)
+    cid = str(cliente["cliente_id"])
+    destino, motor = _motor(cliente)
+    try:
+        with motor.begin() as cx:
+            filas = cx.execute(text(f'''SELECT operacion_id, fecha, descripcion,
+                cuenta_origen, cuenta_destino, monto_origen, moneda_origen,
+                linea_presupuesto_id
+                FROM "{_ESQUEMA}".operaciones_cuenta
+                WHERE cliente_id = :cid AND tipo = 'transferencia'
+                  AND NOT anulado
+                  AND linea_presupuesto_id <> ''
+                  AND fecha >= :inicio AND fecha < :fin
+                ORDER BY fecha, creado_en, operacion_id'''), {
+                    "cid": cid, "inicio": inicio, "fin": fin,
+                }).mappings()
+            return [dict(fila) for fila in filas]
+    finally:
+        destino.cerrar()
+
+
+def _validar_asignacion_ahorro(cliente: dict, linea_id: str, fecha: date) -> dict:
+    """Comprueba que la línea elegida siga siendo un ahorro válido ese mes."""
+    ctx = catalogo.construir_contexto(cliente)
+    if ctx.error_lectura:
+        raise ErrorCuentas("no pude validar la partida presupuestaria")
+    periodo = dashboard.periodo_desde_inicio(fecha.isoformat())
+    linea = next((fila for fila in dashboard._lineas_presupuesto(cliente, ctx, periodo)
+                  if str(fila.get("linea_id") or "") == linea_id), None)
+    if not linea or str(linea.get("categoria") or "").strip().casefold() != "ahorros":
+        raise ErrorCuentas("seleccione una partida de Ahorros vigente para esa fecha")
+    return linea
 
 
 def _fechas_regla(regla: dict, hasta: date):
@@ -609,6 +657,11 @@ def registrar_operacion(cliente: dict, datos: dict) -> dict:
     tipo = str(datos.get("tipo") or "").strip()
     if tipo not in {"ingreso", "transferencia", "pago_tarjeta"}:
         raise ErrorCuentas("seleccione un tipo de operación válido")
+    linea_presupuesto_id = str(datos.get("linea_presupuesto_id") or "").strip()
+    if linea_presupuesto_id:
+        linea_presupuesto_id = _id(linea_presupuesto_id)
+        if tipo != "transferencia":
+            raise ErrorCuentas("solo una transferencia puede asignarse al presupuesto")
     operacion_id = str(datos.get("operacion_id") or uuid.uuid4())
     try:
         uuid.UUID(operacion_id)
@@ -629,6 +682,10 @@ def registrar_operacion(cliente: dict, datos: dict) -> dict:
     moneda_origen = str(datos.get("moneda_origen") or "CRC").upper()
     if moneda_origen not in _MONEDAS:
         raise ErrorCuentas("la moneda de origen no es válida")
+    linea = (
+        _validar_asignacion_ahorro(cliente, linea_presupuesto_id, fecha)
+        if linea_presupuesto_id else None
+    )
     destino, motor = _motor(cliente)
     try:
         with motor.begin() as cx:
@@ -662,21 +719,22 @@ def registrar_operacion(cliente: dict, datos: dict) -> dict:
             fila = cx.execute(text(f'''INSERT INTO "{_ESQUEMA}".operaciones_cuenta
                 (cliente_id, operacion_id, tipo, fecha, descripcion,
                  cuenta_origen, cuenta_destino, monto_origen, moneda_origen,
-                 monto_destino, moneda_destino)
+                 monto_destino, moneda_destino, linea_presupuesto_id)
                 VALUES (:cid, :oid, :tipo, :fecha, :descripcion,
                         :origen, :destino, :monto_origen, :moneda_origen,
-                        :monto_destino, :moneda_destino)
+                        :monto_destino, :moneda_destino, :linea)
                 ON CONFLICT (cliente_id, operacion_id) DO NOTHING
                 RETURNING operacion_id'''), {
                 "cid": cid, "oid": operacion_id, "tipo": tipo, "fecha": fecha,
                 "descripcion": descripcion, "origen": origen_id,
                 "destino": destino_id, "monto_origen": monto_origen,
                 "moneda_origen": moneda_origen, "monto_destino": monto_destino,
-                "moneda_destino": moneda_destino,
+                "moneda_destino": moneda_destino, "linea": linea_presupuesto_id,
             }).scalar_one_or_none()
             if fila is None:
                 existente = cx.execute(text(f'''SELECT tipo, fecha, descripcion, cuenta_origen,
-                    cuenta_destino, monto_origen, moneda_origen, monto_destino, moneda_destino, anulado
+                    cuenta_destino, monto_origen, moneda_origen, monto_destino, moneda_destino,
+                    linea_presupuesto_id, anulado
                     FROM "{_ESQUEMA}".operaciones_cuenta
                     WHERE cliente_id = :cid AND operacion_id = :oid'''),
                     {"cid": cid, "oid": operacion_id}).mappings().one()
@@ -688,11 +746,27 @@ def registrar_operacion(cliente: dict, datos: dict) -> dict:
                         or _decimal(existente["monto_destino"]) != monto_destino
                         or existente["moneda_origen"] != moneda_origen
                         or existente["moneda_destino"] != moneda_destino
+                        or existente["linea_presupuesto_id"] != linea_presupuesto_id
                         or existente["descripcion"] != descripcion):
                     raise ErrorCuentas("esta operación ya se usó con otros datos")
     finally:
         destino.cerrar()
-    return {"ok": True, "operacion_id": operacion_id}
+    if linea_presupuesto_id:
+        dashboard.invalidar_cache(cid)
+        try:
+            # Materializarlo ahora evita que la tarjeta de Ahorro quede
+            # momentáneamente con el valor anterior al volver al dashboard.
+            dashboard.refrescar_snapshot(
+                cliente, dashboard.periodo_desde_inicio(fecha.isoformat()),
+            )
+        except Exception:  # la transferencia sí quedó persistida; el GET reintentará
+            logger.exception("[%s] no se pudo refrescar el presupuesto tras una transferencia", cid)
+    return {
+        "ok": True, "operacion_id": operacion_id,
+        "linea_id": linea_presupuesto_id,
+        "categoria": linea.get("categoria") if linea else "",
+        "concepto": linea.get("concepto") if linea else "",
+    }
 
 
 def anular_operacion(cliente: dict, operacion_id: str) -> dict:

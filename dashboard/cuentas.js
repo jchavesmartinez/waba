@@ -18,6 +18,7 @@
 
   let estado = null;
   let confirmado = null;
+  let partidasAhorro = [];
   const pendientes = new Map();
   let ultimaCarga = 0;
   const dinero = (valor, moneda = "CRC") => new Intl.NumberFormat("es-CR", {
@@ -66,6 +67,19 @@
       select.append(option);
     });
     if (valor) select.value = valor;
+    return select;
+  };
+  const seleccionarPartidaAhorro = () => {
+    const select = document.createElement("select");
+    const sinAsignar = document.createElement("option");
+    sinAsignar.value = ""; sinAsignar.textContent = "No asignar al presupuesto";
+    select.append(sinAsignar);
+    partidasAhorro.forEach((linea) => {
+      const option = document.createElement("option");
+      option.value = linea.linea_id;
+      option.textContent = `${linea.categoria} · ${linea.concepto}`;
+      select.append(option);
+    });
     return select;
   };
   const control = (form, titulo, input) => {
@@ -117,9 +131,14 @@
     recomponer();
     aviso("Cambio aplicado. Guardando…");
     try {
-      await peticion(`${base}/operaciones`, "POST", datos);
+      const resultado = await peticion(`${base}/operaciones`, "POST", datos);
       pendientes.get(datos.operacion_id).guardado = true;
-      if (await cargar()) aviso("Operación guardada.");
+      if (await cargar()) {
+        if (resultado.linea_id) {
+          aviso("Transferencia y presupuesto guardados.");
+          window.dispatchEvent(new Event("fachavi:presupuesto-actualizado"));
+        } else aviso("Operación guardada.");
+      }
       else aviso("Operación guardada; el saldo se actualizará al reconectar.");
     } catch (reason) {
       pendientes.delete(datos.operacion_id); recomponer();
@@ -146,6 +165,14 @@
     if (tipo === "transferencia" && bancoPrincipal) {
       origen.value = bancoPrincipal.cuenta_id;
       destino.value = cuentasDinero().find((c) => c.cuenta_id !== origen.value)?.cuenta_id || "";
+    }
+    const asignacion = tipo === "transferencia" ? control(
+      form, "Asignar al presupuesto (opcional)", seleccionarPartidaAhorro(),
+    ) : null;
+    if (asignacion) {
+      const nota = document.createElement("p"); nota.className = "editor-nota";
+      nota.textContent = "La transferencia moverá el dinero una sola vez y marcará el avance de Ahorro sin volver a debitar la cuenta origen.";
+      form.append(nota);
     }
     const moneda = tipo === "pago_tarjeta" ? document.createElement("select") : null;
     if (moneda) {
@@ -193,6 +220,7 @@
           tipo === "pago_tarjeta" ? debito.value : monto.value,
         moneda_origen: "CRC", monto_destino: monto.value,
         moneda_destino: tipo === "pago_tarjeta" ? moneda.value : "CRC",
+        linea_presupuesto_id: asignacion?.value || "",
       };
       dialog.close(); void guardarOperacion(datos);
     });
@@ -360,6 +388,17 @@
       const resultado = await peticion(urlSaldos);
       if (solicitud !== ultimaCarga) return true;
       confirmado = resultado;
+      try {
+        const presupuesto = await peticion(`/api/dashboard/datos?inicio=${encodeURIComponent(`${mesSolicitado.slice(0, 7)}-01`)}`);
+        if (solicitud !== ultimaCarga) return true;
+        partidasAhorro = (presupuesto.dashboard?.lineas_presupuesto || []).filter(
+          (linea) => String(linea.categoria || "").trim().toLocaleLowerCase("es") === "ahorros",
+        );
+      } catch (_) {
+        // Las transferencias entre cuentas siguen disponibles aunque no se
+        // pueda cargar el selector presupuestario en ese instante.
+        partidasAhorro = [];
+      }
       pendientes.forEach((pendiente, id) => {
         if (pendiente.guardado) pendientes.delete(id);
       });

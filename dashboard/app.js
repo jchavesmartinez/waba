@@ -29,6 +29,13 @@
     loading.innerHTML = `<strong>${reason.message || "No pude cargar el dashboard."}</strong>`;
     return;
   }
+  // El módulo de cuentas emite este evento tras guardar una transferencia
+  // asignada a Ahorro. Recargamos el mismo mes una vez materializado el
+  // snapshot, para que el presupuesto y el detalle queden coherentes al
+  // instante sin tocar dos veces el saldo bancario.
+  window.addEventListener("fachavi:presupuesto-actualizado", () => {
+    window.setTimeout(() => window.location.reload(), 250);
+  });
   const clean = (s) => String(s ?? "").replaceAll("_", " ");
   const isMoney = (name, unit) => /monto|gasto|presupuesto|disponible|exceso|venta|ingreso|saldo|total/i.test(name) || /colon|crc|usd|moneda/i.test(unit);
   const number = (value) => typeof value === "number" ? value : Number(value);

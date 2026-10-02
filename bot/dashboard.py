@@ -591,6 +591,7 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
         "lineas_presupuesto": _lineas_presupuesto(cliente, ctx, periodo) if not ctx.error_lectura else [],
         "creacion_manual": _formulario_creacion_manual(ctx) if not ctx.error_lectura else None,
     }
+    _aplicar_transferencias_presupuesto(snapshot, cliente, periodo)
     with _CACHE_LOCK:
         _CACHE[clave] = (ahora, snapshot)
         if len(_CACHE) > 100:
@@ -598,6 +599,58 @@ def generar_snapshot(cliente: dict, periodo: dict) -> dict:
             _CACHE.pop(mas_antigua, None)
     _guardar_snapshot_persistente(cliente, periodo, snapshot)
     return snapshot
+
+
+def _aplicar_transferencias_presupuesto(snapshot: dict, cliente: dict, periodo: dict) -> None:
+    """Incluye asignaciones de ahorro sin duplicar el movimiento entre cuentas.
+
+    ``operaciones_cuenta`` ya mueve el saldo desde la cuenta origen a la cuenta
+    destino. La asignación presupuestaria se agrega solo al read model del
+    dashboard, por lo que un ahorro cuenta una vez en el presupuesto y una vez
+    en cada saldo de cuenta, que son dos vistas de la misma transferencia.
+    """
+    # Importación diferida: ``cuentas`` depende de este módulo para validar las
+    # partidas al guardar una transferencia.
+    from bot import cuentas
+
+    lineas = {
+        str(linea.get("linea_id") or ""): linea
+        for linea in snapshot.get("lineas_presupuesto", [])
+    }
+    movimientos = snapshot.setdefault("movimientos", [])
+    existentes = {str(fila.get("movimiento_clave") or "") for fila in movimientos}
+    try:
+        asignaciones = cuentas.asignaciones_presupuesto(cliente, periodo)
+    except Exception as exc:  # un saldo no disponible no debe ocultar los KPI
+        logger.warning("no se pudieron leer transferencias presupuestadas: %s", exc)
+        return
+    for asignacion in asignaciones:
+        linea_id = str(asignacion.get("linea_presupuesto_id") or "")
+        linea = lineas.get(linea_id)
+        if not linea:
+            logger.warning("transferencia con partida no vigente: %s", linea_id)
+            continue
+        clave = f"transferencia:{asignacion['operacion_id']}"
+        if clave in existentes:
+            continue
+        monto = _decimal_snapshot(asignacion.get("monto_origen"))
+        if monto is None or monto <= 0:
+            continue
+        movimiento = {
+            "movimiento_clave": clave,
+            "linea_id": linea_id,
+            "categoria": linea.get("categoria") or "Ahorros",
+            "concepto": linea.get("concepto") or "Ahorro",
+            "fecha": _serializable(asignacion.get("fecha")),
+            "descripcion": asignacion.get("descripcion") or "Transferencia a ahorro",
+            "monto": float(monto),
+            "moneda": str(asignacion.get("moneda_origen") or "CRC").upper(),
+            "medio_pago": "Transferencia interna",
+            "origen": "transferencia_presupuestada",
+        }
+        movimientos.append(movimiento)
+        _ajustar_kpis_movimiento(snapshot, movimiento, 1)
+        existentes.add(clave)
 
 
 def _formulario_creacion_manual(ctx) -> dict | None:
