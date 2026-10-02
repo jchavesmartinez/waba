@@ -118,6 +118,7 @@ def test_canonicos_usa_columnas_fisicas_no_catalogo_publico(monkeypatch):
 
     assert cuentas._canonicos(cliente, date(2026, 9, 29), date(2026, 9, 30)) == []
     assert "monto_original, moneda_original" in consultas[0][0]
+    assert "ORDER BY fecha" not in consultas[0][0]
     assert consultas[0][1]["corte"] == date(2026, 9, 29)
 
 

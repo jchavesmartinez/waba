@@ -329,12 +329,15 @@ def _canonicos(cliente: dict, corte: date, hasta: date) -> list[dict]:
                        else "moneda AS moneda_original" if "moneda" in columnas
                        else "'CRC' AS moneda_original")
     moneda_estimada = "TRUE" if "moneda_original" not in columnas else "FALSE"
+    # El orden SQL no aporta nada al cálculo: proyectar_saldos ordena los
+    # movimientos de cada cuenta al final. Evitarlo aquí permite que Postgres
+    # devuelva inmediatamente el rango desde el corte sin ordenar toda la
+    # tabla canónica, que puede agotar el statement_timeout del dashboard.
     return warehouse_ro.leer_interno(cliente, f'''SELECT _clave, fecha, {descripcion},
         medio_pago, monto_neto, {monto_original}, {moneda_original}, {tipo},
         {moneda_estimada} AS moneda_estimada
         FROM {_identificador(tabla.tabla_real)}
-        WHERE fecha >= :corte AND fecha < (:hasta + INTERVAL '1 day')
-        ORDER BY fecha, _clave''',
+        WHERE fecha >= :corte AND fecha < (:hasta + INTERVAL '1 day')''',
         {"corte": corte, "hasta": hasta})
 
 
