@@ -460,8 +460,8 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
         )
         # No filtramos por etiquetas de tipo: entre conectores la misma compra
         # puede llamarse COMPRA, GASTO o CARGO. La canónica normaliza el signo
-        # en monto_neto y la línea presupuestaria ya limita este árbol a líneas
-        # de gasto. Filtrar aquí dejó invisibles los movimientos BAC.
+        # en monto_neto. Conservar también líneas nulas permite revisar los
+        # cargos que aún no tienen clasificación.
         partes.append(
             "SELECT CAST(m.linea_presupuesto_id AS text) AS linea_id, "
             "m.fecha AS fecha, m.descripcion AS descripcion, "
@@ -469,7 +469,7 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
             f"m.{_identificador(monto_canonico)} AS monto, {medio_pago} AS medio_pago, "
             f"{monto_original} AS monto_original, {moneda_original} AS moneda_original, {extras_sql} "
             f"FROM {tabla} m WHERE m.fecha >= DATE '{inicio}' "
-            f"AND m.fecha < DATE '{fin}' AND m.linea_presupuesto_id IS NOT NULL"
+            f"AND m.fecha < DATE '{fin}'"
         )
 
     # Clientes en transición todavía pueden no tener el modelo canónico. En
@@ -537,8 +537,7 @@ def _movimientos_jerarquia(cliente: dict, ctx, periodo: dict) -> list[dict]:
         f"FROM movimientos m LEFT JOIN {ptabla} p "
         "ON TRIM(CAST(p.linea_id AS text)) = TRIM(m.linea_id) "
         + _filtro_vigencia_presupuesto("m.fecha", pcols)
-        + "WHERE m.linea_id IS NOT NULL "
-        "ORDER BY p.categoria, p.concepto, m.fecha"
+        + "ORDER BY p.categoria, p.concepto, m.fecha"
     )
     tablas_validas = set(ctx.tablas_reales)
     if canonicos:

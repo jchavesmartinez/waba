@@ -606,3 +606,52 @@ def test_jerarquia_no_oculta_movimientos_sin_linea_de_presupuesto(monkeypatch):
     )
     assert filas[0]["categoria"] == "Sin clasificar"
     assert filas[0]["concepto"] == "Gastos sin identificar"
+
+
+def test_detalle_conserva_cargos_iguales_y_cargos_con_linea_nula(monkeypatch):
+    """Ejecuta la consulta: no puede ocultar cargos nulos ni unir pagos iguales."""
+    import duckdb
+
+    presupuesto = catalogo.TablaPermitida(
+        tabla_logica="presupuesto", tabla_real="presupuesto", fuente_id="sheet",
+        columnas_config={"linea_id": {}, "categoria": {}, "concepto": {}},
+    )
+    canonicos = catalogo.TablaPermitida(
+        tabla_logica="movimientos", tabla_real="movimientos", fuente_id="modelo",
+        columnas_config={
+            "_clave": {}, "linea_presupuesto_id": {}, "fecha": {},
+            "descripcion": {}, "moneda": {}, "monto_neto": {},
+        },
+    )
+    ctx = catalogo.Contexto(
+        schema_text="", tablas_reales={"presupuesto", "movimientos"},
+        permitidas=[presupuesto, canonicos],
+    )
+    with duckdb.connect() as cx:
+        cx.execute("CREATE TABLE presupuesto (linea_id TEXT, categoria TEXT, concepto TEXT)")
+        cx.execute("INSERT INTO presupuesto VALUES ('gas_celular_aline', 'Servicios', 'Celular Aline')")
+        cx.execute("""CREATE TABLE movimientos (
+            _clave TEXT, linea_presupuesto_id TEXT, fecha TIMESTAMP,
+            descripcion TEXT, moneda TEXT, monto_neto DECIMAL(12,2))""")
+        cx.execute("""INSERT INTO movimientos VALUES
+            ('bac:1', 'gas_celular_aline', '2026-10-01 23:30:00', 'Telefonia ICE', 'CRC', 10560.03),
+            ('bac:2', NULL, '2026-10-01 23:36:00', 'Telefonia ICE', 'CRC', 10560.03),
+            ('bac:3', '', '2026-10-02 09:00:00', 'Comercio nuevo', 'CRC', 2000),
+            ('bac:4', NULL, '2026-09-30 23:59:00', 'Mes anterior', 'CRC', 500)""")
+
+        def ejecutar(_cliente, sql, limite):
+            resultado = cx.execute(sql)
+            return [columna[0] for columna in resultado.description], resultado.fetchall()
+
+        monkeypatch.setattr(dashboard.nl2sql, "validar_sql", lambda *_: (True, ""))
+        monkeypatch.setattr(dashboard.warehouse_ro, "ejecutar", ejecutar)
+        filas = dashboard._movimientos_jerarquia(
+            {"cliente_id": "cliente_a"}, ctx,
+            {"inicio": "2026-10-01", "fin_exclusivo": "2026-11-01"},
+        )
+    por_clave = {fila["movimiento_clave"]: fila for fila in filas}
+    assert set(por_clave) == {"bac:1", "bac:2", "bac:3"}
+    assert por_clave["bac:1"]["concepto"] == "Celular Aline"
+    assert por_clave["bac:2"]["categoria"] == "Sin clasificar"
+    assert por_clave["bac:3"]["categoria"] == "Sin clasificar"
+    assert por_clave["bac:1"]["monto"] == por_clave["bac:2"]["monto"] == 10560.03

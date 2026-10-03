@@ -82,6 +82,32 @@ h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spac
 .panel { padding: 24px; margin-bottom: 18px; }
 .panel h2 { margin: 0 0 5px; font-size: 1.1rem; }
 .panel .descripcion { color: var(--muted); margin: 0 0 18px; font-size: .9rem; }
+.gastos-dia[hidden] { display: none; }
+.gastos-dia > summary { display: flex; align-items: center; gap: 12px; cursor: pointer; list-style: none; }
+.gastos-dia > summary::-webkit-details-marker { display: none; }
+.gastos-dia > summary::before { content: "＋"; color: var(--green); font-size: 1.2rem; font-weight: 800; }
+.gastos-dia[open] > summary::before { content: "−"; }
+.gastos-dia > summary:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 4px; border-radius: 5px; }
+.gastos-dia-titulo { font-size: 1.1rem; font-weight: 800; }
+.gastos-dia-resumen { margin-left: auto; color: var(--muted); font-size: .82rem; text-align: right; }
+.gastos-dia-controles { display: flex; align-items: center; gap: 18px; margin-top: 18px; }
+.gastos-dia-controles label { display: grid; gap: 5px; color: var(--ink); font-size: .84rem; font-weight: 750; }
+.gastos-dia-controles input { min-width: 0; max-width: 100%; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); font: inherit; }
+.gastos-dia-controles input:focus-visible { outline: 3px solid #8bcf6a; outline-offset: 2px; }
+.gastos-dia-controles p, .gastos-dia-vacio { color: var(--muted); font-size: .85rem; }
+.gastos-dia-lista li { align-items: center; }
+.gastos-dia-lista li > span { flex: 1; }
+.gastos-dia-lista .editar-movimiento { flex-shrink: 0; min-width: 44px; height: 44px; }
+.gastos-dia-clasificacion { color: var(--green); font-size: .8rem; overflow-wrap: anywhere; }
+.gastos-dia-sin-clasificar { color: #a44416; font-weight: 800; }
+@media (max-width: 600px) {
+  .gastos-dia > summary { flex-wrap: wrap; gap: 8px; }
+  .gastos-dia-resumen { flex-basis: 100%; margin-left: 26px; text-align: left; }
+  .gastos-dia-controles { display: grid; gap: 4px; }
+  .gastos-dia-lista li { flex-wrap: wrap; gap: 7px; }
+  .gastos-dia-lista li > span { flex-basis: 100%; }
+  .gastos-dia-lista li > strong { margin-right: auto; }
+}
 .presupuesto { display: grid; grid-template-columns: 210px 1fr; align-items: center; gap: 30px; }
 .donut { width: 180px; aspect-ratio: 1; border-radius: 50%; display: grid; place-items: center; position: relative; }
 .donut::after { content: ""; position: absolute; inset: 25px; border-radius: 50%; background: white; }

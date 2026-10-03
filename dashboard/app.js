@@ -1182,7 +1182,91 @@
     if (!data.kpis.length) target.innerHTML = '<article class="panel vacio">No hay KPIs habilitados para mostrar.</article>';
   };
   const selectorVista = byId("agrupar-gastos");
+  const panelDia = byId("gastos-dia");
+  const fechaDia = byId("gastos-dia-fecha");
+  const clavePanelDia = `dashboard:gastos-dia:${data.cliente?.id || "actual"}`;
+  if (panelDia && fechaDia) {
+    const inicio = String(data.periodo?.inicio || "").slice(0, 10);
+    const fin = String(data.periodo?.fin_exclusivo || "").slice(0, 10);
+    const ultimoDia = new Date(`${fin}T12:00:00Z`);
+    ultimoDia.setUTCDate(ultimoDia.getUTCDate() - 1);
+    fechaDia.min = inicio;
+    fechaDia.max = ultimoDia.toISOString().slice(0, 10);
+    const hoy = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Costa_Rica", year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(new Date());
+    const parte = (nombre) => hoy.find((item) => item.type === nombre)?.value;
+    const fechaHoy = `${parte("year")}-${parte("month")}-${parte("day")}`;
+    const fechas = (data.movimientos || []).map((movimiento) => String(movimiento.fecha || "").slice(0, 10))
+      .filter((fecha) => fecha >= inicio && fecha < fin).sort();
+    fechaDia.value = fechaHoy >= inicio && fechaHoy < fin ? fechaHoy : fechas.at(-1) || inicio;
+    try { panelDia.open = localStorage.getItem(clavePanelDia) !== "cerrado"; } catch (_) { /* almacenamiento no disponible */ }
+    panelDia.addEventListener("toggle", () => {
+      try { localStorage.setItem(clavePanelDia, panelDia.open ? "abierto" : "cerrado"); } catch (_) { /* almacenamiento no disponible */ }
+    });
+  }
+  const renderGastosDia = () => {
+    if (!panelDia || !fechaDia) return;
+    panelDia.hidden = false;
+    const contenido = byId("gastos-dia-contenido");
+    contenido.replaceChildren();
+    if (!fechaDia.value || !fechaDia.checkValidity()) {
+      byId("gastos-dia-resumen").textContent = "Selecciona una fecha del mes";
+      return;
+    }
+    // Conservar la fecha contable tal como la entrega el servidor, sin
+    // reinterpretar como UTC los timestamps locales del banco.
+    const movimientos = (data.movimientos || []).filter(
+      (movimiento) => String(movimiento.fecha || "").slice(0, 10) === fechaDia.value,
+    ).slice().sort((a, b) => String(b.fecha || "").localeCompare(String(a.fecha || "")));
+    const totales = new Map();
+    let sinClasificar = 0;
+    const lista = document.createElement("ul"); lista.className = "movimientos gastos-dia-lista";
+    movimientos.forEach((movimiento) => {
+      const lineaId = String(movimiento.linea_id || movimiento.linea_presupuesto_id || "").trim();
+      const linea = linesById.get(lineaId);
+      const pendiente = !lineaId || normalized(movimiento.categoria) === "sin clasificar"
+        || normalized(movimiento.concepto) === "gastos sin identificar" || (lines.length > 0 && !linea);
+      if (pendiente) sinClasificar += 1;
+      const moneda = movimiento.moneda || "CRC";
+      const monto = number(movimiento.monto);
+      if (Number.isFinite(monto)) totales.set(moneda, (totales.get(moneda) || 0) + monto);
+      const item = document.createElement("li");
+      const detalle = document.createElement("span");
+      const nombre = document.createElement("strong"); nombre.textContent = movimiento.descripcion || "Movimiento";
+      const clasificacion = document.createElement("span"); clasificacion.className = "gastos-dia-clasificacion";
+      clasificacion.textContent = pendiente ? "Sin clasificar" : `${linea?.categoria || movimiento.categoria} · ${linea?.concepto || movimiento.concepto}`;
+      if (pendiente) clasificacion.classList.add("gastos-dia-sin-clasificar");
+      detalle.append(nombre, clasificacion);
+      const metodo = document.createElement("small"); metodo.textContent = movimiento.medio_pago || "Sin método de pago";
+      detalle.append(metodo);
+      if (movimiento.pendiente_sincronizacion) {
+        const estado = document.createElement("small"); estado.textContent = "Pendiente de sincronizar"; detalle.append(estado);
+      }
+      const valor = document.createElement("strong"); valor.textContent = format(movimiento.monto, "monto", moneda);
+      item.append(detalle, valor);
+      if (movimiento.movimiento_clave && !movimiento.pendiente_sincronizacion && lines.length
+          && movimiento.origen !== "transferencia_presupuestada") {
+        const editar = document.createElement("button"); editar.type = "button"; editar.className = "editar-movimiento";
+        editar.textContent = "✎"; editar.title = "Editar clasificación";
+        editar.setAttribute("aria-label", `Editar clasificación de ${nombre.textContent}`);
+        editar.addEventListener("click", () => abrirEditor(movimiento)); item.append(editar);
+      }
+      lista.append(item);
+    });
+    const resumen = [fechaDia.value, `${movimientos.length} ${movimientos.length === 1 ? "movimiento" : "movimientos"}`];
+    totales.forEach((monto, moneda) => resumen.push(format(monto, "monto", moneda)));
+    if (sinClasificar) resumen.push(`${sinClasificar} sin clasificar`);
+    byId("gastos-dia-resumen").textContent = resumen.join(" · ");
+    if (movimientos.length) contenido.append(lista);
+    else {
+      const vacio = document.createElement("p"); vacio.className = "gastos-dia-vacio";
+      vacio.textContent = "No hay gastos registrados para este día."; contenido.append(vacio);
+    }
+  };
+  fechaDia?.addEventListener("change", renderGastosDia);
   const renderVista = () => {
+    renderGastosDia();
     target.replaceChildren();
     if (selectorVista?.value === "medio_pago") {
       if (!renderPaymentHierarchy(target)) {

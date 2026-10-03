@@ -38,6 +38,17 @@
       <span class="cargando-pulso"></span>
       <div><strong>Cargando sus finanzas…</strong><small>La página ya está lista; estamos trayendo los datos.</small></div>
     </section>
+    <details id="gastos-dia" class="panel gastos-dia" open hidden>
+      <summary>
+        <span class="gastos-dia-titulo">Gastos del día</span>
+        <span id="gastos-dia-resumen" class="gastos-dia-resumen"></span>
+      </summary>
+      <div class="gastos-dia-controles">
+        <label for="gastos-dia-fecha">Fecha <input id="gastos-dia-fecha" type="date" required></label>
+        <p>Revisa en qué categoría y partida quedó cada gasto. Usa ✎ para corregirlo.</p>
+      </div>
+      <div id="gastos-dia-contenido" aria-live="polite"></div>
+    </details>
     <section id="resumen" class="cards" aria-label="Resumen"></section>
     <section id="cuentas" class="panel cuentas-panel" aria-labelledby="cuentas-titulo">
       <div class="cuentas-cabecera">
