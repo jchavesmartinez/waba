@@ -719,6 +719,14 @@ def procesar_reconstrucciones(cliente: dict, maximo: int = 20,
     sincronizar las fuentes y reconstruir la canónica.
     """
     cliente_id = str(cliente.get("cliente_id", ""))
+    # Recuperar cambios de presupuesto confirmados que sobrevivieron un
+    # reinicio entre la escritura en Sheets y el alta en la cola existente.
+    # La importación local evita acoplar los adaptadores durante su carga.
+    try:
+        from bot import presupuesto
+        presupuesto.recuperar_guardados(cliente)
+    except Exception:
+        logger.debug("No se pudo recuperar presupuesto pendiente", exc_info=True)
     with _LOCKS_PROCESAMIENTO_GUARDIA:
         candado = _LOCKS_PROCESAMIENTO.setdefault(cliente_id, threading.Lock())
     # La segunda edición queda en Neon como pendiente. No iniciamos otra

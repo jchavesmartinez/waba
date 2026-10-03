@@ -45,7 +45,7 @@ from starlette.concurrency import run_in_threadpool
 import config
 import registry
 from bot import (audio, correo, cuentas, dashboard, dashboard_edicion, entregas, memoria,
-                 menu, reporte_dashboard, whatsapp)
+                 menu, presupuesto, reporte_dashboard, whatsapp)
 from bot.responder import responder
 from bot.salida import Respuesta
 
@@ -616,6 +616,55 @@ async def responder_chat_app(request: Request):
     except Exception:  # noqa: BLE001
         logger.exception("No se pudo responder desde la app del dashboard")
         return JSONResponse({"ok": False, "error": "No pude procesar la consulta."}, status_code=503)
+
+
+@app.get("/api/dashboard/presupuesto")
+def consultar_presupuesto_app(request: Request, inicio: str):
+    try:
+        _, cliente = _sesion_dashboard(request)
+        return JSONResponse(presupuesto.consultar(cliente, inicio), headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except presupuesto.ErrorPresupuesto as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:
+        logger.exception("No se pudo cargar el editor de presupuesto")
+        return JSONResponse({"ok": False, "error": "No pude leer el presupuesto de Google Sheets."}, status_code=503)
+
+
+@app.post("/api/dashboard/presupuesto")
+async def guardar_presupuesto_app(request: Request, tareas: BackgroundTasks):
+    try:
+        _, cliente = _sesion_dashboard(request)
+        datos = await request.json()
+        resultado = await run_in_threadpool(presupuesto.guardar, cliente, datos)
+        tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(cliente["cliente_id"]))
+        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except presupuesto.ErrorPresupuesto as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:
+        logger.exception("No se pudo confirmar la edición del presupuesto")
+        return JSONResponse({"ok": False, "error": "No pude confirmar el guardado. Recargue y revise el presupuesto antes de repetirlo."}, status_code=503)
+
+
+@app.get("/api/dashboard/presupuesto/{operacion_id}/estado")
+def estado_presupuesto_app(operacion_id: str, request: Request):
+    try:
+        token, _, cliente, _ = _token_dashboard_request(request)
+        estado = presupuesto.estado_guardado(cliente, operacion_id)
+        if estado != "encolado":
+            return JSONResponse({"ok": True, "estado": "pendiente"}, headers={"Cache-Control": "no-store"})
+        return JSONResponse(dashboard_edicion.estado_reconstruccion(token, "presupuesto." + operacion_id),
+                            headers={"Cache-Control": "no-store"})
+    except dashboard.EnlaceInvalido:
+        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
+    except (presupuesto.ErrorPresupuesto, dashboard_edicion.ErrorReclasificacion) as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception:
+        logger.exception("No se pudo verificar el presupuesto")
+        return JSONResponse({"ok": False, "error": "No pude verificar la sincronización."}, status_code=503)
 
 
 @app.post("/api/dashboard/movimientos/reclasificar")

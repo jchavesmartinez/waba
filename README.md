@@ -415,6 +415,35 @@ para la lista completa de variables.
 El bot revisa las tres al arrancar y deja advertencias de nivel alto en el log;
 también se ven en `GET /salud`.
 
+## Administrar el presupuesto desde el dashboard
+
+El botón **Administrar presupuesto** abre un editor de ingresos y gastos del
+plan en la pestaña `presupuesto` de la fuente Google Sheets del cliente. Permite
+editar montos y crear categorías con su primera subpartida (o añadir subpartidas
+a una categoría existente), incluyendo montos cero. No mueve dinero ni modifica
+pagos, cuentas, reglas de clasificación o identificadores de partidas existentes.
+
+- Elegir el mes actual o uno futuro, preparar cambios y revisar su impacto antes
+  de **Confirmar y guardar**. No se permite cambiar meses pasados.
+- Si la partida comenzó antes, se cierra su versión el último día del mes
+  anterior y se añade una nueva con el mismo `linea_id`. Se conserva su fecha
+  final y cualquier versión futura programada; las partidas nuevas no tienen
+  fecha final. El quincenal de montos nuevos/modificados es mensual dividido por
+  dos, redondeado a céntimos; las demás cifras quedan intactas.
+- Se lee una revisión de la hoja para rechazar borradores obsoletos. La escritura
+  usa un solo `spreadsheets.batchUpdate` atómico, con cambios de celdas precisos,
+  sin reescribir hojas completas. Las partidas con fórmulas no se versionan desde
+  este editor; deben revisarse directamente en Sheets.
+- `_bot.presupuesto_ediciones` registra la confirmación y la fila anterior.
+  Su identificador de operación evita duplicados por reintentos. La misma cola y
+  worker del dashboard sincronizan la fuente y reconstruyen los modelos. Una
+  sincronización fallida se reintenta sin volver a crear la partida.
+
+Requiere la fuente activa Google Sheets, el presupuesto habilitado en el
+catálogo y el service account existente con permiso de edición. No añade
+servicios ni variables de entorno. Los destinos no pueden enviarse desde el
+navegador; se resuelven exclusivamente desde el cliente autenticado.
+
 ## Pruebas
 
 ```bash

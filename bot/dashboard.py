@@ -1060,6 +1060,7 @@ def renderizar(token: str) -> str:
     huella_assets = hashlib.sha256(
         _PLANTILLA.read_bytes() + (ASSETS_DIR / "app.js").read_bytes()
         + (ASSETS_DIR / "cuentas.js").read_bytes()
+        + (ASSETS_DIR / "presupuesto.js").read_bytes()
         + (ASSETS_DIR / "styles.css").read_bytes()
     ).hexdigest()[:16]
     return (plantilla.replace("__DASHBOARD_DATA__", datos)
@@ -1072,6 +1073,7 @@ def renderizar_aplicacion() -> str:
     huella_assets = hashlib.sha256(
         _PLANTILLA.read_bytes() + (ASSETS_DIR / "app.js").read_bytes()
         + (ASSETS_DIR / "cuentas.js").read_bytes()
+        + (ASSETS_DIR / "presupuesto.js").read_bytes()
         + (ASSETS_DIR / "styles.css").read_bytes()
     ).hexdigest()[:16]
     return (plantilla.replace("__DASHBOARD_DATA__", "{}")
