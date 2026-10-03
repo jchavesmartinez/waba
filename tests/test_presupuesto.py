@@ -277,3 +277,34 @@ def test_api_exige_sesion_y_aisla_cliente(monkeypatch):
     monkeypatch.setattr(app_mod.dashboard_edicion, "procesar_reconstrucciones_cliente", lambda _: 0)
     assert web.post("/api/dashboard/presupuesto", json={"cliente_id": "cliente_b"}).status_code == 200
     assert recibido == [CLIENTE]
+
+
+def test_bloqueo_compatible_con_pooler_sobrevive_commit_auditoria(monkeypatch):
+    eventos = []
+    class Conexion:
+        def __init__(self, nombre):
+            self.nombre = nombre
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            eventos.append((self.nombre, "cerrar"))
+        def execute(self, sql, params=None):
+            eventos.append((self.nombre, str(sql)))
+            return SimpleNamespace(scalar=lambda: True)
+        def commit(self):
+            eventos.append((self.nombre, "commit"))
+        def rollback(self):
+            eventos.append((self.nombre, "rollback"))
+    guardia, auditoria = Conexion("guardia"), Conexion("auditoria")
+    conexiones = iter([guardia, auditoria])
+    motor = SimpleNamespace(connect=lambda: next(conexiones))
+    destino = SimpleNamespace(cerrar=lambda: eventos.append(("destino", "cerrar")))
+    monkeypatch.setattr(p.dashboard_edicion, "_motor_jobs", lambda _: (destino, motor))
+    monkeypatch.setattr(p, "_asegurar", lambda _: None)
+    with p._bloqueo(CLIENTE) as cx:
+        cx.commit()
+        assert not any(e == ("guardia", "rollback") for e in eventos)
+        assert any("pg_try_advisory_xact_lock" in e[1] for e in eventos)
+        assert not any("pg_advisory_unlock" in e[1] for e in eventos)
+    assert ("guardia", "rollback") in eventos
+    assert eventos[-1] == ("destino", "cerrar")

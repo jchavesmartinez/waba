@@ -188,18 +188,20 @@ def _bloqueo(cliente):
     llave = int.from_bytes(hashlib.sha256(
         ("presupuesto:" + str(cliente["cliente_id"])).encode()).digest()[:8], "big", signed=True)
     try:
-        with motor.connect() as cx:
-            _asegurar(cx)
-            tomado = cx.execute(text("SELECT pg_try_advisory_lock(:llave)"), {"llave": llave}).scalar()
-            cx.commit()
+        with motor.connect() as guardia:
+            _asegurar(guardia)
+            guardia.commit()
+            # El lock pertenece a una transacción separada. Funciona también
+            # detrás de un pooler por transacciones y no se libera al confirmar
+            # la auditoría antes de llamar a Sheets.
+            tomado = guardia.execute(text("SELECT pg_try_advisory_xact_lock(:llave)"), {"llave": llave}).scalar()
             if not tomado:
                 raise ErrorPresupuesto("Ya se está guardando otro cambio. Espere unos segundos e inténtelo otra vez.")
             try:
-                yield cx
+                with motor.connect() as cx:
+                    yield cx
             finally:
-                cx.rollback()
-                cx.execute(text("SELECT pg_advisory_unlock(:llave)"), {"llave": llave})
-                cx.commit()
+                guardia.rollback()
     finally:
         destino.cerrar()
 
