@@ -851,7 +851,7 @@ def proyecciones_pendientes(cliente: dict) -> list[dict]:
 
 def reclasificar(token: str, movimiento_clave: object, linea_id: object,
                  medio_pago: object = None, alcance: object = "individual",
-                 monto: object = None,
+                 monto: object = None, *, cuenta_id: object = None,
                  ) -> dict:
     """Aplica un override puntual o una regla general de metadata."""
     _, cliente = dashboard.validar_enlace(token)
@@ -870,6 +870,8 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
     medio = _validar_medio_pago(
         movimiento.get("medio_pago") if medio_pago is None else medio_pago
     )
+    if cuenta_id is not None:
+        medio = _medio_con_cuenta(cliente, cuenta_id, medio)
     monto_visible = _monto_editable(monto) if monto is not None else None
     datos = metadata.leer(cliente)
     capa, origen = _modelo_origen(datos, movimiento)
@@ -959,8 +961,30 @@ def _politica_creacion_manual(cliente: dict) -> edicion.PoliticaEdicion:
     return politica
 
 
+def _medio_con_cuenta(cliente: dict, cuenta_id: object, medio_pago: object) -> str:
+    """Valida la cuenta del cliente y conserva SINPE/efectivo/etc. como detalle.
+
+    El prefijo sigue siendo la identidad bancaria que usa el saldo; no creamos
+    un segundo débito ni modificamos el esquema de la hoja manual.
+    """
+    from bot import cuentas
+    identificador = str(cuenta_id or "").strip()
+    if not identificador or "|" in identificador:
+        raise ErrorReclasificacion("seleccione la cuenta desde la que pagó")
+    canonico = cuentas.resolver_medio_de_cuenta(cliente, f"cuenta:{identificador}")
+    if not canonico:
+        raise ErrorReclasificacion("la cuenta elegida no está activa o no pertenece a este cliente")
+    detalle = str(medio_pago or "").strip()
+    # Al corregir una cuenta ya vinculada, mantener sólo el detalle del medio.
+    if detalle.startswith("cuenta:"):
+        detalle = detalle.partition("|")[2].strip()
+    if "|" in detalle:
+        raise ErrorReclasificacion("el medio de pago no es válido")
+    return _validar_medio_pago(f"{canonico}|{detalle}" if detalle else canonico)
+
+
 def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None,
-                     permitir_medio_cuenta: bool = False) -> dict:
+                     permitir_medio_cuenta: bool = False, cuenta_id: object = None) -> dict:
     """Crea un gasto manual y difiere sólo la materialización pesada.
 
     La fila se confirma primero en su Google Sheet normal; nunca se usa un
@@ -971,6 +995,20 @@ def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None
         raise ErrorReclasificacion("la solicitud de creación no es válida")
     politica = _politica_creacion_manual(cliente)
     entrada = {str(k): v for k, v in valores.items() if isinstance(k, str)}
+
+    if cuenta_id is not None:
+        campo_medio = next((campo for campo in politica.campos.values()
+                            if campo.nombre.casefold() in {"medio_pago", "metodo_pago", "método_pago"}
+                            and not campo.calculado), None)
+        if not campo_medio:
+            raise ErrorReclasificacion("la creación manual no permite vincular una cuenta")
+        # Validar el medio genérico contra metadata antes de ampliar la lista
+        # únicamente para el identificador bancario comprobado en el servidor.
+        medio = str(entrada.get(campo_medio.nombre) or "").strip()
+        if medio and campo_medio.tipo == "lista" and medio not in campo_medio.valores:
+            raise ErrorReclasificacion("seleccione un medio de pago válido")
+        entrada[campo_medio.nombre] = _medio_con_cuenta(cliente, cuenta_id, medio)
+        permitir_medio_cuenta = True
 
     if permitir_medio_cuenta:
         campo_medio = next((campo for campo in politica.campos.values()

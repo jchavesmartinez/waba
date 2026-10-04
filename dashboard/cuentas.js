@@ -411,6 +411,8 @@
     }
   };
   window.fachaviCuentasDisponibles = () => (estado?.cuentas || []).filter((c) => c.tipo !== "credito");
+  // Crear/editar gastos también permite cargos a tarjetas de crédito.
+  window.fachaviTodasLasCuentas = () => estado?.cuentas || [];
   window.fachaviCuentaPagoPredeterminada = () =>
     (estado?.cuentas || []).find((c) => c.tipo === "credito" && c.cuenta_pago_default)?.cuenta_pago_default || "";
   window.fachaviCargarCuentas = cargar;

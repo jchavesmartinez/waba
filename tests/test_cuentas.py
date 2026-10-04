@@ -73,6 +73,22 @@ def test_resolver_medio_de_cuenta_acepta_id_y_ultimos4(monkeypatch):
     assert cuentas.resolver_medio_de_cuenta(cliente, "cuenta:bac_salario") == "cuenta:bac_salario"
     assert cuentas.resolver_medio_de_cuenta(cliente, "8774") == "cuenta:bac_salario"
     assert cuentas.resolver_medio_de_cuenta(cliente, "cuenta:ajena") is None
+    assert cuentas.resolver_medio_de_cuenta(cliente, "cuenta:mismart|sinpe") == "cuenta:mismart"
+
+
+def test_gasto_sinpe_desde_mismart_descuenta_una_vez_y_conserva_salario():
+    movimiento = _movimiento("discos", "cuenta:mismart|sinpe", "192500", fecha="2026-10-03")
+    resultado = cuentas.proyectar_saldos(CUENTAS, [movimiento], [], date(2026, 10, 3))
+    saldos = _por_id(resultado)
+    assert saldos["mismart"]["saldo_crc"] == "6605659.75"
+    assert saldos["bac_salario"]["saldo_crc"] == "517754.95"
+    assert resultado["sin_vincular"] == []
+
+
+def test_cargo_con_medio_y_cuenta_de_credito_aumenta_la_deuda():
+    movimiento = _movimiento("compra", "cuenta:amex_8715|otro", "192500", fecha="2026-10-03")
+    resultado = _por_id(cuentas.proyectar_saldos(CUENTAS, [movimiento], [], date(2026, 10, 3)))
+    assert resultado["amex_8715"]["saldo_crc"] == "354181.30"
 
 
 def test_lee_cuentas_desde_hoja_tarjetas_sin_requerir_numero_para_ahorro(monkeypatch):

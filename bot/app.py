@@ -677,6 +677,7 @@ async def reclasificar_movimiento_app(request: Request, tareas: BackgroundTasks)
         resultado = dashboard_edicion.reclasificar(
             token, datos.get("movimiento_clave"), datos.get("linea_id"),
             datos.get("medio_pago"), datos.get("alcance", "individual"), datos.get("monto"),
+            **({"cuenta_id": datos["cuenta_id"]} if "cuenta_id" in datos else {}),
         )
         tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(sesion["cid"]))
         return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
@@ -715,6 +716,7 @@ async def crear_movimiento_app(request: Request, tareas: BackgroundTasks):
         )
         resultado = dashboard_edicion.crear_movimiento(
             token, datos.get("valores"), periodo=periodo,
+            **({"cuenta_id": datos["cuenta_id"]} if "cuenta_id" in datos else {}),
         )
         tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(sesion["cid"]))
         return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
@@ -872,6 +874,7 @@ async def reclasificar_movimiento_dashboard(token: str, request: Request,
             token, datos.get("movimiento_clave"), datos.get("linea_id"),
             datos.get("medio_pago"), datos.get("alcance", "individual"),
             datos.get("monto"),
+            **({"cuenta_id": datos["cuenta_id"]} if "cuenta_id" in datos else {}),
         )
         # La escritura fuente ya fue confirmada. La sincronización pesada va
         # después de responder para que el navegador pueda actualizar su vista
@@ -929,7 +932,10 @@ async def crear_movimiento_dashboard(token: str, request: Request, tareas: Backg
         datos = await request.json()
         if not isinstance(datos, dict):
             raise dashboard_edicion.ErrorReclasificacion("la solicitud de creación no es válida")
-        resultado = dashboard_edicion.crear_movimiento(token, datos.get("valores"))
+        resultado = dashboard_edicion.crear_movimiento(
+            token, datos.get("valores"),
+            **({"cuenta_id": datos["cuenta_id"]} if "cuenta_id" in datos else {}),
+        )
         payload, _ = dashboard.validar_enlace(token)
         tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(payload["cid"]))
         return JSONResponse(resultado, headers=cabeceras)

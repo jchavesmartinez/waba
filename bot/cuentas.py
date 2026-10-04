@@ -422,7 +422,7 @@ def _aplicar_pendientes(cliente: dict, movimientos: list[dict]) -> list[dict]:
 
 def _cuenta_de_medio(medio: object, por_ultimos4: dict[str, dict],
                      por_id: dict[str, dict]) -> dict | None:
-    valor = str(medio or "").strip()
+    valor = str(medio or "").strip().split("|", 1)[0].strip()
     if valor.startswith("cuenta:"):
         return por_id.get(valor.removeprefix("cuenta:"))
     grupos = re.findall(r"(?<!\d)\d{4}(?!\d)", valor)
@@ -432,11 +432,12 @@ def _cuenta_de_medio(medio: object, por_ultimos4: dict[str, dict],
 def resolver_medio_de_cuenta(cliente: dict, medio: object) -> str | None:
     """Devuelve el identificador canónico de una cuenta activa, si corresponde.
 
-    Los gastos manuales pueden llevar ``cuenta:<id>`` o los últimos cuatro
+    Los gastos manuales pueden llevar ``cuenta:<id>|sinpe`` (el medio es
+    opcional) o los últimos cuatro
     dígitos. Centralizar la resolución evita que un pago del dashboard se
     guarde con una cuenta inventada o con un texto que los saldos no reconocen.
     """
-    valor = str(medio or "").strip()
+    valor = str(medio or "").strip().split("|", 1)[0].strip()
     if not valor:
         return None
     cuentas, _, _ = _leer_config(cliente)

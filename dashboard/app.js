@@ -275,8 +275,58 @@
         mostrarError(razon.message || "Inténtelo nuevamente.");
       });
   };
-  const abrirEditor = (movement) => {
+  const cargarCuentasMovimiento = async () => {
+    let cuentas = window.fachaviTodasLasCuentas?.() || window.fachaviCuentasDisponibles?.() || [];
+    if (!cuentas.length && window.fachaviCargarCuentas) {
+      await window.fachaviCargarCuentas();
+      cuentas = window.fachaviTodasLasCuentas?.() || window.fachaviCuentasDisponibles?.() || [];
+    }
+    return cuentas;
+  };
+  const selectorCuentaMovimiento = (cuentas, medio = "", editar = false) => {
+    const label = document.createElement("label"); label.textContent = "Pagar desde";
+    const select = document.createElement("select"); select.name = "cuenta_id"; select.required = true;
+    const empty = document.createElement("option"); empty.value = editar ? "__conservar__" : "";
+    empty.textContent = editar ? "Conservar cuenta actual / sin vincular" : "Seleccione la cuenta de origen";
+    select.append(empty);
+    cuentas.forEach((cuenta) => {
+      const option = document.createElement("option"); option.value = cuenta.cuenta_id;
+      option.textContent = cuenta.nombre; select.append(option);
+    });
+    const sinCuenta = document.createElement("option"); sinCuenta.value = "__sin_cuenta__";
+    sinCuenta.textContent = "No afecta cuentas (efectivo u otro)"; select.append(sinCuenta);
+    const actual = String(medio || "").split("|", 1)[0];
+    const ultimos4 = actual.match(/(?<!\d)\d{4}(?!\d)/g)?.at(-1);
+    const cuentaActual = cuentas.find((cuenta) => actual === `cuenta:${cuenta.cuenta_id}`
+      || (ultimos4 && String(cuenta.ultimos4 || "") === ultimos4));
+    if (cuentaActual) select.value = cuentaActual.cuenta_id;
+    label.append(select);
+    const note = document.createElement("p"); note.className = "editor-nota";
+    note.textContent = cuentas.length
+      ? "El pago se reflejará una sola vez en el saldo o deuda de esta cuenta. SINPE o transferencia indican el medio, no la cuenta."
+      : "No pude cargar cuentas. Reabra el formulario para pagar desde una cuenta; solo efectivo u otro pueden guardarse sin vincular.";
+    return { label, select, note };
+  };
+  const validarCuentaMovimiento = (select, medio) => {
+    select.setCustomValidity(select.value === "__sin_cuenta__" && /sinpe|transferencia|debito|débito/i.test(medio)
+      ? "Seleccione la cuenta de origen para este medio de pago." : "");
+  };
+  const medioConCuentaLocal = (cuenta, medio) => {
+    if (!cuenta || cuenta.startsWith("__")) return medio;
+    const texto = String(medio || "").startsWith("cuenta:") ? String(medio).split("|").slice(1).join("|") : String(medio || "");
+    return `cuenta:${cuenta}${texto ? `|${texto}` : ""}`;
+  };
+  const medioPagoVisible = (medio) => {
+    const partes = String(medio || "").split("|");
+    if (!partes[0].startsWith("cuenta:")) return medio;
+    const id = partes[0].slice("cuenta:".length);
+    const cuentas = window.fachaviTodasLasCuentas?.() || window.fachaviCuentasDisponibles?.() || [];
+    const nombre = cuentas.find((cuenta) => cuenta.cuenta_id === id)?.nombre || id;
+    return [nombre, partes.slice(1).join("|")].filter(Boolean).join(" · ");
+  };
+  const abrirEditor = async (movement) => {
     if (!movement.movimiento_clave || !lines.length) return;
+    const cuentas = await cargarCuentasMovimiento();
     const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento";
     const form = document.createElement("form"); form.method = "dialog";
     const title = document.createElement("h2"); title.textContent = "Editar movimiento";
@@ -295,6 +345,8 @@
     const payment = document.createElement("input"); payment.type = "text"; payment.name = "medio_pago";
     payment.autocomplete = "off"; payment.required = true;
     payment.value = String(movement.medio_pago || "").trim() === "Sin método de pago" ? "" : String(movement.medio_pago || "");
+    if (payment.value.startsWith("cuenta:")) payment.value = payment.value.split("|").slice(1).join("|");
+    payment.required = false;
     payment.placeholder = "Ej.: Efectivo, SINPE o tarjeta";
     const paymentList = document.createElement("datalist"); const paymentListId = `metodos-pago-${movement.movimiento_clave}`.replace(/[^a-z0-9_-]/gi, "-"); paymentList.id = paymentListId;
     const methods = [...new Set((Array.isArray(data.movimientos) ? data.movimientos : [])
@@ -302,6 +354,9 @@
       .filter((method) => method && method !== "Sin método de pago"))].sort((a, b) => a.localeCompare(b, "es"));
     methods.forEach((method) => { const option = document.createElement("option"); option.value = method; paymentList.append(option); });
     payment.setAttribute("list", paymentListId); paymentLabel.append(payment, paymentList);
+    const account = selectorCuentaMovimiento(cuentas, movement.medio_pago, true);
+    payment.addEventListener("input", () => validarCuentaMovimiento(account.select, payment.value));
+    account.select.addEventListener("change", () => validarCuentaMovimiento(account.select, payment.value));
     const amountLabel = document.createElement("label");
     const amountCurrency = String(movement.moneda || "CRC").trim().toUpperCase() || "CRC";
     amountLabel.textContent = `Monto (${amountCurrency})`;
@@ -332,10 +387,13 @@
     cancel.addEventListener("click", () => dialog.close());
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar cambios";
     const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
-    actions.append(cancel, save); form.append(title, detail, label, paymentLabel, amountLabel, scopeFieldset, note, error, actions); dialog.append(form);
+    actions.append(cancel, save); form.append(title, detail, label, account.label, paymentLabel, account.note, amountLabel, scopeFieldset, note, error, actions); dialog.append(form);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      validarCuentaMovimiento(account.select, payment.value);
       if (!form.reportValidity()) return;
+      const medioElegido = account.select.value === "__conservar__" && !payment.value
+        ? movement.medio_pago : medioConCuentaLocal(account.select.value, payment.value);
       const lineaNueva = linesById.get(String(select.value));
       const anterior = {
         linea_id: movement.linea_id, categoria: movement.categoria, concepto: movement.concepto,
@@ -347,7 +405,7 @@
       movement.linea_id = select.value;
       movement.categoria = lineaNueva?.categoria || movement.categoria;
       movement.concepto = lineaNueva?.concepto || movement.concepto;
-      movement.medio_pago = payment.value;
+      movement.medio_pago = medioElegido;
       movement.monto = amount.value;
       ajustarKpisMovimiento(movement, 1);
       dialog.close(); renderVista();
@@ -355,7 +413,8 @@
       const payload = {
         movimiento_clave: movement.movimiento_clave,
         linea_id: select.value,
-        medio_pago: payment.value,
+        medio_pago: medioElegido,
+        ...(!account.select.value.startsWith("__") ? { cuenta_id: account.select.value } : {}),
         alcance: groupRadio.checked ? "regla" : "individual",
         monto: amount.value, periodo_inicio: data.periodo?.inicio,
       };
@@ -387,14 +446,16 @@
     });
     document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove()); dialog.showModal();
   };
-  const abrirCreador = () => {
+  const abrirCreador = async () => {
     if (!creation) return;
+    const cuentas = await cargarCuentasMovimiento();
     const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento editor-creacion";
     const form = document.createElement("form");
     const title = document.createElement("h2"); title.textContent = "Agregar movimiento";
     const note = document.createElement("p"); note.className = "editor-nota";
     note.textContent = "Se guardará como gasto manual y aparecerá en el dashboard al actualizarse.";
     const controls = new Map();
+    const account = selectorCuentaMovimiento(cuentas);
     const derived = new Map();
     const updateDerived = () => {
       const lineField = creation.campos.find((field) => field.seleccion_linea);
@@ -434,7 +495,15 @@
       }
       control.name = field.nombre; control.required = Boolean(field.requerido); controls.set(field.nombre, control);
       label.append(control); form.append(label);
+      if (/^(medio_pago|metodo_pago|método_pago)$/i.test(field.nombre)) {
+        label.before(account.label); label.after(account.note);
+        control.addEventListener("change", () => validarCuentaMovimiento(account.select, control.value));
+      }
     });
+    if (!account.label.parentNode) form.append(account.label, account.note);
+    const campoMedio = creation.campos.find((field) => /^(medio_pago|metodo_pago|método_pago)$/i.test(field.nombre));
+    const medioControl = controls.get(campoMedio?.nombre);
+    account.select.addEventListener("change", () => validarCuentaMovimiento(account.select, medioControl?.value || ""));
     const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
     const actions = document.createElement("div"); actions.className = "editor-acciones";
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
@@ -443,6 +512,7 @@
     actions.append(cancel, save); form.prepend(title, note); form.append(error, actions); dialog.append(form);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      validarCuentaMovimiento(account.select, medioControl?.value || "");
       if (!form.reportValidity()) return;
       const valores = {};
       creation.campos.filter((field) => !field.derivado_de_linea).forEach((field) => {
@@ -458,7 +528,7 @@
         linea_id: linea?.linea_id, categoria: linea?.categoria, concepto: linea?.concepto,
         fecha: valores[campoFecha?.nombre] || "", descripcion: valores[campoDescripcion?.nombre] || "Movimiento manual",
         monto: valores[campoMonto?.nombre] || "0", moneda: valores[campoMoneda?.nombre] || "CRC",
-        medio_pago: valores.medio_pago || "Sin método de pago",
+        medio_pago: medioConCuentaLocal(account.select.value, valores[campoMedio?.nombre]) || "Sin método de pago",
         movimiento_clave: `pendiente:${Date.now()}`, pendiente_sincronizacion: true,
       };
       dialog.close(); aplicarMovimientoPendiente(pendiente);
@@ -466,7 +536,8 @@
       (async () => {
         const response = await fetch(`${API_BASE}/movimientos/crear`, {
           method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
-          body: JSON.stringify({ valores, periodo_inicio: data.periodo?.inicio }),
+          body: JSON.stringify({ valores, periodo_inicio: data.periodo?.inicio,
+            ...(account.select.value !== "__sin_cuenta__" ? { cuenta_id: account.select.value } : {}) }),
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el movimiento.");
@@ -905,7 +976,7 @@
       // los últimos cuatro dígitos para que el encabezado sea claro sin
       // exponer más información de la necesaria.
       const maskedCard = String(method).match(/^\*+(\d{4})$/);
-      return maskedCard ? `Tarjeta · ****${maskedCard[1]}` : method;
+      return maskedCard ? `Tarjeta · ****${maskedCard[1]}` : medioPagoVisible(method);
     };
     const movementDate = (movement) => {
       const dateKey = keyMatch(movement, /^fecha$|fecha_transaccion/i);
@@ -1018,7 +1089,7 @@
           "Categoría": movimiento.categoria || "Sin clasificar",
           Concepto: movimiento.concepto || "Gastos sin identificar",
           "Descripción": movimiento.descripcion || "Movimiento",
-          "Método de pago": movimiento.medio_pago || "Sin método de pago",
+          "Método de pago": medioPagoVisible(movimiento.medio_pago || "Sin método de pago"),
           Monto: valorKpi(movimiento.monto, "monto", movimiento.moneda),
           Moneda: movimiento.moneda || "CRC",
           "Monto original": movimiento.monto_original ?? "",
@@ -1238,7 +1309,7 @@
       clasificacion.textContent = pendiente ? "Sin clasificar" : `${linea?.categoria || movimiento.categoria} · ${linea?.concepto || movimiento.concepto}`;
       if (pendiente) clasificacion.classList.add("gastos-dia-sin-clasificar");
       detalle.append(nombre, clasificacion);
-      const metodo = document.createElement("small"); metodo.textContent = movimiento.medio_pago || "Sin método de pago";
+      const metodo = document.createElement("small"); metodo.textContent = medioPagoVisible(movimiento.medio_pago || "Sin método de pago");
       detalle.append(metodo);
       if (movimiento.pendiente_sincronizacion) {
         const estado = document.createElement("small"); estado.textContent = "Pendiente de sincronizar"; detalle.append(estado);
