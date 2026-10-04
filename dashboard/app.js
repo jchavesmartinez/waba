@@ -343,7 +343,7 @@
     label.append(select);
     const paymentLabel = document.createElement("label"); paymentLabel.textContent = "Método de pago";
     const payment = document.createElement("input"); payment.type = "text"; payment.name = "medio_pago";
-    payment.autocomplete = "off"; payment.required = true;
+    payment.autocomplete = "off";
     payment.value = String(movement.medio_pago || "").trim() === "Sin método de pago" ? "" : String(movement.medio_pago || "");
     if (payment.value.startsWith("cuenta:")) payment.value = payment.value.split("|").slice(1).join("|");
     payment.required = false;
@@ -392,8 +392,12 @@
       event.preventDefault();
       validarCuentaMovimiento(account.select, payment.value);
       if (!form.reportValidity()) return;
-      const medioElegido = account.select.value === "__conservar__" && !payment.value
-        ? movement.medio_pago : medioConCuentaLocal(account.select.value, payment.value);
+      const cuentaAnterior = String(movement.medio_pago || "").split("|", 1)[0];
+      const medioElegido = account.select.value === "__conservar__"
+        ? (cuentaAnterior.startsWith("cuenta:")
+          ? medioConCuentaLocal(cuentaAnterior.slice("cuenta:".length), payment.value)
+          : payment.value || movement.medio_pago)
+        : medioConCuentaLocal(account.select.value, payment.value);
       const lineaNueva = linesById.get(String(select.value));
       const anterior = {
         linea_id: movement.linea_id, categoria: movement.categoria, concepto: movement.concepto,
