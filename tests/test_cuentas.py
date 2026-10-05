@@ -275,6 +275,16 @@ def test_operaciones_rechazan_montos_no_positivos(valor):
         cuentas._decimal(valor, positivo=True)
 
 
+def test_saldos_toleran_precision_extra_de_conversiones_historicas():
+    movimiento = _movimiento("cambio", "cuenta:bac_salario", "10.123456789")
+
+    resultado = _por_id(cuentas.proyectar_saldos(
+        CUENTAS, [movimiento], [], date(2026, 9, 30)
+    ))
+
+    assert resultado["bac_salario"]["saldo_crc"] == "517744.83"
+
+
 def test_ingreso_manual_acepta_ajuste_negativo_y_rechaza_cero():
     assert cuentas._monto_destino_operacion("ingreso", "-1250.50") == Decimal("-1250.50")
     with pytest.raises(cuentas.ErrorCuentas, match="no puede ser cero"):

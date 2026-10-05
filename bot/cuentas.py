@@ -14,7 +14,7 @@ import logging
 import re
 import uuid
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from sqlalchemy import text
 
@@ -39,15 +39,23 @@ class ErrorCuentas(ValueError):
     """Error de entrada o configuración que puede mostrarse en la app."""
 
 
-def _decimal(valor: object, *, positivo: bool = False) -> Decimal:
+def _decimal(valor: object, *, positivo: bool = False,
+             redondear_exceso_precision: bool = False) -> Decimal:
     try:
         numero = Decimal(str(valor).strip())
     except (InvalidOperation, ValueError) as exc:
         raise ErrorCuentas("indique un monto válido") from exc
     if not numero.is_finite() or (positivo and numero <= 0):
         raise ErrorCuentas("el monto debe ser mayor que cero")
-    if abs(numero) >= Decimal("1000000000000") or abs(numero.as_tuple().exponent) > 6:
+    if abs(numero) >= Decimal("1000000000000"):
         raise ErrorCuentas("el monto está fuera del rango admitido")
+    if abs(numero.as_tuple().exponent) > 6:
+        if not redondear_exceso_precision:
+            raise ErrorCuentas("el monto está fuera del rango admitido")
+        # Los modelos ya publicados antes de esta validación podían conservar
+        # más decimales al convertir moneda. Son datos derivados, no una
+        # entrada manual: normalizarlos evita bloquear todos los saldos.
+        numero = numero.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
     return numero
 
 
@@ -396,13 +404,15 @@ def _aplicar_pendientes(cliente: dict, movimientos: list[dict]) -> list[dict]:
         clave = str(pendiente.get("movimiento_clave") or "")
         if pendiente.get("tipo") == "editar" and clave in por_clave:
             fila = por_clave[clave]
-            anterior = _decimal(fila["monto_neto"])
+            anterior = _decimal(fila["monto_neto"], redondear_exceso_precision=True)
             if "monto" in pendiente:
                 nuevo = _decimal(pendiente["monto"])
                 signo = -1 if anterior < 0 else 1
                 fila["monto_neto"] = nuevo * signo
                 if anterior and fila.get("monto_original") is not None:
-                    fila["monto_original"] = _decimal(fila["monto_original"]) * nuevo / abs(anterior)
+                    fila["monto_original"] = (_decimal(
+                        fila["monto_original"], redondear_exceso_precision=True
+                    ) * nuevo / abs(anterior))
             if "medio_pago" in pendiente:
                 fila["medio_pago"] = pendiente["medio_pago"]
         elif pendiente.get("tipo") == "crear" and clave not in por_clave:
@@ -515,7 +525,8 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
             continue
         if not _posterior_al_corte(cuenta, momento, hasta):
             continue
-        neto = _decimal(movimiento.get("monto_neto") or 0)
+        neto = _decimal(movimiento.get("monto_neto") or 0,
+                        redondear_exceso_precision=True)
         es_ingreso = tipo == "INGRESO"
         if (not es_ingreso and cuenta["tipo"] != "credito"
                 and _DESCRIPCION_PAGO.search(str(movimiento.get("descripcion") or ""))):
@@ -530,7 +541,8 @@ def proyectar_saldos(cuentas: list[dict], movimientos: list[dict],
                     sin_conversion.append({"fecha": fecha, "descripcion": movimiento.get("descripcion") or "",
                                            "cuenta_id": cuenta["cuenta_id"]})
                     continue
-                original = _decimal(movimiento["monto_original"])
+                original = _decimal(movimiento["monto_original"],
+                                    redondear_exceso_precision=True)
                 cambio = abs(original) * (-1 if neto < 0 or es_ingreso else 1)
                 cuenta["saldo_usd"] += cambio
             else:

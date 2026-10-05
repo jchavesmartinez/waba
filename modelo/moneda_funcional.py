@@ -9,7 +9,7 @@ perder el dato auditable que llegó del banco o de la hoja.
 from __future__ import annotations
 
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
 
 import httpx
@@ -17,6 +17,12 @@ import httpx
 
 _ISO_MONEDA = re.compile(r"[A-Z]{3}\Z")
 _URL = "https://api.frankfurter.dev/v2/rates"
+# El contrato de los movimientos canónicos y las operaciones de cuenta admite
+# hasta seis decimales. Las tasas históricas pueden traer muchos más; dejar
+# que esa precisión se propague convierte una compra válida en un error al
+# proyectar saldos. Se conserva la tasa completa para auditoría y se redondea
+# únicamente el importe monetario ya convertido.
+_PRECISION_MONETARIA = Decimal("0.000001")
 
 
 class ErrorTipoCambio(RuntimeError):
@@ -47,7 +53,7 @@ class ConversorMoneda:
         importe_mercado = importe * factor
         if moneda_mercado == self.moneda_funcional:
             return {
-                "monto": importe_mercado,
+                "monto": _monto_monetario(importe_mercado),
                 "moneda": self.moneda_funcional,
                 "tasa": factor,
                 "fecha_tasa": fecha_iso,
@@ -55,7 +61,7 @@ class ConversorMoneda:
             }
         tasa, fecha_tasa = self._tasa(moneda_mercado, fecha_iso)
         return {
-            "monto": importe_mercado * tasa,
+            "monto": _monto_monetario(importe_mercado * tasa),
             "moneda": self.moneda_funcional,
             # Tasa efectiva por unidad de la moneda que venía en la fuente.
             "tasa": factor * tasa,
@@ -126,6 +132,11 @@ def _decimal(valor) -> Decimal:
     if not decimal.is_finite():
         raise ErrorTipoCambio(f"importe no finito para conversión: '{valor}'")
     return decimal
+
+
+def _monto_monetario(valor: Decimal) -> Decimal:
+    """Fija el importe canónico a la precisión que admite el libro mayor."""
+    return valor.quantize(_PRECISION_MONETARIA, rounding=ROUND_HALF_UP)
 
 
 def _equivalencias(filas: list[dict]) -> dict[str, tuple[str, Decimal]]:

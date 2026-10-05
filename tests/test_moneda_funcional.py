@@ -24,6 +24,25 @@ class _ClienteHttp:
         return _Respuesta()
 
 
+def test_conversion_redondea_el_importe_y_no_la_tasa_historica():
+    class ClienteConTasaPrecisa:
+        def get(self, url, params):
+            class Respuesta:
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return [{"date": "2026-09-05", "rate": "451.123456789"}]
+            return Respuesta()
+
+    salida = ConversorMoneda("CRC", ClienteConTasaPrecisa()).convertir(
+        Decimal("10"), "USD", date(2026, 9, 5)
+    )
+
+    assert salida["monto"] == Decimal("4511.234568")
+    assert salida["tasa"] == Decimal("451.123456789")
+
+
 def test_convierte_historico_y_reutiliza_tasa_del_mismo_dia():
     cliente = _ClienteHttp()
     conversor = ConversorMoneda("CRC", cliente)
