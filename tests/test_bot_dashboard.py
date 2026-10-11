@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 
 import config
 from bot import catalogo, dashboard
-from bot import cuentas
 from bot import app as app_mod
 from bot.salida import Adjunto, Respuesta
 
@@ -84,8 +83,8 @@ def test_render_incrusta_snapshot_sin_llamadas_del_frontend(
     assert "__DASHBOARD_ASSET_VERSION__" not in html
     assert '"nombre":"Cliente A"' in html
     assert "/dashboard-assets/app.js" in html
-    assert "/dashboard-assets/cuentas.js" in html
-    assert 'id="cuentas-contenido"' in html
+    assert "/dashboard-assets/cuentas.js" not in html
+    assert 'id="cuentas-contenido"' not in html
     assert 'id="chat-mensajes"' in html
 
 
@@ -428,44 +427,6 @@ def test_lineas_presupuesto_sin_pagable_sigue_siendo_compatible(monkeypatch):
     assert "FALSE AS pagable" in capturado["sql"]
 
 
-def test_transferencia_a_ahorro_suma_presupuesto_sin_repetir_movimiento(monkeypatch):
-    """Una transferencia asignada se muestra como gasto presupuestario una vez."""
-    snapshot = {
-        "lineas_presupuesto": [{
-            "linea_id": "gas_ahorro", "categoria": "Ahorros", "concepto": "Ahorro",
-        }],
-        "movimientos": [],
-        "kpis": [
-            {
-                "kpi": "gasto_por_concepto",
-                "columnas": ["linea_id", "categoria", "concepto", "presupuesto", "gastado", "disponible", "porcentaje"],
-                "filas": [["gas_ahorro", "Ahorros", "Ahorro", 515222.5, 0, 515222.5, 0]],
-            },
-            {
-                "kpi": "presupuesto_disponible",
-                "columnas": ["presupuesto", "gastado", "disponible"],
-                "filas": [[4768242.5, 0, 4768242.5]],
-            },
-        ],
-    }
-    monkeypatch.setattr(cuentas, "asignaciones_presupuesto", lambda *_: [{
-        "operacion_id": "op-1", "fecha": "2026-10-01", "descripcion": "Ahorro octubre",
-        "monto_origen": Decimal("515222.50"), "moneda_origen": "CRC",
-        "linea_presupuesto_id": "gas_ahorro",
-    }])
-    periodo = {"inicio": "2026-10-01", "fin_exclusivo": "2026-11-01"}
-
-    dashboard._aplicar_transferencias_presupuesto(snapshot, {"cliente_id": "cliente_a"}, periodo)
-    dashboard._aplicar_transferencias_presupuesto(snapshot, {"cliente_id": "cliente_a"}, periodo)
-
-    assert len(snapshot["movimientos"]) == 1
-    assert snapshot["movimientos"][0]["origen"] == "transferencia_presupuestada"
-    concepto = snapshot["kpis"][0]["filas"][0]
-    assert concepto[4:] == [515222.5, 0.0, 100.0]
-    general = snapshot["kpis"][1]["filas"][0]
-    assert general == [4768242.5, 515222.5, 4253020.0]
-
-
 def test_jerarquia_prefiere_movimientos_canonicos_para_detalle(monkeypatch):
     """El árbol no debe perder cargos bancarios al existir la tabla canónica."""
     presupuesto = catalogo.TablaPermitida(
@@ -655,3 +616,41 @@ def test_detalle_conserva_cargos_iguales_y_cargos_con_linea_nula(monkeypatch):
     assert por_clave["bac:2"]["categoria"] == "Sin clasificar"
     assert por_clave["bac:3"]["categoria"] == "Sin clasificar"
     assert por_clave["bac:1"]["monto"] == por_clave["bac:2"]["monto"] == 10560.03
+
+
+def test_dashboard_descarga_reporte_pdf_del_mes(monkeypatch):
+    app = TestClient(app_mod.app)
+    monkeypatch.setattr(app_mod, "_sesion_dashboard", lambda request: ({}, {"cliente_id": "a"}))
+    monkeypatch.setattr(app_mod.dashboard, "obtener_snapshot", lambda *_: ({
+        "cliente": {"nombre": "Cliente A"},
+        "periodo": {"inicio": "2026-09-01", "etiqueta": "septiembre 2026"},
+        "kpis": [{
+            "kpi": "presupuesto_disponible", "columnas": ["presupuesto", "gastado"],
+            "filas": [[100000, 24000]],
+        }],
+        "movimientos": [{
+            "fecha": "2026-09-12", "categoria": "Hogar", "concepto": "Internet",
+            "descripcion": "Proveedor", "monto": 24000, "moneda": "CRC",
+        }],
+    }, False))
+    respuesta = app.get("/api/dashboard/reporte.pdf?inicio=2026-09-01")
+
+    assert respuesta.status_code == 200
+    assert respuesta.headers["content-type"] == "application/pdf"
+    assert "reporte-financiero-2026-09.pdf" in respuesta.headers["content-disposition"]
+    assert respuesta.content.startswith(b"%PDF-")
+
+
+@pytest.mark.parametrize("metodo,ruta", [
+    ("GET", "/api/dashboard/cuentas"),
+    ("POST", "/api/dashboard/cuentas/operaciones"),
+    ("DELETE", "/api/dashboard/cuentas/operaciones/anterior"),
+    ("POST", "/api/dashboard/cuentas/ingresos-recurrentes"),
+    ("DELETE", "/api/dashboard/cuentas/ingresos-recurrentes/anterior"),
+])
+def test_endpoints_del_modulo_retirado_no_existen(metodo, ruta):
+    assert TestClient(app_mod.app).request(metodo, ruta).status_code == 404
+
+
+def test_reporte_pdf_requiere_sesion():
+    assert TestClient(app_mod.app).get("/api/dashboard/reporte.pdf").status_code == 401

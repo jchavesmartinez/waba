@@ -29,13 +29,6 @@
     loading.innerHTML = `<strong>${reason.message || "No pude cargar el dashboard."}</strong>`;
     return;
   }
-  // El módulo de cuentas emite este evento tras guardar una transferencia
-  // asignada a Ahorro. Recargamos el mismo mes una vez materializado el
-  // snapshot, para que el presupuesto y el detalle queden coherentes al
-  // instante sin tocar dos veces el saldo bancario.
-  window.addEventListener("fachavi:presupuesto-actualizado", () => {
-    window.setTimeout(() => window.location.reload(), 250);
-  });
   const clean = (s) => String(s ?? "").replaceAll("_", " ");
   const isMoney = (name, unit) => /monto|gasto|presupuesto|disponible|exceso|venta|ingreso|saldo|total/i.test(name) || /colon|crc|usd|moneda/i.test(unit);
   const number = (value) => typeof value === "number" ? value : Number(value);
@@ -275,58 +268,13 @@
         mostrarError(razon.message || "Inténtelo nuevamente.");
       });
   };
-  const cargarCuentasMovimiento = async () => {
-    let cuentas = window.fachaviTodasLasCuentas?.() || window.fachaviCuentasDisponibles?.() || [];
-    if (!cuentas.length && window.fachaviCargarCuentas) {
-      await window.fachaviCargarCuentas();
-      cuentas = window.fachaviTodasLasCuentas?.() || window.fachaviCuentasDisponibles?.() || [];
-    }
-    return cuentas;
-  };
-  const selectorCuentaMovimiento = (cuentas, medio = "", editar = false) => {
-    const label = document.createElement("label"); label.textContent = "Pagar desde";
-    const select = document.createElement("select"); select.name = "cuenta_id"; select.required = true;
-    const empty = document.createElement("option"); empty.value = editar ? "__conservar__" : "";
-    empty.textContent = editar ? "Conservar cuenta actual / sin vincular" : "Seleccione la cuenta de origen";
-    select.append(empty);
-    cuentas.forEach((cuenta) => {
-      const option = document.createElement("option"); option.value = cuenta.cuenta_id;
-      option.textContent = cuenta.nombre; select.append(option);
-    });
-    const sinCuenta = document.createElement("option"); sinCuenta.value = "__sin_cuenta__";
-    sinCuenta.textContent = "No afecta cuentas (efectivo u otro)"; select.append(sinCuenta);
-    const actual = String(medio || "").split("|", 1)[0];
-    const ultimos4 = actual.match(/(?<!\d)\d{4}(?!\d)/g)?.at(-1);
-    const cuentaActual = cuentas.find((cuenta) => actual === `cuenta:${cuenta.cuenta_id}`
-      || (ultimos4 && String(cuenta.ultimos4 || "") === ultimos4));
-    if (cuentaActual) select.value = cuentaActual.cuenta_id;
-    label.append(select);
-    const note = document.createElement("p"); note.className = "editor-nota";
-    note.textContent = cuentas.length
-      ? "El pago se reflejará una sola vez en el saldo o deuda de esta cuenta. SINPE o transferencia indican el medio, no la cuenta."
-      : "No pude cargar cuentas. Reabra el formulario para pagar desde una cuenta; solo efectivo u otro pueden guardarse sin vincular.";
-    return { label, select, note };
-  };
-  const validarCuentaMovimiento = (select, medio) => {
-    select.setCustomValidity(select.value === "__sin_cuenta__" && /sinpe|transferencia|debito|débito/i.test(medio)
-      ? "Seleccione la cuenta de origen para este medio de pago." : "");
-  };
-  const medioConCuentaLocal = (cuenta, medio) => {
-    if (!cuenta || cuenta.startsWith("__")) return medio;
-    const texto = String(medio || "").startsWith("cuenta:") ? String(medio).split("|").slice(1).join("|") : String(medio || "");
-    return `cuenta:${cuenta}${texto ? `|${texto}` : ""}`;
-  };
   const medioPagoVisible = (medio) => {
     const partes = String(medio || "").split("|");
     if (!partes[0].startsWith("cuenta:")) return medio;
-    const id = partes[0].slice("cuenta:".length);
-    const cuentas = window.fachaviTodasLasCuentas?.() || window.fachaviCuentasDisponibles?.() || [];
-    const nombre = cuentas.find((cuenta) => cuenta.cuenta_id === id)?.nombre || id;
-    return [nombre, partes.slice(1).join("|")].filter(Boolean).join(" · ");
+    return partes.slice(1).join("|") || "transferencia";
   };
   const abrirEditor = async (movement) => {
     if (!movement.movimiento_clave || !lines.length) return;
-    const cuentas = await cargarCuentasMovimiento();
     const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento";
     const form = document.createElement("form"); form.method = "dialog";
     const title = document.createElement("h2"); title.textContent = "Editar movimiento";
@@ -345,18 +293,15 @@
     const payment = document.createElement("input"); payment.type = "text"; payment.name = "medio_pago";
     payment.autocomplete = "off";
     payment.value = String(movement.medio_pago || "").trim() === "Sin método de pago" ? "" : String(movement.medio_pago || "");
-    if (payment.value.startsWith("cuenta:")) payment.value = payment.value.split("|").slice(1).join("|");
+    payment.value = medioPagoVisible(payment.value);
     payment.required = false;
     payment.placeholder = "Ej.: Efectivo, SINPE o tarjeta";
     const paymentList = document.createElement("datalist"); const paymentListId = `metodos-pago-${movement.movimiento_clave}`.replace(/[^a-z0-9_-]/gi, "-"); paymentList.id = paymentListId;
     const methods = [...new Set((Array.isArray(data.movimientos) ? data.movimientos : [])
-      .map((item) => String(item.medio_pago || "").trim())
+      .map((item) => String(medioPagoVisible(item.medio_pago) || "").trim())
       .filter((method) => method && method !== "Sin método de pago"))].sort((a, b) => a.localeCompare(b, "es"));
     methods.forEach((method) => { const option = document.createElement("option"); option.value = method; paymentList.append(option); });
     payment.setAttribute("list", paymentListId); paymentLabel.append(payment, paymentList);
-    const account = selectorCuentaMovimiento(cuentas, movement.medio_pago, true);
-    payment.addEventListener("input", () => validarCuentaMovimiento(account.select, payment.value));
-    account.select.addEventListener("change", () => validarCuentaMovimiento(account.select, payment.value));
     const amountLabel = document.createElement("label");
     const amountCurrency = String(movement.moneda || "CRC").trim().toUpperCase() || "CRC";
     amountLabel.textContent = `Monto (${amountCurrency})`;
@@ -387,17 +332,11 @@
     cancel.addEventListener("click", () => dialog.close());
     const save = document.createElement("button"); save.type = "submit"; save.textContent = "Guardar cambios";
     const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
-    actions.append(cancel, save); form.append(title, detail, label, account.label, paymentLabel, account.note, amountLabel, scopeFieldset, note, error, actions); dialog.append(form);
+    actions.append(cancel, save); form.append(title, detail, label, paymentLabel, amountLabel, scopeFieldset, note, error, actions); dialog.append(form);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      validarCuentaMovimiento(account.select, payment.value);
       if (!form.reportValidity()) return;
-      const cuentaAnterior = String(movement.medio_pago || "").split("|", 1)[0];
-      const medioElegido = account.select.value === "__conservar__"
-        ? (cuentaAnterior.startsWith("cuenta:")
-          ? medioConCuentaLocal(cuentaAnterior.slice("cuenta:".length), payment.value)
-          : payment.value || movement.medio_pago)
-        : medioConCuentaLocal(account.select.value, payment.value);
+      const medioElegido = payment.value;
       const lineaNueva = linesById.get(String(select.value));
       const anterior = {
         linea_id: movement.linea_id, categoria: movement.categoria, concepto: movement.concepto,
@@ -418,7 +357,6 @@
         movimiento_clave: movement.movimiento_clave,
         linea_id: select.value,
         medio_pago: medioElegido,
-        ...(!account.select.value.startsWith("__") ? { cuenta_id: account.select.value } : {}),
         alcance: groupRadio.checked ? "regla" : "individual",
         monto: amount.value, periodo_inicio: data.periodo?.inicio,
       };
@@ -439,7 +377,6 @@
           renderVista();
         }
         vigilarSincronizacion(movement.movimiento_clave);
-        window.dispatchEvent(new Event("fachavi:movimiento-editado"));
       }).catch((reason) => {
         if (movement.__revision_local === revision) {
           ajustarKpisMovimiento(movement, -1); Object.assign(movement, anterior);
@@ -452,14 +389,12 @@
   };
   const abrirCreador = async () => {
     if (!creation) return;
-    const cuentas = await cargarCuentasMovimiento();
     const dialog = document.createElement("dialog"); dialog.className = "editor-movimiento editor-creacion";
     const form = document.createElement("form");
     const title = document.createElement("h2"); title.textContent = "Agregar movimiento";
     const note = document.createElement("p"); note.className = "editor-nota";
     note.textContent = "Se guardará como gasto manual y aparecerá en el dashboard al actualizarse.";
     const controls = new Map();
-    const account = selectorCuentaMovimiento(cuentas);
     const derived = new Map();
     const updateDerived = () => {
       const lineField = creation.campos.find((field) => field.seleccion_linea);
@@ -499,15 +434,8 @@
       }
       control.name = field.nombre; control.required = Boolean(field.requerido); controls.set(field.nombre, control);
       label.append(control); form.append(label);
-      if (/^(medio_pago|metodo_pago|método_pago)$/i.test(field.nombre)) {
-        label.before(account.label); label.after(account.note);
-        control.addEventListener("change", () => validarCuentaMovimiento(account.select, control.value));
-      }
     });
-    if (!account.label.parentNode) form.append(account.label, account.note);
     const campoMedio = creation.campos.find((field) => /^(medio_pago|metodo_pago|método_pago)$/i.test(field.nombre));
-    const medioControl = controls.get(campoMedio?.nombre);
-    account.select.addEventListener("change", () => validarCuentaMovimiento(account.select, medioControl?.value || ""));
     const error = document.createElement("p"); error.className = "editor-error"; error.hidden = true;
     const actions = document.createElement("div"); actions.className = "editor-acciones";
     const cancel = document.createElement("button"); cancel.type = "button"; cancel.textContent = "Cancelar";
@@ -516,7 +444,6 @@
     actions.append(cancel, save); form.prepend(title, note); form.append(error, actions); dialog.append(form);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      validarCuentaMovimiento(account.select, medioControl?.value || "");
       if (!form.reportValidity()) return;
       const valores = {};
       creation.campos.filter((field) => !field.derivado_de_linea).forEach((field) => {
@@ -532,7 +459,7 @@
         linea_id: linea?.linea_id, categoria: linea?.categoria, concepto: linea?.concepto,
         fecha: valores[campoFecha?.nombre] || "", descripcion: valores[campoDescripcion?.nombre] || "Movimiento manual",
         monto: valores[campoMonto?.nombre] || "0", moneda: valores[campoMoneda?.nombre] || "CRC",
-        medio_pago: medioConCuentaLocal(account.select.value, valores[campoMedio?.nombre]) || "Sin método de pago",
+        medio_pago: valores[campoMedio?.nombre] || "Sin método de pago",
         movimiento_clave: `pendiente:${Date.now()}`, pendiente_sincronizacion: true,
       };
       dialog.close(); aplicarMovimientoPendiente(pendiente);
@@ -540,15 +467,13 @@
       (async () => {
         const response = await fetch(`${API_BASE}/movimientos/crear`, {
           method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
-          body: JSON.stringify({ valores, periodo_inicio: data.periodo?.inicio,
-            ...(account.select.value !== "__sin_cuenta__" ? { cuenta_id: account.select.value } : {}) }),
+          body: JSON.stringify({ valores, periodo_inicio: data.periodo?.inicio }),
         });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "No pude guardar el movimiento.");
         Object.assign(pendiente, result.movimiento);
         mostrarAviso("Movimiento guardado. Sincronizando en segundo plano…");
         vigilarSincronizacion(result.movimiento_clave);
-        window.dispatchEvent(new Event("fachavi:movimiento-editado"));
       })().catch((reason) => {
         aplicarMovimientoPendiente(pendiente, false);
         mostrarAviso(reason.message || "No pude guardar el movimiento; lo retiré de la vista.");
@@ -575,11 +500,6 @@
   };
   const abrirPago = async (line, row, budgetKey, spentKey) => {
     if (!line?.linea_id) return;
-    let cuentasPago = window.fachaviCuentasDisponibles?.() || [];
-    if (!cuentasPago.length && window.fachaviCargarCuentas) {
-      await window.fachaviCargarCuentas();
-      cuentasPago = window.fachaviCuentasDisponibles?.() || [];
-    }
     const presupuesto = number(row[budgetKey]);
     const gastado = number(row[spentKey]);
     const estado = estadoPago(presupuesto, gastado);
@@ -589,7 +509,7 @@
     const detail = document.createElement("p"); detail.className = "editor-descripcion";
     detail.textContent = `${line.categoria} · ${line.concepto}`;
     const resumen = document.createElement("dl"); resumen.className = "resumen-pago";
-    [["Monto presupuestado", presupuesto], ["Monto ya gastado", gastado], ["Saldo presupuestario", Math.max((presupuesto || 0) - (gastado || 0), 0)]]
+    [["Monto presupuestado", presupuesto], ["Monto ya gastado", gastado], ["Disponible presupuestario", Math.max((presupuesto || 0) - (gastado || 0), 0)]]
       .forEach(([etiqueta, valor]) => {
         const term = document.createElement("dt"); term.textContent = etiqueta;
         const definition = document.createElement("dd"); definition.textContent = format(valor, "monto", row.moneda || "CRC");
@@ -610,22 +530,14 @@
       fecha.max = [ultimo.getFullYear(), String(ultimo.getMonth() + 1).padStart(2, "0"), String(ultimo.getDate()).padStart(2, "0")].join("-");
     }
     fechaLabel.append(fecha);
-    const metodoLabel = document.createElement("label"); metodoLabel.textContent = "Pagar desde";
+    const metodoLabel = document.createElement("label"); metodoLabel.textContent = "Medio de pago";
+    const campoMedio = creation?.campos?.find((field) => /^(medio_pago|metodo_pago|método_pago)$/i.test(field.nombre));
     const metodo = document.createElement("select"); metodo.required = true;
-    if (cuentasPago.length) {
-      const cuentaPredeterminada = window.fachaviCuentaPagoPredeterminada?.() || cuentasPago[0].cuenta_id;
-      cuentasPago.forEach((cuenta) => {
-        const option = document.createElement("option");
-        option.value = `cuenta:${cuenta.cuenta_id}`;
-        option.textContent = cuenta.nombre;
-        option.dataset.cuentaOrigen = cuenta.nombre;
-        option.selected = cuenta.cuenta_id === cuentaPredeterminada;
-        metodo.append(option);
-      });
-    } else {
-      const option = document.createElement("option"); option.value = "Sin método de pago";
-      option.textContent = "Sin cuenta vinculada"; metodo.append(option);
-    }
+    const medios = campoMedio?.valores?.length ? campoMedio.valores : ["sinpe", "transferencia", "efectivo", "debito_cuenta", "otro"];
+    medios.forEach((medio) => {
+      const option = document.createElement("option"); option.value = medio; option.textContent = clean(medio);
+      option.selected = medio === campoMedio?.defecto; metodo.append(option);
+    });
     metodoLabel.append(metodo);
     const note = document.createElement("p"); note.className = "editor-nota";
     note.textContent = "Se guardará como un gasto manual normal asociado a este concepto.";
@@ -644,14 +556,13 @@
         monto: monto.value, moneda: row.moneda || "CRC", medio_pago: metodo.value,
         movimiento_clave: `pendiente:${Date.now()}`, pendiente_sincronizacion: true,
       };
-      const cuentaOrigen = metodo.selectedOptions[0]?.dataset.cuentaOrigen || "";
       dialog.close(); aplicarMovimientoPendiente(pendiente);
       mostrarAviso("Pago aplicado. Guardando en segundo plano…");
       (async () => {
         const response = await fetch(`${API_BASE}/conceptos/${encodeURIComponent(line.linea_id)}/pagar`, {
           method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
           body: JSON.stringify({ monto: monto.value, fecha: fecha.value,
-            medio_pago: metodo.value, cuenta_origen: cuentaOrigen,
+            medio_pago: metodo.value,
             periodo_inicio: data.periodo?.inicio }),
         });
         const result = await response.json();
@@ -659,7 +570,6 @@
         Object.assign(pendiente, result.movimiento);
         mostrarAviso("Pago guardado. Sincronizando en segundo plano…");
         vigilarSincronizacion(result.movimiento_clave);
-        window.dispatchEvent(new Event("fachavi:movimiento-editado"));
       })().catch((reason) => {
         aplicarMovimientoPendiente(pendiente, false);
         mostrarAviso(reason.message || "No pude guardar el pago; lo retiré de la vista.");
@@ -1044,13 +954,6 @@
     boton.textContent = "Preparando descargas…";
     try {
       const inicio = String(data.periodo?.inicio || "").slice(0, 10);
-      const respuesta = await fetch(
-        `${API_BASE}/cuentas?inicio=${encodeURIComponent(inicio)}`,
-        { headers: { Accept: "application/json" } },
-      );
-      const saldos = await respuesta.json();
-      if (!respuesta.ok || !saldos.ok) throw new Error(saldos.error || "No pude cargar los saldos del período.");
-
       // Un CSV con BOM y punto y coma se abre directamente en Excel con la
       // configuración regional de Costa Rica, sin alterar montos ni fechas.
       const filas = [];
@@ -1069,7 +972,6 @@
       fila(["Cliente", data.cliente?.nombre || ""]);
       fila(["Período", data.periodo?.etiqueta || inicio]);
       fila(["Generado", new Date().toLocaleString("es-CR")]);
-      fila(["Saldos calculados al", saldos.fecha || ""]);
       separador();
 
       if (summaryRow) {
@@ -1077,14 +979,6 @@
           Concepto: clean(clave), Valor: valorKpi(summaryRow[clave], clave, summary?.unidad),
         })));
       }
-
-      tabla("Saldos por cuenta", ["Cuenta", "Tipo", "Moneda", "Saldo CRC", "Saldo USD", "Corte inicial"],
-        (saldos.cuentas || []).map((cuenta) => ({
-          Cuenta: cuenta.nombre, Tipo: cuenta.tipo, Moneda: cuenta.moneda,
-          "Saldo CRC": format(cuenta.saldo_crc, "saldo", "CRC"),
-          "Saldo USD": cuenta.tipo === "credito" ? format(cuenta.saldo_usd, "saldo", "USD") : "",
-          "Corte inicial": cuenta.fecha_corte,
-        })));
 
       const movimientos = Array.isArray(data.movimientos) ? data.movimientos : [];
       tabla("Gastos y movimientos del mes", ["Fecha", "Categoría", "Concepto", "Descripción", "Método de pago", "Monto", "Moneda", "Monto original", "Moneda original", "Estado"],
@@ -1108,23 +1002,6 @@
             columna, valorKpi(valores[indice], columna, kpi.unidad),
           ]))));
       });
-
-      const movimientosCuenta = (saldos.cuentas || []).flatMap((cuenta) =>
-        (cuenta.movimientos || []).map((movimiento) => ({
-          Cuenta: cuenta.nombre, Fecha: movimiento.fecha, Descripción: movimiento.descripcion,
-          Monto: format(movimiento.monto, "monto", movimiento.moneda),
-          Moneda: movimiento.moneda, Origen: movimiento.origen,
-        })));
-      tabla("Movimientos incluidos en los saldos", ["Cuenta", "Fecha", "Descripción", "Monto", "Moneda", "Origen"], movimientosCuenta);
-
-      if (saldos.advertencias?.length || saldos.sin_vincular?.length) {
-        tabla("Notas y movimientos sin vincular", ["Tipo", "Detalle"], [
-          ...(saldos.advertencias || []).map((detalle) => ({ Tipo: "Advertencia", Detalle: detalle })),
-          ...(saldos.sin_vincular || []).map((movimiento) => ({
-            Tipo: "Sin cuenta vinculada", Detalle: `${movimiento.fecha} · ${movimiento.descripcion} · ${movimiento.medio_pago}`,
-          })),
-        ]);
-      }
 
       const periodoArchivo = String(data.periodo?.inicio || "mes").slice(0, 7);
       const csv = new Blob([`\ufeff${filas.join("\r\n")}`], { type: "text/csv;charset=utf-8" });
@@ -1320,8 +1197,7 @@
       }
       const valor = document.createElement("strong"); valor.textContent = format(movimiento.monto, "monto", moneda);
       item.append(detalle, valor);
-      if (movimiento.movimiento_clave && !movimiento.pendiente_sincronizacion && lines.length
-          && movimiento.origen !== "transferencia_presupuestada") {
+      if (movimiento.movimiento_clave && !movimiento.pendiente_sincronizacion && lines.length) {
         const editar = document.createElement("button"); editar.type = "button"; editar.className = "editar-movimiento";
         editar.textContent = "✎"; editar.title = "Editar clasificación";
         editar.setAttribute("aria-label", `Editar clasificación de ${nombre.textContent}`);

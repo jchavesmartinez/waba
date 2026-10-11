@@ -48,7 +48,7 @@
       dialog.close();
     });
     const cabecera = nodo("div", undefined, "presupuesto-editor-cabecera"); cabecera.append(titulo, cerrar);
-    const ayuda = nodo("p", "Edita el plan, no los pagos ni los saldos. Los meses anteriores quedan intactos. Los cambios de monto conservan la fecha final de la partida; las nuevas partidas siguen vigentes hasta que se cambien.", "descripcion");
+    const ayuda = nodo("p", "Edita el plan del presupuesto. Los meses anteriores quedan intactos. Los cambios de monto conservan la fecha final de la partida; las nuevas partidas siguen vigentes hasta que se cambien.", "descripcion");
     const mes = campo("month", [hoyCR(), new URLSearchParams(location.search).get("mes")?.slice(0, 7) || ""].sort().at(-1));
     mes.min = hoyCR(); mes.max = `${Number(hoyCR().slice(0, 4)) + 5}-12`;
     const controles = nodo("div", undefined, "presupuesto-editor-controles"); control(controles, "Aplicar desde el mes", mes);
@@ -160,7 +160,7 @@
       if (ocupado || !modificado()) return;
       if ([...importes.values()].some((i) => !i.reportValidity())) return;
       mostrarError(); preview.replaceChildren(nodo("h3", "Confirmar cambios del presupuesto"));
-      preview.append(nodo("p", `Aplicar desde ${mes.value}. El pasado, los movimientos registrados y los saldos bancarios no se modifican.`));
+      preview.append(nodo("p", `Aplicar desde ${mes.value}. Los meses anteriores y los movimientos registrados se conservan.`));
       const ul = nodo("ul");
       cambios().forEach((l) => ul.append(nodo("li", `${l.categoria} · ${l.concepto}: ${moneda(Number(l.monto_mensual))} → ${moneda(Number(importes.get(l.linea_id).value))}. Hasta ${l.vigencia_hasta?.slice(0, 10) || "sin fecha final"}.`)));
       nuevas.forEach((l) => ul.append(nodo("li", `Nueva ${l.tipo === "ingreso" ? "partida de ingresos" : "partida de gastos"}: ${l.categoria} · ${l.concepto}, ${moneda(Number(l.monto_mensual))} mensuales, sin fecha final.`)));

@@ -1,6 +1,6 @@
 """Editor del plan en su Google Sheet original, con vigencias y auditoría.
 
-Nunca escribe movimientos, reglas de clasificación ni saldos. Una modificación
+Nunca escribe movimientos ni reglas de clasificación. Una modificación
 divide la vigencia conservando el linea_id; Sheets aplica todo el lote de forma
 atómica. La revisión evita sobrescribir una hoja cambiada desde otra pestaña.
 """

@@ -31,7 +31,6 @@ import hmac
 import logging
 import threading
 import time
-from datetime import date, timedelta
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from html import escape
@@ -44,7 +43,7 @@ from starlette.concurrency import run_in_threadpool
 
 import config
 import registry
-from bot import (audio, correo, cuentas, dashboard, dashboard_edicion, entregas, memoria,
+from bot import (audio, correo, dashboard, dashboard_edicion, entregas, memoria,
                  menu, presupuesto, reporte_dashboard, whatsapp)
 from bot.responder import responder
 from bot.salida import Respuesta
@@ -468,30 +467,6 @@ def datos_dashboard(request: Request, tareas: BackgroundTasks, inicio: str = "")
         return JSONResponse({"ok": False, "error": "No pude cargar el dashboard."}, status_code=503)
 
 
-@app.get("/api/dashboard/cuentas")
-def cuentas_dashboard(request: Request, inicio: str = ""):
-    try:
-        _, cliente = _sesion_dashboard(request)
-        # La vista de cuentas y el CSV usan el mismo mes que el dashboard.
-        # Mantener vacío el parámetro conserva la lectura actual para clientes
-        # que abran directamente este endpoint.
-        hasta = None
-        desde = None
-        if inicio:
-            periodo = dashboard.periodo_desde_inicio(inicio)
-            desde = date.fromisoformat(periodo["inicio"])
-            hasta = date.fromisoformat(periodo["fin_exclusivo"]) - timedelta(days=1)
-        resultado = cuentas.obtener(cliente, hasta, desde=desde) if hasta else cuentas.obtener(cliente)
-        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
-    except dashboard.EnlaceInvalido:
-        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
-    except cuentas.ErrorCuentas as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    except Exception:  # noqa: BLE001
-        logger.exception("No se pudieron cargar los saldos")
-        return JSONResponse({"ok": False, "error": "No pude cargar los saldos."}, status_code=503)
-
-
 @app.get("/api/dashboard/reporte.pdf")
 def reporte_pdf_dashboard(request: Request, inicio: str = ""):
     """Entrega el reporte PDF del mismo período que está abierto en la vista."""
@@ -499,8 +474,7 @@ def reporte_pdf_dashboard(request: Request, inicio: str = ""):
         _, cliente = _sesion_dashboard(request)
         periodo = dashboard.periodo_desde_inicio(inicio or None)
         snapshot, _ = dashboard.obtener_snapshot(cliente, periodo)
-        hasta = date.fromisoformat(periodo["fin_exclusivo"]) - timedelta(days=1)
-        contenido = reporte_dashboard.crear_pdf(snapshot, cuentas.obtener(cliente, hasta))
+        contenido = reporte_dashboard.crear_pdf(snapshot)
         nombre = f"reporte-financiero-{periodo['inicio'][:7]}.pdf"
         return Response(
             content=contenido,
@@ -512,73 +486,9 @@ def reporte_pdf_dashboard(request: Request, inicio: str = ""):
         )
     except dashboard.EnlaceInvalido:
         return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
-    except cuentas.ErrorCuentas as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except Exception:  # noqa: BLE001
         logger.exception("No se pudo preparar el reporte PDF")
         return JSONResponse({"ok": False, "error": "No pude preparar el reporte PDF."}, status_code=503)
-
-
-@app.post("/api/dashboard/cuentas/operaciones")
-async def crear_operacion_cuenta(request: Request):
-    try:
-        _, cliente = _sesion_dashboard(request)
-        datos = await request.json()
-        resultado = await run_in_threadpool(cuentas.registrar_operacion, cliente, datos)
-        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
-    except dashboard.EnlaceInvalido:
-        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
-    except cuentas.ErrorCuentas as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    except Exception:  # noqa: BLE001
-        logger.exception("No se pudo guardar la operación de cuenta")
-        return JSONResponse({"ok": False, "error": "No pude guardar la operación."}, status_code=503)
-
-
-@app.delete("/api/dashboard/cuentas/operaciones/{operacion_id}")
-def anular_operacion_cuenta(operacion_id: str, request: Request):
-    try:
-        _, cliente = _sesion_dashboard(request)
-        return JSONResponse(cuentas.anular_operacion(cliente, operacion_id),
-                            headers={"Cache-Control": "no-store"})
-    except dashboard.EnlaceInvalido:
-        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
-    except cuentas.ErrorCuentas as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    except Exception:  # noqa: BLE001
-        logger.exception("No se pudo anular la operación de cuenta")
-        return JSONResponse({"ok": False, "error": "No pude anular la operación."}, status_code=503)
-
-
-@app.post("/api/dashboard/cuentas/ingresos-recurrentes")
-async def guardar_ingreso_recurrente(request: Request):
-    try:
-        _, cliente = _sesion_dashboard(request)
-        datos = await request.json()
-        resultado = await run_in_threadpool(cuentas.guardar_regla, cliente, datos)
-        return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
-    except dashboard.EnlaceInvalido:
-        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
-    except cuentas.ErrorCuentas as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    except Exception:  # noqa: BLE001
-        logger.exception("No se pudo guardar el ingreso recurrente")
-        return JSONResponse({"ok": False, "error": "No pude guardar la recurrencia."}, status_code=503)
-
-
-@app.delete("/api/dashboard/cuentas/ingresos-recurrentes/{regla_id}")
-def desactivar_ingreso_recurrente(regla_id: str, request: Request):
-    try:
-        _, cliente = _sesion_dashboard(request)
-        return JSONResponse(cuentas.desactivar_regla(cliente, regla_id),
-                            headers={"Cache-Control": "no-store"})
-    except dashboard.EnlaceInvalido:
-        return JSONResponse({"ok": False, "error": "Sesión vencida."}, status_code=401)
-    except cuentas.ErrorCuentas as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    except Exception:  # noqa: BLE001
-        logger.exception("No se pudo desactivar la recurrencia")
-        return JSONResponse({"ok": False, "error": "No pude desactivar la recurrencia."}, status_code=503)
 
 
 @app.get("/api/dashboard/chat")
@@ -677,7 +587,6 @@ async def reclasificar_movimiento_app(request: Request, tareas: BackgroundTasks)
         resultado = dashboard_edicion.reclasificar(
             token, datos.get("movimiento_clave"), datos.get("linea_id"),
             datos.get("medio_pago"), datos.get("alcance", "individual"), datos.get("monto"),
-            **({"cuenta_id": datos["cuenta_id"]} if "cuenta_id" in datos else {}),
         )
         tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(sesion["cid"]))
         return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
@@ -716,7 +625,6 @@ async def crear_movimiento_app(request: Request, tareas: BackgroundTasks):
         )
         resultado = dashboard_edicion.crear_movimiento(
             token, datos.get("valores"), periodo=periodo,
-            **({"cuenta_id": datos["cuenta_id"]} if "cuenta_id" in datos else {}),
         )
         tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(sesion["cid"]))
         return JSONResponse(resultado, headers={"Cache-Control": "no-store"})
@@ -739,8 +647,6 @@ async def pagar_concepto_app(linea_id: str, request: Request, tareas: Background
         opciones_pago = {}
         if "medio_pago" in datos:
             opciones_pago["medio_pago"] = datos.get("medio_pago")
-        if "cuenta_origen" in datos:
-            opciones_pago["cuenta_origen"] = datos.get("cuenta_origen")
         resultado = dashboard_edicion.registrar_pago(
             token, linea_id, datos.get("monto"), datos.get("fecha"), **opciones_pago,
         )
@@ -874,7 +780,6 @@ async def reclasificar_movimiento_dashboard(token: str, request: Request,
             token, datos.get("movimiento_clave"), datos.get("linea_id"),
             datos.get("medio_pago"), datos.get("alcance", "individual"),
             datos.get("monto"),
-            **({"cuenta_id": datos["cuenta_id"]} if "cuenta_id" in datos else {}),
         )
         # La escritura fuente ya fue confirmada. La sincronización pesada va
         # después de responder para que el navegador pueda actualizar su vista
@@ -934,7 +839,6 @@ async def crear_movimiento_dashboard(token: str, request: Request, tareas: Backg
             raise dashboard_edicion.ErrorReclasificacion("la solicitud de creación no es válida")
         resultado = dashboard_edicion.crear_movimiento(
             token, datos.get("valores"),
-            **({"cuenta_id": datos["cuenta_id"]} if "cuenta_id" in datos else {}),
         )
         payload, _ = dashboard.validar_enlace(token)
         tareas.add_task(dashboard_edicion.procesar_reconstrucciones_cliente, str(payload["cid"]))
@@ -966,8 +870,6 @@ async def pagar_concepto_dashboard(token: str, linea_id: str, request: Request,
         opciones_pago = {}
         if "medio_pago" in datos:
             opciones_pago["medio_pago"] = datos.get("medio_pago")
-        if "cuenta_origen" in datos:
-            opciones_pago["cuenta_origen"] = datos.get("cuenta_origen")
         resultado = dashboard_edicion.registrar_pago(
             token, linea_id, datos.get("monto"), datos.get("fecha"), **opciones_pago,
         )

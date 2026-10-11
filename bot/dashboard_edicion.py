@@ -14,7 +14,6 @@ import json
 import re
 import threading
 import time
-from dataclasses import replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
@@ -488,14 +487,7 @@ def _validar_medio_pago(valor: object) -> str:
 
 def _medio_pago_para_registrar_pago(campo: edicion.CampoEdicion | None,
                                     medio_pago: str) -> str:
-    """Convierte una cuenta elegida en un método permitido por la fuente.
-
-    El dashboard usa el número final o el id de la cuenta para poder asociar
-    visualmente el pago a la cuenta elegida. Algunas hojas de gastos manuales,
-    sin embargo, restringen ``medio_pago`` a opciones genéricas. En ese caso
-    el valor canónico ``debito_cuenta`` conserva la semántica y evita que la
-    validación de la hoja rechace el pago.
-    """
+    """Adapta el medio de pago a las opciones permitidas por la fuente."""
     if campo is None or campo.tipo != "lista":
         return medio_pago
     permitidos = {valor.casefold(): valor for valor in campo.valores}
@@ -505,18 +497,6 @@ def _medio_pago_para_registrar_pago(campo: edicion.CampoEdicion | None,
         if alternativa in permitidos:
             return permitidos[alternativa]
     return medio_pago
-
-
-def _descripcion_pago(concepto: object, cuenta_origen: object) -> str:
-    """Genera una descripción corta que conserva la cuenta elegida."""
-    base = f"Pago - {str(concepto or '').strip()}"
-    cuenta = str(cuenta_origen or "").strip()
-    if not cuenta:
-        return base
-    if len(cuenta) > _MEDIO_PAGO_MAXIMO or any(ord(caracter) < 32 for caracter in cuenta):
-        raise ErrorReclasificacion("la cuenta de origen no es válida")
-    sufijo = f" · {cuenta}"
-    return f"{base[:max(0, 180 - len(sufijo))]}{sufijo}"
 
 
 def _reconstruir(cliente: dict) -> None:
@@ -851,8 +831,7 @@ def proyecciones_pendientes(cliente: dict) -> list[dict]:
 
 def reclasificar(token: str, movimiento_clave: object, linea_id: object,
                  medio_pago: object = None, alcance: object = "individual",
-                 monto: object = None, *, cuenta_id: object = None,
-                 ) -> dict:
+                 monto: object = None) -> dict:
     """Aplica un override puntual o una regla general de metadata."""
     _, cliente = dashboard.validar_enlace(token)
     clave = str(movimiento_clave or "").strip()
@@ -870,8 +849,6 @@ def reclasificar(token: str, movimiento_clave: object, linea_id: object,
     medio = _validar_medio_pago(
         movimiento.get("medio_pago") if medio_pago is None else medio_pago
     )
-    if cuenta_id is not None:
-        medio = _medio_con_cuenta(cliente, cuenta_id, medio)
     monto_visible = _monto_editable(monto) if monto is not None else None
     datos = metadata.leer(cliente)
     capa, origen = _modelo_origen(datos, movimiento)
@@ -961,30 +938,7 @@ def _politica_creacion_manual(cliente: dict) -> edicion.PoliticaEdicion:
     return politica
 
 
-def _medio_con_cuenta(cliente: dict, cuenta_id: object, medio_pago: object) -> str:
-    """Valida la cuenta del cliente y conserva SINPE/efectivo/etc. como detalle.
-
-    El prefijo sigue siendo la identidad bancaria que usa el saldo; no creamos
-    un segundo débito ni modificamos el esquema de la hoja manual.
-    """
-    from bot import cuentas
-    identificador = str(cuenta_id or "").strip()
-    if not identificador or "|" in identificador:
-        raise ErrorReclasificacion("seleccione la cuenta desde la que pagó")
-    canonico = cuentas.resolver_medio_de_cuenta(cliente, f"cuenta:{identificador}")
-    if not canonico:
-        raise ErrorReclasificacion("la cuenta elegida no está activa o no pertenece a este cliente")
-    detalle = str(medio_pago or "").strip()
-    # Al corregir una cuenta ya vinculada, mantener sólo el detalle del medio.
-    if detalle.startswith("cuenta:"):
-        detalle = detalle.partition("|")[2].strip()
-    if "|" in detalle:
-        raise ErrorReclasificacion("el medio de pago no es válido")
-    return _validar_medio_pago(f"{canonico}|{detalle}" if detalle else canonico)
-
-
-def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None,
-                     permitir_medio_cuenta: bool = False, cuenta_id: object = None) -> dict:
+def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None) -> dict:
     """Crea un gasto manual y difiere sólo la materialización pesada.
 
     La fila se confirma primero en su Google Sheet normal; nunca se usa un
@@ -995,32 +949,6 @@ def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None
         raise ErrorReclasificacion("la solicitud de creación no es válida")
     politica = _politica_creacion_manual(cliente)
     entrada = {str(k): v for k, v in valores.items() if isinstance(k, str)}
-
-    if cuenta_id is not None:
-        campo_medio = next((campo for campo in politica.campos.values()
-                            if campo.nombre.casefold() in {"medio_pago", "metodo_pago", "método_pago"}
-                            and not campo.calculado), None)
-        if not campo_medio:
-            raise ErrorReclasificacion("la creación manual no permite vincular una cuenta")
-        # Validar el medio genérico contra metadata antes de ampliar la lista
-        # únicamente para el identificador bancario comprobado en el servidor.
-        medio = str(entrada.get(campo_medio.nombre) or "").strip()
-        if medio and campo_medio.tipo == "lista" and medio not in campo_medio.valores:
-            raise ErrorReclasificacion("seleccione un medio de pago válido")
-        entrada[campo_medio.nombre] = _medio_con_cuenta(cliente, cuenta_id, medio)
-        permitir_medio_cuenta = True
-
-    if permitir_medio_cuenta:
-        campo_medio = next((campo for campo in politica.campos.values()
-                            if campo.nombre.casefold() in {"medio_pago", "metodo_pago", "método_pago"}), None)
-        if campo_medio and campo_medio.tipo == "lista":
-            # El identificador viene de una cuenta activa validada en
-            # ``registrar_pago``. La lista genérica de la hoja no lo contiene,
-            # pero sí admite guardarlo y los saldos lo usan para vincularlo.
-            politica = replace(politica, campos={
-                **politica.campos,
-                campo_medio.nombre: replace(campo_medio, tipo="texto", valores=()),
-            })
 
     # La relación presupuesto es siempre validada en el servidor. El navegador
     # sólo elige entre líneas que ya recibió; no puede inventar una categoría
@@ -1094,10 +1022,10 @@ def crear_movimiento(token: str, valores: object, *, periodo: dict | None = None
 
 
 def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: object,
-                   medio_pago: object = None, cuenta_origen: object = None) -> dict:
+                   medio_pago: object = None) -> dict:
     """Registra un pago como movimiento manual ordinario.
 
-    No existe tabla ni estado de pagos: el gasto y el saldo continúan siendo la
+    No existe tabla ni estado de pagos: el gasto continúa siendo la
     suma de movimientos asociados a la línea del presupuesto. Esta función solo
     prepara los valores seguros y delega la escritura al flujo normal de
     ``crear_movimiento``.
@@ -1133,26 +1061,15 @@ def registrar_pago(token: str, linea_id: object, monto: object, fecha_pago: obje
                         if campo.nombre.casefold() in {"descripcion", "descripción"}
                         and not campo.calculado), None)
     if descripcion:
-        valores[descripcion.nombre] = _descripcion_pago(destino["concepto"], cuenta_origen)
-    permitir_medio_cuenta = False
+        valores[descripcion.nombre] = f"Pago - {destino['concepto']}"[:180]
     if medio_pago is not None:
         if not campo_medio:
             raise ErrorReclasificacion("la creación manual no permite elegir método de pago")
         medio = _validar_medio_pago(medio_pago)
         if campo_medio.tipo == "lista":
-            # Importación local: ``cuentas`` ya depende de este módulo para
-            # las operaciones del panel y así evitamos un ciclo al importar.
-            from bot import cuentas
-            medio_cuenta = cuentas.resolver_medio_de_cuenta(cliente, medio)
-            if medio_cuenta:
-                valores[campo_medio.nombre] = medio_cuenta
-                permitir_medio_cuenta = True
-            else:
-                valores[campo_medio.nombre] = _medio_pago_para_registrar_pago(campo_medio, medio)
+            valores[campo_medio.nombre] = _medio_pago_para_registrar_pago(campo_medio, medio)
         else:
             valores[campo_medio.nombre] = medio
     # ``crear_movimiento`` conserva todas las validaciones, defaults de moneda,
     # escritura en Google Sheets, sincronización y reconstrucción existentes.
-    return crear_movimiento(
-        token, valores, periodo=periodo, permitir_medio_cuenta=permitir_medio_cuenta,
-    )
+    return crear_movimiento(token, valores, periodo=periodo)

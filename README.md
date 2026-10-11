@@ -421,7 +421,7 @@ El botón **Administrar presupuesto** abre un editor de ingresos y gastos del
 plan en la pestaña `presupuesto` de la fuente Google Sheets del cliente. Permite
 editar montos y crear categorías con su primera subpartida (o añadir subpartidas
 a una categoría existente), incluyendo montos cero. No mueve dinero ni modifica
-pagos, cuentas, reglas de clasificación o identificadores de partidas existentes.
+pagos, reglas de clasificación o identificadores de partidas existentes.
 
 - Elegir el mes actual o uno futuro, preparar cambios y revisar su impacto antes
   de **Confirmar y guardar**. No se permite cambiar meses pasados.

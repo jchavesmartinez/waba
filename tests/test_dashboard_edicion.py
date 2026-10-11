@@ -269,8 +269,7 @@ def test_reclasificar_manual_actualiza_monto_en_misma_fila(monkeypatch):
     assert resultado["monto"] == "2500"
 
 
-def test_editar_gasto_vincula_mismart_sin_crear_otro_movimiento(monkeypatch):
-    from bot import cuentas
+def test_editar_gasto_conserva_sinpe_sin_crear_otro_movimiento(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     guardados, trabajos = [], []
     monkeypatch.setattr(dashboard_edicion.dashboard, "validar_enlace", lambda _: ({}, cliente))
@@ -281,16 +280,15 @@ def test_editar_gasto_vincula_mismart_sin_crear_otro_movimiento(monkeypatch):
     monkeypatch.setattr(dashboard_edicion.metadata, "leer", lambda _: {
         "movimientos_canonicos": [{"modelo_id": "movimientos", "fuente": "manual", "medio_pago": "medio_pago"}]})
     monkeypatch.setattr(dashboard_edicion, "_modelo_origen", lambda *_: ("raw", {"tabla_origen": "gastos_manuales"}))
-    monkeypatch.setattr(cuentas, "resolver_medio_de_cuenta", lambda _c, medio: medio if medio == "cuenta:mismart" else None)
     monkeypatch.setattr(dashboard_edicion, "_actualizar_movimiento_manual", lambda *args: guardados.append(args) or "googledrive_db")
     monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *args: trabajos.append(args) or 2)
-    resultado = dashboard_edicion.reclasificar("token", "manual:MAN-DISCOS", "gas_mantenimiento_tdc", "sinpe", cuenta_id="mismart")
+    resultado = dashboard_edicion.reclasificar("token", "manual:MAN-DISCOS", "gas_mantenimiento_tdc", "sinpe")
     assert len(guardados) == 1
-    assert guardados[0][2:5] == ("MAN-DISCOS", "gas_mantenimiento_tdc", "cuenta:mismart|sinpe")
+    assert guardados[0][2:5] == ("MAN-DISCOS", "gas_mantenimiento_tdc", "sinpe")
     assert guardados[0][5] is None  # No se cambia el monto.
     assert trabajos[0][3]["tipo"] == "editar"
-    assert trabajos[0][3]["medio_pago"] == "cuenta:mismart|sinpe"
-    assert resultado["medio_pago"] == "cuenta:mismart|sinpe"
+    assert trabajos[0][3]["medio_pago"] == "sinpe"
+    assert resultado["medio_pago"] == "sinpe"
 
 
 def test_reclasificar_regla_guarda_metadata_por_comercio(monkeypatch):
@@ -497,8 +495,7 @@ def test_lote_verifica_todas_las_fuentes_con_una_sincronizacion(monkeypatch):
     assert capturado == {"cliente_filtro": "cliente_a", "forzar": True}
 
 
-def test_crear_gasto_vincula_cuenta_y_conserva_sinpe_con_lista_generica(monkeypatch):
-    from bot import cuentas
+def test_crear_gasto_conserva_sinpe_con_lista_generica(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     politica = replace(_politica_creacion(), campos={
         **_politica_creacion().campos,
@@ -510,32 +507,16 @@ def test_crear_gasto_vincula_cuenta_y_conserva_sinpe_con_lista_generica(monkeypa
     monkeypatch.setattr(dashboard_edicion.catalogo, "construir_contexto", lambda _: object())
     monkeypatch.setattr(dashboard_edicion, "_validar_linea", lambda *_: {
         "linea_id": "gas_comedera", "categoria": "Alimentacion", "concepto": "Comedera"})
-    monkeypatch.setattr(cuentas, "resolver_medio_de_cuenta", lambda _c, medio: medio if medio == "cuenta:mismart" else None)
     monkeypatch.setattr(dashboard_edicion.escritura_google_sheets, "aplicar_confirmado",
                         lambda _c, _p, _a, valores: recibido.update(valores) or {"clave": "MAN-DISCOS"})
     monkeypatch.setattr(dashboard_edicion, "_encolar_reconstruccion", lambda *_: 1)
     resultado = dashboard_edicion.crear_movimiento("token", {
         "fecha": "2026-10-03", "descripcion": "Discos", "monto": "192500",
         "linea_presupuesto_id": "gas_comedera", "medio_pago": "sinpe",
-    }, cuenta_id="mismart")
-    assert recibido["medio_pago"] == "cuenta:mismart|sinpe"
+    })
+    assert recibido["medio_pago"] == "sinpe"
     assert recibido["monto"] == "192500"
-    assert resultado["movimiento"]["medio_pago"] == "cuenta:mismart|sinpe"
-
-
-@pytest.mark.parametrize("cuenta_id", ["", "ajena", "mismart|sinpe"])
-def test_cuenta_origen_invalida_no_guarda_el_gasto(monkeypatch, cuenta_id):
-    from bot import cuentas
-    cliente = {"cliente_id": "cliente_a"}
-    monkeypatch.setattr(cuentas, "resolver_medio_de_cuenta", lambda *_: None)
-    with pytest.raises(dashboard_edicion.ErrorReclasificacion, match="cuenta"):
-        dashboard_edicion._medio_con_cuenta(cliente, cuenta_id, "sinpe")
-
-
-def test_cambiar_cuenta_conserva_el_medio_sin_duplicar_prefijo(monkeypatch):
-    from bot import cuentas
-    monkeypatch.setattr(cuentas, "resolver_medio_de_cuenta", lambda _c, medio: medio)
-    assert dashboard_edicion._medio_con_cuenta({}, "mismart", "cuenta:bac_salario|sinpe") == "cuenta:mismart|sinpe"
+    assert resultado["movimiento"]["medio_pago"] == "sinpe"
 
 
 def test_registrar_pago_reutiliza_creacion_manual_con_linea_fecha_y_monto(monkeypatch):
@@ -569,7 +550,7 @@ def test_registrar_pago_reutiliza_creacion_manual_con_linea_fecha_y_monto(monkey
     }
 
 
-def test_registrar_pago_envia_cuenta_elegida_al_movimiento_manual(monkeypatch):
+def test_registrar_pago_envia_medio_elegido_al_movimiento_manual(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     recibido = {}
     politica = _politica_creacion()
@@ -587,8 +568,8 @@ def test_registrar_pago_envia_cuenta_elegida_al_movimiento_manual(monkeypatch):
         recibido.update(valores) or {"ok": True}))
 
     dashboard_edicion.registrar_pago("token", "gas_cuota", "75000", "2026-09-30",
-                                      "cuenta:mismart")
-    assert recibido["medio_pago"] == "cuenta:mismart"
+                                      "sinpe")
+    assert recibido["medio_pago"] == "sinpe"
     assert recibido["monto"] == "75000"
 
 
@@ -610,19 +591,17 @@ def test_registrar_pago_usa_debito_cuenta_si_la_hoja_restringe_el_medio(monkeypa
         "linea_id": "gas_cuota", "categoria": "Vivienda", "concepto": "Cuota", "pagable": True,
     })
     monkeypatch.setattr(dashboard_edicion.edicion, "politica_para", lambda *_: politica)
-    from bot import cuentas
-    monkeypatch.setattr(cuentas, "resolver_medio_de_cuenta", lambda *_: None)
     monkeypatch.setattr(dashboard_edicion, "crear_movimiento", lambda _, valores, **kw: (
         recibido.update(valores) or {"ok": True}))
 
     dashboard_edicion.registrar_pago(
-        "token", "gas_cuota", "75000", "2026-09-30", "cuenta:mismart", "CR - Salario Walmart")
+        "token", "gas_cuota", "75000", "2026-09-30", "Tarjeta",)
 
     assert recibido["medio_pago"] == "debito_cuenta"
-    assert recibido["descripcion"] == "Pago - Cuota · CR - Salario Walmart"
+    assert recibido["descripcion"] == "Pago - Cuota"
 
 
-def test_registrar_pago_vincula_la_cuenta_elegida_aun_con_lista_de_medios(monkeypatch):
+def test_registrar_pago_respeta_lista_de_medios(monkeypatch):
     cliente = {"cliente_id": "cliente_a"}
     recibido = {}
     politica = _politica_creacion()
@@ -637,16 +616,14 @@ def test_registrar_pago_vincula_la_cuenta_elegida_aun_con_lista_de_medios(monkey
         "linea_id": "gas_cuota", "categoria": "Vivienda", "concepto": "Cuota", "pagable": True,
     })
     monkeypatch.setattr(dashboard_edicion.edicion, "politica_para", lambda *_: politica)
-    from bot import cuentas
-    monkeypatch.setattr(cuentas, "resolver_medio_de_cuenta", lambda *_: "cuenta:bac_salario")
     monkeypatch.setattr(dashboard_edicion, "crear_movimiento", lambda _, valores, **kw: (
         recibido.update(valores=valores, **kw) or {"ok": True}))
 
     dashboard_edicion.registrar_pago(
-        "token", "gas_cuota", "75000", "2026-09-30", "cuenta:bac_salario", "CR - Salario Walmart")
+        "token", "gas_cuota", "75000", "2026-09-30", "debito_cuenta")
 
-    assert recibido["valores"]["medio_pago"] == "cuenta:bac_salario"
-    assert recibido["permitir_medio_cuenta"] is True
+    assert recibido["valores"]["medio_pago"] == "debito_cuenta"
+    assert set(recibido) == {"valores", "periodo"}
 
 
 def test_registrar_pago_rechaza_fecha_fuera_del_mes(monkeypatch):

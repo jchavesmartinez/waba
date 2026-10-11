@@ -34,7 +34,7 @@ def _fila_objeto(kpi: dict, fila: list[object]) -> dict[str, object]:
     }
 
 
-def crear_pdf(snapshot: dict, saldos: dict) -> bytes:
+def crear_pdf(snapshot: dict) -> bytes:
     """Crea un reporte PDF multipágina, apto para imprimir o compartir."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import landscape, letter
@@ -74,8 +74,7 @@ def crear_pdf(snapshot: dict, saldos: dict) -> bytes:
             escape(
                 f"{cliente.get('nombre') or 'Cliente'} | "
                 f"{periodo.get('etiqueta') or periodo.get('inicio') or ''} | "
-                f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')} | "
-                f"Saldos calculados al: {saldos.get('fecha') or ''}"
+                f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
             ),
             subtitulo,
         ),
@@ -115,13 +114,6 @@ def crear_pdf(snapshot: dict, saldos: dict) -> bytes:
             for clave, valor in datos_resumen.items()
         ])
 
-    agregar_tabla("Saldos por cuenta", ["Cuenta", "Tipo", "Moneda", "Saldo CRC", "Saldo USD", "Corte inicial"], [
-        [cuenta.get("nombre"), cuenta.get("tipo"), cuenta.get("moneda"),
-         cuenta.get("saldo_crc"), cuenta.get("saldo_usd") if cuenta.get("tipo") == "credito" else "",
-         cuenta.get("fecha_corte")]
-        for cuenta in saldos.get("cuentas", [])
-    ])
-
     agregar_tabla("Gastos y movimientos del mes", [
         "Fecha", "Categoría", "Concepto", "Descripción", "Método de pago", "Monto", "Moneda", "Estado",
     ], [
@@ -138,24 +130,6 @@ def crear_pdf(snapshot: dict, saldos: dict) -> bytes:
             continue
         columnas = [str(columna).replace("_", " ").title() for columna in kpi.get("columnas", [])]
         agregar_tabla(kpi.get("nombre") or str(kpi.get("kpi") or "Detalle"), columnas, kpi["filas"])
-
-    movimientos_cuenta = []
-    for cuenta in saldos.get("cuentas", []):
-        for movimiento in cuenta.get("movimientos", []):
-            movimientos_cuenta.append([
-                cuenta.get("nombre"), movimiento.get("fecha"), movimiento.get("descripcion"),
-                movimiento.get("monto"), movimiento.get("moneda"), movimiento.get("origen"),
-            ])
-    agregar_tabla("Movimientos incluidos en los saldos", [
-        "Cuenta", "Fecha", "Descripción", "Monto", "Moneda", "Origen",
-    ], movimientos_cuenta)
-
-    notas = [["Advertencia", nota] for nota in saldos.get("advertencias", [])]
-    notas.extend([
-        ["Sin cuenta vinculada", f"{movimiento.get('fecha')} | {movimiento.get('descripcion')} | {movimiento.get('medio_pago')}"]
-        for movimiento in saldos.get("sin_vincular", [])
-    ])
-    agregar_tabla("Notas", ["Tipo", "Detalle"], notas)
 
     if len(historia) == 2:
         historia.append(Spacer(1, 12))
